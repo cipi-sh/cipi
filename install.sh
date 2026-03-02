@@ -289,7 +289,9 @@ EOF
         <div class="host-text" id="host-label"></div>
     </div>
     <script>
-        document.getElementById('host-label').textContent = window.location.hostname + ' is not configured';
+        var h = window.location.hostname;
+        var isIP = /^(\d{1,3}\.){3}\d{1,3}$/.test(h) || /^[0-9a-fA-F:]+$/.test(h);
+        document.getElementById('host-label').textContent = isIP ? h : h + ' is not configured';
     </script>
 </body>
 </html>

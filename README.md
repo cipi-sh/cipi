@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/andreapollastri/cipi/latest/logo.svg" width="120" alt="Cipi">
+  <img src="https://raw.githubusercontent.com/andreapollastri/cipi/latest/logo.png" width="120" alt="Cipi">
 </p>
 
 <h1 align="center">Cipi</h1>

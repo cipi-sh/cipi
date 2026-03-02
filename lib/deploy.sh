@@ -20,7 +20,17 @@ deploy_command() {
 _deploy_run() {
     local app="$1" home="/home/${app}"
     local df="${home}/.deployer/deploy.php"
-    [[ ! -f "$df" ]] && { error "Deployer config not found: $df"; exit 1; }
+    if [[ ! -f "$df" ]]; then
+        step "Creating deployer config..."
+        source "${CIPI_LIB}/app.sh"
+        local repo branch php_ver
+        repo=$(app_get "$app" repository)
+        branch=$(app_get "$app" branch)
+        php_ver=$(app_get "$app" php)
+        [[ -z "$repo" || -z "$php_ver" ]] && { error "App config incomplete (repository/php). Run: cipi app edit $app"; exit 1; }
+        _create_deployer_config "$app" "${repo}" "${branch:-main}" "$php_ver"
+        success "Deployer config created"
+    fi
 
     info "Deploying '${app}'..."
     echo ""

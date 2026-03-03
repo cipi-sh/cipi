@@ -17,7 +17,7 @@ php_command() {
 
 _php_install() {
     local v="${1:-}"
-    [[ -z "$v" ]] && { error "Usage: cipi php install <8.4|8.5>"; exit 1; }
+    [[ -z "$v" ]] && { error "Usage: cipi php install <7.4|8.0|8.1|8.2|8.3|8.4|8.5>"; exit 1; }
     validate_php_version "$v" || { error "Invalid: $v"; exit 1; }
     php_is_installed "$v" && { info "PHP $v already installed"; return; }
     step "Adding PPA..."
@@ -65,7 +65,7 @@ _php_remove() {
 
 _php_list() {
     echo -e "\n${BOLD}PHP Versions${NC}"
-    for v in 8.4 8.5; do
+    for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
         if php_is_installed "$v"; then
             local st="${RED}stopped" c="${RED}"
             systemctl is-active --quiet "php${v}-fpm" 2>/dev/null && st="running" && c="${GREEN}"

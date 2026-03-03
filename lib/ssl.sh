@@ -33,7 +33,7 @@ _ssl_install() {
 
     local domains="-d ${d}"
     local aliases
-    aliases=$(jq -r --arg a "$app" '.[$a].aliases[]?//empty' "${CIPI_CONFIG}/apps.json" 2>/dev/null || true)
+    aliases=$(jq -r --arg a "$app" '.[$a].aliases // [] | .[]' "${CIPI_CONFIG}/apps.json" 2>/dev/null || true)
     while read -r a; do
         [[ -n "$a" ]] && domains+=" -d ${a}"
     done <<< "${aliases:-}"

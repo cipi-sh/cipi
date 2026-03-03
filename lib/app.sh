@@ -20,7 +20,7 @@ app_create() {
     # Validate
     validate_username "$app_user"  || { error "Invalid username '${app_user}'"; exit 1; }
     validate_domain "$domain"      || { error "Invalid domain '${domain}'"; exit 1; }
-    validate_php_version "$php_ver" || { error "Invalid PHP version. Use: 8.4 8.5"; exit 1; }
+    validate_php_version "$php_ver" || { error "Invalid PHP version. Use: 7.4 8.0 8.1 8.2 8.3 8.4 8.5"; exit 1; }
     php_is_installed "$php_ver"    || { error "PHP $php_ver not installed. Run: cipi php install $php_ver"; exit 1; }
     app_exists "$app_user"         && { error "App '${app_user}' already exists"; exit 1; }
     id "$app_user" &>/dev/null     && { error "User '${app_user}' already exists"; exit 1; }
@@ -387,7 +387,7 @@ alias_list() {
     app_exists "$app" || { error "Not found"; exit 1; }
     echo -e "\n${BOLD}Domains for '${app}'${NC}"
     echo -e "  Primary: ${CYAN}$(app_get "$app" domain)${NC}"
-    jq -r --arg a "$app" '.[$a].aliases[]?//empty' "${CIPI_CONFIG}/apps.json" | while read -r a; do
+    jq -r --arg a "$app" '.[$a].aliases // [] | .[]' "${CIPI_CONFIG}/apps.json" | while read -r a; do
         echo -e "  Alias:   ${CYAN}${a}${NC}"
     done; echo ""
 }
@@ -428,7 +428,7 @@ _create_nginx_vhost() {
     if [[ $# -ge 4 ]]; then
         aliases="${4:-}"
     else
-        aliases=$(jq -r --arg a "$app" '.[$a].aliases[]?//empty' "${CIPI_CONFIG}/apps.json" 2>/dev/null || true)
+        aliases=$(jq -r --arg a "$app" '.[$a].aliases // [] | .[]' "${CIPI_CONFIG}/apps.json" 2>/dev/null || true)
     fi
     [[ -n "$aliases" ]] && names="$domain $aliases"
     cat > "/etc/nginx/sites-available/${app}" <<EOF

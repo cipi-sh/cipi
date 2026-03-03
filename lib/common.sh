@@ -31,7 +31,7 @@ validate_domain() {
 }
 
 validate_php_version() {
-    case "$1" in 8.4|8.5) return 0 ;; *) return 1 ;; esac
+    case "$1" in 7.4|8.0|8.1|8.2|8.3|8.4|8.5) return 0 ;; *) return 1 ;; esac
 }
 
 php_is_installed() { dpkg -l "php${1}-fpm" &>/dev/null 2>&1; }

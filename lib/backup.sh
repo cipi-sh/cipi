@@ -77,8 +77,9 @@ _bk_run() {
         local ok=true
         step "Backup '${app}'..."
 
-        mysqldump -u root -p"$dbr" --single-transaction "$app" 2>"${d}/db.err" | gzip >"${d}/db.sql.gz"
-        if [[ ${PIPESTATUS[0]} -ne 0 ]] || [[ -s "${d}/db.err" ]]; then
+        mariadb-dump -u root -p"$dbr" --single-transaction "$app" 2>"${d}/db.err" | gzip >"${d}/db.sql.gz"
+        local dump_rc=${PIPESTATUS[0]}
+        if [[ $dump_rc -ne 0 ]]; then
             error "  DB dump failed:"; sed 's/^/    /' "${d}/db.err"; ok=false
         fi
         rm -f "${d}/db.err"

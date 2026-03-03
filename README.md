@@ -382,13 +382,29 @@ cipi db delete analytics
 
 ### S3 backups
 
-Backup databases and storage to Amazon S3 (or any S3-compatible provider):
+Backup databases and storage to Amazon S3 or any S3-compatible provider (Hetzner, DigitalOcean Spaces, Backblaze B2, MinIO, etc.):
 
 ```bash
 # One-time setup
 cipi backup configure
-# → asks for AWS Access Key, Secret, Bucket, Region
+# → Access Key ID
+# → Secret Access Key
+# → Bucket name
+# → Region
+# → Endpoint URL  (leave empty for AWS; set for other providers)
+```
 
+Endpoint URL examples by provider:
+
+| Provider            | Endpoint URL                                      |
+| ------------------- | ------------------------------------------------- |
+| AWS S3              | *(leave empty)*                                   |
+| Hetzner             | `https://fsn1.your-objectstorage.com`             |
+| DigitalOcean Spaces | `https://<region>.digitaloceanspaces.com`         |
+| Backblaze B2        | `https://s3.<region>.backblazeb2.com`             |
+| MinIO               | `https://your-minio-host`                         |
+
+```bash
 # Backup everything
 cipi backup run
 

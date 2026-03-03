@@ -1,6 +1,6 @@
 #!/bin/bash
 #############################################
-# Cipi — Backup (S3)
+# Cipi — Backup (S3 / S3-compatible)
 #############################################
 
 backup_command() {
@@ -26,19 +26,49 @@ _ensure_awscli() {
     fi
 }
 
+# Wrapper: adds --endpoint-url when a custom endpoint is configured
+_aws_s3() {
+    local cf="${CIPI_CONFIG}/backup.json"
+    local ep=""
+    [[ -f "$cf" ]] && ep=$(jq -r '.endpoint_url // ""' "$cf")
+    if [[ -n "$ep" ]]; then
+        aws s3 --endpoint-url "$ep" "$@"
+    else
+        aws s3 "$@"
+    fi
+}
+
 _bk_configure() {
     _ensure_awscli
     local cf="${CIPI_CONFIG}/backup.json"
-    local ck="" cs="" cb="" cr=""
-    [[ -f "$cf" ]] && { ck=$(jq -r '.aws_key//"" ' "$cf"); cs=$(jq -r '.aws_secret//""' "$cf"); cb=$(jq -r '.bucket//""' "$cf"); cr=$(jq -r '.region//""' "$cf"); }
-    read_input "AWS Access Key ID" "$ck" ck
-    read_input "AWS Secret Access Key" "$cs" cs
-    read_input "S3 Bucket" "$cb" cb
-    read_input "S3 Region" "${cr:-eu-central-1}" cr
-    cat > "$cf" <<EOF
-{"aws_key":"${ck}","aws_secret":"${cs}","bucket":"${cb}","region":"${cr}"}
-EOF
+    local ck="" cs="" cb="" cr="" ce=""
+    if [[ -f "$cf" ]]; then
+        ck=$(jq -r '.aws_key    // ""' "$cf")
+        cs=$(jq -r '.aws_secret // ""' "$cf")
+        cb=$(jq -r '.bucket     // ""' "$cf")
+        cr=$(jq -r '.region     // ""' "$cf")
+        ce=$(jq -r '.endpoint_url // ""' "$cf")
+    fi
+
+    read_input "Access Key ID" "$ck" ck
+    read_input "Secret Access Key" "$cs" cs
+    read_input "Bucket name" "$cb" cb
+    read_input "Region" "${cr:-eu-central-1}" cr
+    echo -e "  ${DIM}Leave empty for AWS S3. For other providers set the endpoint URL.${NC}"
+    echo -e "  ${DIM}Examples:${NC}"
+    echo -e "  ${DIM}  Hetzner:    https://fsn1.your-objectstorage.com${NC}"
+    echo -e "  ${DIM}  DO Spaces:  https://<region>.digitaloceanspaces.com${NC}"
+    echo -e "  ${DIM}  Backblaze:  https://s3.<region>.backblazeb2.com${NC}"
+    echo -e "  ${DIM}  MinIO:      https://your-minio-host${NC}"
+    read_input "Endpoint URL (optional)" "$ce" ce
+
+    jq -n \
+        --arg k "$ck" --arg s "$cs" --arg b "$cb" \
+        --arg r "$cr" --arg e "$ce" \
+        '{"aws_key":$k,"aws_secret":$s,"bucket":$b,"region":$r,"endpoint_url":$e}' \
+        > "$cf"
     chmod 600 "$cf"
+
     mkdir -p /root/.aws
     cat > /root/.aws/credentials <<AWSCREDS
 [default]
@@ -54,7 +84,7 @@ AWSCFG
 
     step "Testing S3 connectivity..."
     local test_err
-    if ! test_err=$(aws s3 ls "s3://${cb}" 2>&1); then
+    if ! test_err=$(_aws_s3 ls "s3://${cb}" 2>&1); then
         error "S3 connection failed:"
         echo "$test_err" | sed 's/^/  /'
         exit 1
@@ -89,7 +119,7 @@ _bk_run() {
         }
 
         local s3_err
-        if ! s3_err=$(aws s3 cp "${d}/" "s3://${bucket}/cipi/${app}/${ts}/" --recursive 2>&1); then
+        if ! s3_err=$(_aws_s3 cp "${d}/" "s3://${bucket}/cipi/${app}/${ts}/" --recursive 2>&1); then
             error "  S3 upload failed:"
             echo "$s3_err" | sed 's/^/    /'
             ok=false
@@ -118,10 +148,10 @@ _bk_list() {
     echo -e "\n${BOLD}Backups${NC}"
     local ls_err
     if [[ -n "$target" ]]; then
-        ls_err=$(aws s3 ls "s3://${bucket}/cipi/${target}/" 2>&1) || { error "$ls_err"; exit 1; }
+        ls_err=$(_aws_s3 ls "s3://${bucket}/cipi/${target}/" 2>&1) || { error "$ls_err"; exit 1; }
         echo "$ls_err" | sed 's/^/  /'
     else
-        ls_err=$(aws s3 ls "s3://${bucket}/cipi/" 2>&1) || { error "$ls_err"; exit 1; }
+        ls_err=$(_aws_s3 ls "s3://${bucket}/cipi/" 2>&1) || { error "$ls_err"; exit 1; }
         echo "$ls_err" | sed 's/^/  /'
     fi
     echo ""

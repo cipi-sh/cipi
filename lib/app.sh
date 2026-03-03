@@ -513,7 +513,9 @@ host('localhost')
     ->set('deploy_path', '${dh}');
 
 after('deploy:vendors', 'artisan:storage:link');
+after('deploy:vendors', 'artisan:migrate');
 after('deploy:vendors', 'artisan:optimize');
+after('deploy:symlink', 'artisan:queue:restart');
 after('deploy:symlink', 'workers:restart');
 
 task('workers:restart', function () {

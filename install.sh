@@ -149,7 +149,7 @@ EOF
 install_nginx() {
     step_msg "Installing Nginx..."
 
-    apt-get install -y -qq nginx
+    apt-get install -y -qq nginx libnginx-mod-http-headers-more-filter
 
     local CPU_CORES
     CPU_CORES=$(nproc)
@@ -173,6 +173,7 @@ http {
     types_hash_max_size 2048;
     server_names_hash_bucket_size 64;
     server_tokens off;
+    more_clear_headers 'Server' 'X-Powered-By';
 
     include /etc/nginx/mime.types;
     default_type application/octet-stream;

@@ -2,16 +2,16 @@
 
 #############################################
 # Cipi - Server Control Panel for Laravel
-# Version: 4.0.0
+# Version: see /etc/cipi/version
 # Author: Andrea Pollastri
 # License: MIT
 #############################################
 
 set -euo pipefail
 
-readonly CIPI_VERSION="4.0.0"
 readonly CIPI_LIB="/opt/cipi/lib"
 readonly CIPI_CONFIG="/etc/cipi"
+readonly CIPI_VERSION="$(tr -d '[:space:]' < "${CIPI_CONFIG}/version" 2>/dev/null || echo "unknown")"
 readonly CIPI_LOG="/var/log/cipi"
 
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'

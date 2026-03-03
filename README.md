@@ -15,7 +15,7 @@ One command installs a complete production stack. One command creates an isolate
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.0.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/dynamic/yaml?url=https%3A%2F%2Fraw.githubusercontent.com%2Fandreapollastri%2Fcipi%2Flatest%2Fversion.md&query=%24&label=version&color=blue" alt="Version">
   <img src="https://img.shields.io/badge/ubuntu-24.04+-orange" alt="Ubuntu">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   <img src="https://img.shields.io/github/stars/andreapollastri/cipi?style=social" alt="Stars">
@@ -64,7 +64,7 @@ Installation takes about 10–15 minutes. At the end you'll see:
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  CIPI v4.0.0 INSTALLED SUCCESSFULLY
+  CIPI vX.Y.Z INSTALLED SUCCESSFULLY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   MariaDB Root
@@ -596,7 +596,7 @@ The update process:
 4. Runs **migration scripts** if the new version requires system changes (e.g., new Nginx config directives, new packages)
 5. Updates the version file
 
-Migration scripts live in `lib/migrations/` and are named by version (e.g., `4.1.0.sh`). When updating from v4.0.0 to v4.2.0, Cipi automatically runs `4.1.0.sh` and `4.2.0.sh` in order. This means Cipi can evolve the server configuration over time without requiring a full reinstall.
+Migration scripts live in `lib/migrations/` and are named by version (e.g., `4.1.0.sh`). When updating, Cipi automatically runs any migration scripts newer than the installed version in order. This means Cipi can evolve the server configuration over time without requiring a full reinstall.
 
 **Your apps, databases, and configurations are never touched by updates.** Only Cipi's own scripts are replaced.
 

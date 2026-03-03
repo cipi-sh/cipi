@@ -9,7 +9,7 @@ selfupdate_command() {
     parse_args "$@"
     local branch="${ARG_branch:-latest}"
     if [[ "${ARG_check:-}" == "true" ]]; then
-        local rv; rv=$(curl -s "https://raw.githubusercontent.com/${_CIPI_REPO}/refs/heads/${branch}/cipi" 2>/dev/null|grep 'CIPI_VERSION='|head -1|cut -d'"' -f2)
+        local rv; rv=$(curl -fsSL "https://raw.githubusercontent.com/${_CIPI_REPO}/refs/heads/${branch}/version.md" 2>/dev/null | tr -d '[:space:]')
         [[ -z "$rv" ]] && { error "Cannot check updates"; exit 1; }
         [[ "$rv" == "$CIPI_VERSION" ]] && success "Up to date (v${CIPI_VERSION})" || info "Update: v${CIPI_VERSION} → v${rv}"
         return
@@ -18,8 +18,8 @@ selfupdate_command() {
     step "Downloading from '${branch}'..."
     local tmp="/tmp/cipi-update-$$"; rm -rf "$tmp"
     git clone -b "$branch" --depth 1 "https://github.com/${_CIPI_REPO}.git" "$tmp" 2>/dev/null || { error "Download failed"; exit 1; }
-    local nv; nv=$(grep 'CIPI_VERSION=' "${tmp}/cipi"|head -1|cut -d'"' -f2)
-    [[ -z "$nv" ]] && { error "Invalid package"; rm -rf "$tmp"; exit 1; }
+    local nv; nv=$(tr -d '[:space:]' < "${tmp}/version.md" 2>/dev/null)
+    [[ -z "$nv" ]] && { error "Invalid package (version.md missing)"; rm -rf "$tmp"; exit 1; }
     info "Updating v${CIPI_VERSION} → v${nv}"
     cp -r /opt/cipi "/opt/cipi.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null||true
     cp "${tmp}/cipi" /usr/local/bin/cipi; chmod 700 /usr/local/bin/cipi

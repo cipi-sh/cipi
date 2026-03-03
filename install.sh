@@ -2,16 +2,16 @@
 
 #############################################
 # Cipi Installer
-# Version: 4.0.0
+# Version: see version.md
 # Author: Andrea Pollastri
 # License: MIT
 #############################################
 
 set -e
 
-BUILD="4.0.0"
 REPO="andreapollastri/cipi"
 BRANCH="${1:-latest}"
+BUILD=""  # resolved from version.md after git clone in install_cipi()
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -521,6 +521,9 @@ install_cipi() {
     rm -rf cipi-install
     git clone -b "$BRANCH" --depth 1 "https://github.com/${REPO}.git" cipi-install 2>/dev/null
 
+    BUILD="$(tr -d '[:space:]' < /tmp/cipi-install/version.md 2>/dev/null)"
+    [[ -z "$BUILD" ]] && { echo "Cannot read version.md from repo"; exit 1; }
+
     # Main CLI
     cp cipi-install/cipi /usr/local/bin/cipi
     chmod 700 /usr/local/bin/cipi
@@ -599,6 +602,8 @@ AUEOF
 
     (crontab -l 2>/dev/null | grep -v "CIPI"; cat <<'CRONEOF'
 # === CIPI CRON JOBS ===
+# Cipi self-update (daily 3:50 AM)
+50 3 * * * /usr/local/bin/cipi self-update >> /var/log/cipi/cipi.log 2>&1
 # SSL renewal (Sunday 4 AM)
 10 4 * * 0 certbot renew --nginx --non-interactive --post-hook "systemctl reload nginx" >> /var/log/cipi/certbot.log 2>&1
 # Security updates — unattended-upgrades handles this daily via APT::Periodic

@@ -28,8 +28,8 @@ app_create() {
     echo ""; info "Creating '${app_user}'..."; echo ""
 
     local user_pass db_pass webhook_token app_key home
-    user_pass=$(generate_password 24)
-    db_pass=$(generate_password 32)
+    user_pass=$(generate_password 32)
+    db_pass=$(generate_password 24)
     webhook_token=$(generate_token)
     app_key=$(generate_app_key)
     home="/home/${app_user}"
@@ -268,8 +268,6 @@ app_edit() {
         step "PHP ${cur_php} → ${np}..."
         rm -f "/etc/php/${cur_php}/fpm/pool.d/${app}.conf"
         _create_fpm_pool "$app" "$np"; reload_php_fpm "$cur_php"; reload_php_fpm "$np"
-        local dom; dom=$(app_get "$app" domain)
-        _create_nginx_vhost "$app" "$dom" "$np"; reload_nginx
         sed -i "s|/usr/bin/php[0-9]\.[0-9]|/usr/bin/php${np}|g" "/etc/supervisor/conf.d/${app}.conf" 2>/dev/null
         reload_supervisor
         crontab -u "$app" -l 2>/dev/null | sed "s|php${cur_php}|php${np}|g" | crontab -u "$app" -
@@ -462,24 +460,6 @@ server {
 EOF
 }
 
-_create_supervisor_worker() {
-    local app="$1" v="$2" queue="${3:-default}" procs="${4:-1}" tries="${5:-3}" timeout="${6:-3600}"
-    cat >> "/etc/supervisor/conf.d/${app}.conf" <<EOF
-[program:${app}-worker-${queue}]
-process_name=%(program_name)s_%(process_num)02d
-command=/usr/bin/php${v} /home/${app}/current/artisan queue:work database --sleep=3 --tries=${tries} --max-time=${timeout} --queue=${queue}
-autostart=true
-autorestart=true
-stopasgroup=true
-killasgroup=true
-user=${app}
-numprocs=${procs}
-redirect_stderr=true
-stdout_logfile=/home/${app}/logs/worker-${queue}.log
-stdout_logfile_maxbytes=10MB
-stopwaitsecs=${timeout}
-EOF
-}
 
 _create_deployer_config() {
     local an="$1" repo="$2" branch="$3" v="$4"

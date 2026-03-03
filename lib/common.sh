@@ -102,6 +102,25 @@ reload_supervisor() {
     supervisorctl update 2>&1 || warn "Supervisor update had issues (worker may start after first deploy)"
 }
 
+_create_supervisor_worker() {
+    local app="$1" v="$2" queue="${3:-default}" procs="${4:-1}" tries="${5:-3}" timeout="${6:-3600}"
+    cat >> "/etc/supervisor/conf.d/${app}.conf" <<EOF
+[program:${app}-worker-${queue}]
+process_name=%(program_name)s_%(process_num)02d
+command=/usr/bin/php${v} /home/${app}/current/artisan queue:work database --sleep=3 --tries=${tries} --max-time=${timeout} --queue=${queue}
+autostart=true
+autorestart=true
+stopasgroup=true
+killasgroup=true
+user=${app}
+numprocs=${procs}
+redirect_stderr=true
+stdout_logfile=/home/${app}/logs/worker-${queue}.log
+stdout_logfile_maxbytes=10MB
+stopwaitsecs=${timeout}
+EOF
+}
+
 # Init config on source
 mkdir -p "${CIPI_CONFIG}" "${CIPI_LOG}"
 chmod 700 "${CIPI_CONFIG}"

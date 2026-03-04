@@ -9,11 +9,12 @@ deploy_command() {
     app_exists "$app" || { error "App '$app' not found"; exit 1; }
     parse_args "$@"
 
-    if   [[ "${ARG_rollback:-}" == "true" ]]; then _deploy_rollback "$app"
-    elif [[ "${ARG_releases:-}" == "true" ]]; then _deploy_releases "$app"
-    elif [[ "${ARG_key:-}" == "true" ]];      then _deploy_key "$app"
-    elif [[ "${ARG_webhook:-}" == "true" ]];  then _deploy_webhook "$app"
-    elif [[ "${ARG_unlock:-}" == "true" ]];   then _deploy_unlock "$app"
+    if   [[ "${ARG_rollback:-}" == "true" ]];        then _deploy_rollback "$app"
+    elif [[ "${ARG_releases:-}" == "true" ]];        then _deploy_releases "$app"
+    elif [[ "${ARG_key:-}" == "true" ]];             then _deploy_key "$app"
+    elif [[ "${ARG_webhook:-}" == "true" ]];         then _deploy_webhook "$app"
+    elif [[ "${ARG_unlock:-}" == "true" ]];          then _deploy_unlock "$app"
+    elif [[ -n "${ARG_trust_host:-}" ]];             then _deploy_trust_host "$app" "${ARG_trust_host}"
     else _deploy_run "$app"
     fi
 }
@@ -86,10 +87,99 @@ _deploy_key() {
     [[ ! -f "$kf" ]] && { error "Key not found"; exit 1; }
     echo -e "\n${BOLD}Deploy Key for '${app}'${NC}"
     echo -e "${CYAN}$(cat "$kf")${NC}\n"
-    echo "Add as Deploy Key in:"
-    echo "  GitHub: Repo → Settings → Deploy keys"
-    echo "  GitLab: Repo → Settings → Repository → Deploy keys"
+    echo "Add as Deploy Key in your Git provider:"
+    echo "  GitHub:  Repo → Settings → Deploy keys → Add deploy key"
+    echo "  GitLab:  Repo → Settings → Repository → Deploy keys"
+    echo "  Gitea:   Repo → Settings → Deploy keys → Add key"
+    echo "  Forgejo: Repo → Settings → Deploy keys → Add key"
+    echo "  Custom:  append to ~/.ssh/authorized_keys on the git server"
     echo ""
+    echo "  Then trust the host fingerprint with:"
+    echo "  ${CYAN}cipi deploy ${app} --trust-host=<host[:port]>${NC}"
+    echo ""
+}
+
+_deploy_trust_host() {
+    local app="$1" hostport="$2"
+    local home="/home/${app}" known_hosts
+
+    # Split host and optional port
+    local host port
+    if [[ "$hostport" == *:* ]]; then
+        host="${hostport%%:*}"
+        port="${hostport##*:}"
+    else
+        host="$hostport"
+        port="22"
+    fi
+
+    [[ -z "$host" ]] && { error "Usage: cipi deploy <app> --trust-host=<host[:port]>"; exit 1; }
+
+    known_hosts="${home}/.ssh/known_hosts"
+
+    step "Scanning SSH fingerprint of ${host}:${port}..."
+    local scan_out
+    if [[ "$port" == "22" ]]; then
+        scan_out=$(ssh-keyscan -T 10 -H "$host" 2>/dev/null)
+    else
+        scan_out=$(ssh-keyscan -T 10 -p "$port" -H "$host" 2>/dev/null)
+    fi
+
+    if [[ -z "$scan_out" ]]; then
+        error "Could not reach ${host}:${port} — check the hostname and that port ${port} is open"
+        exit 1
+    fi
+
+    # Remove any existing entry for this host to avoid duplicates
+    if [[ -f "$known_hosts" ]]; then
+        local tmp; tmp=$(mktemp)
+        ssh-keygen -R "$host" -f "$known_hosts" &>/dev/null || true
+        [[ "$port" != "22" ]] && ssh-keygen -R "[${host}]:${port}" -f "$known_hosts" &>/dev/null || true
+    fi
+
+    echo "$scan_out" >> "$known_hosts"
+    chown "${app}:${app}" "$known_hosts"
+    chmod 600 "$known_hosts"
+
+    success "Fingerprint of ${host}:${port} trusted for '${app}'"
+    echo ""
+    echo -e "${BOLD}Fingerprints added:${NC}"
+    echo "$scan_out" | awk '{print "  " $0}' | cut -c1-80
+    echo ""
+
+    # Show the deploy key as a reminder
+    local kf="${home}/.ssh/id_ed25519.pub"
+    if [[ -f "$kf" ]]; then
+        echo -e "${BOLD}Deploy Key${NC} (add this to your Git server):"
+        echo -e "  ${CYAN}$(cat "$kf")${NC}"
+        echo ""
+    fi
+
+    # If non-standard port, write/update SSH config entry
+    if [[ "$port" != "22" ]]; then
+        local ssh_cfg="${home}/.ssh/config"
+        # Remove existing Host block for this host if any
+        if [[ -f "$ssh_cfg" ]]; then
+            local tmp; tmp=$(mktemp)
+            awk -v h="$host" '
+                /^Host / { in_block = ($2 == h) }
+                !in_block { print }
+            ' "$ssh_cfg" > "$tmp" && mv "$tmp" "$ssh_cfg"
+        fi
+        cat >> "$ssh_cfg" <<SSHCFG
+
+Host ${host}
+    HostName ${host}
+    Port ${port}
+    IdentityFile ${home}/.ssh/id_ed25519
+    StrictHostKeyChecking accept-new
+SSHCFG
+        chown "${app}:${app}" "$ssh_cfg"
+        chmod 600 "$ssh_cfg"
+        success "SSH config updated (port ${port} → ${host})"
+    fi
+
+    log_action "TRUST HOST: $app → ${host}:${port}"
 }
 
 _deploy_webhook() {

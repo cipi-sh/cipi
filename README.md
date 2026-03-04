@@ -30,12 +30,37 @@ cipi deploy <app>
 cipi ssl install <app>
 ```
 
+## Git providers
+
+Cipi works with any Git provider that supports SSH deploy keys — no vendor lock-in.
+
+| Provider | Support |
+|---|---|
+| GitHub | ✓ |
+| GitLab | ✓ |
+| Gitea | ✓ |
+| Forgejo | ✓ |
+| Bitbucket | ✓ |
+| Any self-hosted / custom Git server | ✓ |
+
+```bash
+# show the deploy key and add it to your Git provider
+cipi deploy <app> --key
+
+# trust a custom Git server fingerprint (standard port)
+cipi deploy <app> --trust-host=git.mycompany.com
+
+# trust a custom Git server on a non-standard port
+# (also writes ~/.ssh/config automatically)
+cipi deploy <app> --trust-host=git.mycompany.com:2222
+```
+
 ## Backup
 
 ```bash
-cipi backup configure            # configure S3 credentials
-cipi backup run [app]            # backup DB + shared/ to S3
-cipi backup list [app]           # list S3 backups
+cipi backup configure              # configure S3 credentials
+cipi backup run [app]              # backup DB + shared/ to S3
+cipi backup list [app]             # list S3 backups
 cipi backup prune [app] --weeks=N  # delete backups older than N weeks
 ```
 

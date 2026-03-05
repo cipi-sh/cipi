@@ -4,6 +4,19 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [4.0.5] — 2026-03-05
+
+### Fixed
+
+- Nginx "conflicting server name" warnings when domains or aliases were duplicated
+- `_create_nginx_vhost` now deduplicates domain + aliases before writing `server_name`
+- Primary domain excluded from aliases when reading (handles legacy data where primary was added as alias)
+- `cipi app create` rejects creation if the domain is already used by another app
+- `cipi alias add` rejects adding an alias that equals the primary domain or is already used by another app
+- `cipi ssl install` excludes primary domain from aliases when building Certbot `-d` flags
+
+---
+
 ## [4.0.4] — 2026-03-05
 
 ### Added

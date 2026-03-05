@@ -24,6 +24,7 @@ app_create() {
     php_is_installed "$php_ver"    || { error "PHP $php_ver not installed. Run: cipi php install $php_ver"; exit 1; }
     app_exists "$app_user"         && { error "App '${app_user}' already exists"; exit 1; }
     id "$app_user" &>/dev/null     && { error "User '${app_user}' already exists"; exit 1; }
+    domain_is_used_by_other_app "$domain" && { error "Domain '${domain}' is already used by app '${DOMAIN_USED_BY_APP}'"; exit 1; }
 
     echo ""; info "Creating '${app_user}'..."; echo ""
 
@@ -362,6 +363,9 @@ alias_add() {
     [[ -z "$app" || -z "$dom" ]] && { error "Usage: cipi alias add <app> <domain>"; exit 1; }
     app_exists "$app" || { error "Not found"; exit 1; }
     validate_domain "$dom" || { error "Invalid domain"; exit 1; }
+    local primary; primary=$(app_get "$app" domain)
+    [[ "$dom" == "$primary" ]] && { error "'${dom}' is already the primary domain"; exit 1; }
+    domain_is_used_by_other_app "$dom" "$app" && { error "Domain '${dom}' is already used by app '${DOMAIN_USED_BY_APP}'"; exit 1; }
     local tmp; tmp=$(mktemp)
     jq --arg a "$app" --arg d "$dom" '.[$a].aliases+=[$d]|.[$a].aliases|=unique' "${CIPI_CONFIG}/apps.json">"$tmp"
     mv "$tmp" "${CIPI_CONFIG}/apps.json"; chmod 600 "${CIPI_CONFIG}/apps.json"
@@ -423,18 +427,15 @@ EOF
 
 _create_nginx_vhost() {
     local app="$1" domain="$2" v="$3"
-    local names="$domain"
-    local aliases_raw aliases_flat
+    local names aliases_raw
     if [[ $# -ge 4 ]]; then
         aliases_raw="${4:-}"
     else
-        aliases_raw=$(jq -r --arg a "$app" '.[$a].aliases // [] | .[]' "${CIPI_CONFIG}/apps.json" 2>/dev/null || true)
+        # Exclude primary domain from aliases to avoid duplicates
+        aliases_raw=$(jq -r --arg a "$app" --arg d "$domain" '.[$a].aliases // [] | map(select(. != $d)) | .[]' "${CIPI_CONFIG}/apps.json" 2>/dev/null || true)
     fi
-    if [[ -n "$aliases_raw" ]]; then
-        # Collapse newlines to spaces: nginx server_name must be single-line for certbot to parse correctly
-        aliases_flat=$(echo "$aliases_raw" | tr '\n' ' ' | sed 's/ $//')
-        names="$domain $aliases_flat"
-    fi
+    # Deduplicate: domain + aliases, preserving order, avoiding Nginx "conflicting server name" warnings
+    names=$(echo -e "${domain}\n${aliases_raw}" | grep -v '^[[:space:]]*$' | awk '!seen[$0]++' | tr '\n' ' ' | sed 's/ $//')
     cat > "/etc/nginx/sites-available/${app}" <<EOF
 server {
     listen 80;

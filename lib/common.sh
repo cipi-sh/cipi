@@ -40,6 +40,20 @@ app_exists() {
     [[ -f "${CIPI_CONFIG}/apps.json" ]] && jq -e --arg a "$1" '.[$a]' "${CIPI_CONFIG}/apps.json" &>/dev/null
 }
 
+# Check if domain is used by another app (domain or alias). Exclude app name when editing.
+# Returns 0 if in use, 1 if free. If in use, sets DOMAIN_USED_BY_APP for error message.
+domain_is_used_by_other_app() {
+    local dom="$1" exclude_app="${2:-}"
+    DOMAIN_USED_BY_APP=""
+    [[ ! -f "${CIPI_CONFIG}/apps.json" ]] && return 1
+    DOMAIN_USED_BY_APP=$(jq -r --arg d "$dom" --arg e "$exclude_app" '
+        to_entries[] | select(.key != $e) |
+        select(.value.domain == $d or ((.value.aliases // []) | index($d) != null)) |
+        .key
+    ' "${CIPI_CONFIG}/apps.json" 2>/dev/null | head -1)
+    [[ -n "$DOMAIN_USED_BY_APP" ]]
+}
+
 app_get() { jq -r --arg a "$1" --arg k "$2" '.[$a][$k] // empty' "${CIPI_CONFIG}/apps.json"; }
 
 app_set() {

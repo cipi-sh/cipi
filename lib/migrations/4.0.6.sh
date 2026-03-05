@@ -136,3 +136,12 @@ SYSTEMD
 else
     echo "API migration: skip (API not installed)"
 fi
+
+# 4. Allow www-data to read apps.json (for API GET /apps, /aliases)
+if [[ -f /etc/cipi/api.json ]] && [[ -f /etc/cipi/apps.json ]]; then
+    chmod 750 /etc/cipi 2>/dev/null || true
+    chgrp www-data /etc/cipi 2>/dev/null || true
+    chmod 640 /etc/cipi/apps.json 2>/dev/null || true
+    chgrp www-data /etc/cipi/apps.json 2>/dev/null || true
+    echo "Configured apps.json access for API (www-data can read)"
+fi

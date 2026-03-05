@@ -31,6 +31,11 @@ api_setup() {
     # Ensure Laravel API app exists
     _api_ensure_laravel_app
 
+    # Allow www-data (PHP-FPM) to read apps.json for API endpoints
+    step "Configuring apps.json access for API..."
+    ensure_apps_json_api_access
+    success "apps.json readable by API"
+
     # Update APP_URL in Laravel .env
     if [[ -f "${CIPI_API_ROOT}/.env" ]]; then
         sed -i "s|^APP_URL=.*|APP_URL=https://${domain}|" "${CIPI_API_ROOT}/.env"

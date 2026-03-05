@@ -373,6 +373,7 @@ alias_add() {
     local tmp; tmp=$(mktemp)
     jq --arg a "$app" --arg d "$dom" '.[$a].aliases+=[$d]|.[$a].aliases|=unique' "${CIPI_CONFIG}/apps.json">"$tmp"
     mv "$tmp" "${CIPI_CONFIG}/apps.json"; chmod 600 "${CIPI_CONFIG}/apps.json"
+    ensure_apps_json_api_access
     _create_nginx_vhost "$app" "$(app_get "$app" domain)" "$(app_get "$app" php)"; reload_nginx
     log_action "ALIAS ADDED: $dom → $app"
     success "'${dom}' added to '${app}'"
@@ -386,6 +387,7 @@ alias_remove() {
     local tmp; tmp=$(mktemp)
     jq --arg a "$app" --arg d "$dom" '.[$a].aliases-=[$d]' "${CIPI_CONFIG}/apps.json">"$tmp"
     mv "$tmp" "${CIPI_CONFIG}/apps.json"; chmod 600 "${CIPI_CONFIG}/apps.json"
+    ensure_apps_json_api_access
     _create_nginx_vhost "$app" "$(app_get "$app" domain)" "$(app_get "$app" php)"; reload_nginx
     success "'${dom}' removed from '${app}'"
 }

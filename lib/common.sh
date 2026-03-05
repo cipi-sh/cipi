@@ -56,10 +56,21 @@ domain_is_used_by_other_app() {
 
 app_get() { jq -r --arg a "$1" --arg k "$2" '.[$a][$k] // empty' "${CIPI_CONFIG}/apps.json"; }
 
+# When Cipi API is configured, allow www-data to read apps.json (group rx on dir, r on file)
+ensure_apps_json_api_access() {
+    [[ -f "${CIPI_CONFIG}/api.json" ]] || return 0
+    [[ -f "${CIPI_CONFIG}/apps.json" ]] || return 0
+    chmod 750 "${CIPI_CONFIG}" 2>/dev/null || true
+    chgrp www-data "${CIPI_CONFIG}" 2>/dev/null || true
+    chmod 640 "${CIPI_CONFIG}/apps.json" 2>/dev/null || true
+    chgrp www-data "${CIPI_CONFIG}/apps.json" 2>/dev/null || true
+}
+
 app_set() {
     local tmp; tmp=$(mktemp)
     jq --arg a "$1" --arg k "$2" --arg v "$3" '.[$a][$k] = $v' "${CIPI_CONFIG}/apps.json" > "$tmp"
     mv "$tmp" "${CIPI_CONFIG}/apps.json"; chmod 600 "${CIPI_CONFIG}/apps.json"
+    ensure_apps_json_api_access
 }
 
 app_save() {
@@ -69,12 +80,14 @@ app_save() {
         error "Failed to save app config (invalid JSON?)"; rm -f "$tmp"; return 1
     fi
     mv "$tmp" "${CIPI_CONFIG}/apps.json"; chmod 600 "${CIPI_CONFIG}/apps.json"
+    ensure_apps_json_api_access
 }
 
 app_remove() {
     local tmp; tmp=$(mktemp)
     jq --arg a "$1" 'del(.[$a])' "${CIPI_CONFIG}/apps.json" > "$tmp"
     mv "$tmp" "${CIPI_CONFIG}/apps.json"; chmod 600 "${CIPI_CONFIG}/apps.json"
+    ensure_apps_json_api_access
 }
 
 get_db_root_password() { jq -r '.db_root_password' "${CIPI_CONFIG}/server.json"; }

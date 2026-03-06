@@ -1,109 +1,53 @@
-<img src="https://github.com/andreapollastri/cipi/blob/master/utility/design/banner.png?raw=true">
+<p align="center">
+  <img src="https://cipi.sh/img/cipi.svg" alt="Cipi" width="120">
+</p>
 
-![GitHub stars](https://img.shields.io/github/stars/andreapollastri/cipi?style=social)
-![GitHub watchers](https://img.shields.io/github/watchers/andreapollastri/cipi?style=social)
-![GitHub issues](https://img.shields.io/github/issues/andreapollastri/cipi)
-![GitHub](https://img.shields.io/github/license/andreapollastri/cipi)
-![GitHub tag (latest by date)](https://img.shields.io/github/v/tag/andreapollastri/cipi?label=version)
+<h1 align="center">Cipi</h1>
 
-## About
-Cipi is a Laravel based cloud server control panel that supports Digital Ocean, AWS, Vultr, Google Cloud, Linode, Azure and other VPS. It comes with nginx, Mysql, multi PHP-FPM versions, multi users, Supervisor, Composer, npm, free Let's Encrypt certificates, Git deployment, backups, ffmpeg, fail2ban, Redis, API and with a simple graphical interface useful to manage Laravel, Codeigniter, Symfony, WordPress or other PHP applications. With Cipi you don’t need to be a Sys Admin to deploy and manage websites and PHP applications powered by cloud VPS.
+<p align="center">
+  <strong>Cipi Version 3.x is no longer manteined. Move to Cipi v4</strong>
+</p>
 
-## Features
-- Easy install: setup one or more servers with a click in few minutes without be a Linux expert.
+<p align="center">
+  <a href="https://cipi.sh">Website</a> · <a href="https://cipi.sh/docs">Documentation</a> · <a href="https://github.com/andreapollastri/cipi/releases">Changelog</a>
+</p>
 
-- Server Management: manage one or more servers in as easy as a few clicks without be a LEMP Guru.
+---
 
-- Perfect stack for PHP devs: Cipi comes with nginx, PHP, MySql, Composer, npm and Supervisor.
+## History
 
-- Multi-PHP: Run simultaneous PHP versions at your ease & convenience.
+Here is a brief account of how it evolved across six years and four major versions.
 
-- Secure: no unsed open ports, unprivileged PHP, isolated system users and filesystem, only SFTP (no insecure FTP), Free SSL certificates everywhere.
+### v0.1 — June 2019 · *The idea*
 
-- Always update: Cipi takes care about your business and automatically keeps your server's software up to date so you always have the latest security patches.
+A collection of shell scripts to automate the tedious parts of setting up a Laravel server on a fresh Ubuntu VPS — Nginx, PHP, MariaDB, Supervisor. No web UI, no package. Just bash.
 
-- Integrate Cipi with your own software via Rest API and Swagger.
+### v1.x — June 2019 · *First release — Laravel panel*
 
-- Real-time servers stats: Keep an eye on everything through an awesome dashboard.
+The shell scripts were wrapped in a Laravel web application acting as a server control panel. Users could create apps, manage deployments, and configure Nginx through a browser UI hosted on the same server. The project was published on GitHub and quickly attracted interest from the Laravel community.
 
-- Always up to date: Cipi installs last versions of LTS dists and supports Ubuntu 20.04 LTS :)
+### v2.x — May 2020 · *Feature growth*
 
-## Discover Cipi
-Visit website: https://cipi.sh
+A year of rapid iteration added SMTP configuration, local database backups, PHP-FPM permission fixes, server service management, and root password reset. The v2 series reached 2.4.9 across dozens of patch releases, establishing Cipi as a stable option for small-team Laravel hosting.
 
-## Documentation
-Cipi Documentation is available at: https://cipi.sh/docs.html.
+### v3.0 — March 2021 · *The big leap — API, PHP 8, real-time UI*
 
-## Installation
-```bash
-wget -O - https://cipi.sh/go.sh | bash
-```
-#### Installation on AWS
-AWS by default disables root login. To login as root inside AWS, login as default user and then use command sudo -s.
+Built on Laravel 8, v3 introduced a fully documented REST API (Swagger / OA), PHP 8 support, real-time CPU/RAM charts, a Cronjob editor, Supervisor management, a GitHub repository manager, Node 15, Composer 2, and JWT authentication. Cipi could now manage the same server it ran on. The project reached 1k GitHub stars.
 
-```
-$ ssh ubuntu@<your server IP address>
-$ ubuntu@aws:~$ sudo -s
-$ root@aws:~# wget -O - https://cipi.sh/go.sh | bash
-```
-Remember to open ports: 22, 80 and 443!
+### v3.1 — December 2021 · *The last web UI — and a question*
 
-#### Installation Note
-Before you can use Cipi, please make sure your server fulfils these requirements:
+PHP 8.1 became the default version. Node was upgraded to v16, Certbot was refreshed, and domain alias handling was fixed. The v3.1.x series was the most polished release of the web-UI era and many teams kept it running in production for years.
 
-- Ubuntu 20.04 x86_64 LTS (Fresh installation)
-- If the server is virtual (VPS), OpenVZ may not be supported
-- We are checking Cipi compatibility within Oracle / ARM (not full supported yet)
+It was also the version that prompted a harder question: was a browser-based control panel still the right interface? Modern development workflows had moved toward SSH, CI/CD pipelines, GitOps, and — increasingly — AI agents that could orchestrate infrastructure through shell commands. A web UI required authentication, a running Laravel process, and a database just to issue a deploy. A CLI needed none of that. The answer shaped everything that came next.
 
-Hardware Requirement: More than 1GB of HD / At least 1 core processor / 512MB minimum RAM / At least 1 public IP  Address (IPv6 and NAT VPS are not supported) / For VPS providers such as AWS, those providers already include an external firewall for your VPS. Please open port 22, 80 and 443 to install Cipi.
+### v4.x — March 2026 · *The rewrite — CLI-first, Laravel-exclusive*
 
-Installation may take up to about 30 minutes which may also depend on your server's internet speed. After the installation is completed, you are ready to use Cipi to manage your servers.
+After years of maintaining a full Laravel web application as the control plane, v4 made the boldest decision yet: drop the web UI entirely. Cipi became a pure CLI tool operated over SSH. The scope also narrowed from generic PHP to Laravel exclusively, allowing every part of the stack to be optimised for one framework. MySQL was replaced by MariaDB 11.4, `git pull` was replaced by Deployer zero-downtime releases, shared deploy keys became per-app `ed25519` keys, and S3 automated backups and native webhook support for GitHub and GitLab were added from day one. v4 also introduced a complete REST API for programmatic management of hosts and applications, native integration with GitHub and GitLab git providers, and a groundbreaking dual MCP server architecture — one per-app and one global — enabling full AI-driven infrastructure management directly from any MCP-compatible IDE or AI agent.
 
-To correctly manage remote servers Cipi has to be on a public IP address (IPv4). Do not use it in localhost!
+The result is the brand new version 4.x.
 
-## Cipi LEMP environment
-- nginx: 1.18
-- PHP-FPM: 8.1, 8.0, 7.4
-- MySql: 8
-- node: 16
-- npm: 8
-- Composer: 2
+> The full v4 changelog is available on [GitHub Releases](https://github.com/andreapollastri/cipi/releases).
 
-## Screenshots
+## License
 
-<img src="https://cipi.sh/assets/images/docs/dashboard.png"> 
-
-<img src="https://cipi.sh/assets/images/docs/server.png"> 
-
-<img src="https://cipi.sh/assets/images/docs/site.png"> 
-
-## Why use Cipi?
-Cipi is easy, stable, powerful and free for any personal and commercial use and it's a perfect alternative to Runcloud, Ploi.io, Serverpilot, Forge, Moss.sh and similar software...
-
-## Mobile App
-Christian Giupponi (https://zerouno.io) has developed the Cipi Mobile App.<br>
-Android: https://play.google.com/store/apps/details?id=it.christiangiupponi.cipi<br>
-iOS: Coming soon!<br><br>
-
-## Cipi Roadmap... what's next? 
-- Cipi Version 4 (half 2022)
-- Laravel 9 support
-- Backup on s3
-- Apps installer
-- ...
-
-## Contributing
-Thank you for considering contributing to the Cipi Project (code, issues, feedbacks, stars, promo, beers) :)
-
-#### ...anyway star this project on Github, Thankyou ;)
-
-## Licence
-Cipi is an open-source software licensed under the MIT license.
-
-## Need support with Cipi?
-Please open an issue here: https://github.com/andreapollastri/cipi/issues.
-
-## Write to Cipi
-Write an email to: hello@cipi.sh
-
-### ...enjoy Cipi :)
+Cipi is open-source software licensed under the [MIT License](LICENSE).

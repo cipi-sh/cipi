@@ -338,6 +338,17 @@ EOF
     ufw --force enable &>/dev/null
 
     echo -e "${GREEN}✓ Firewall & fail2ban${NC}"
+
+    # PAM auth notifications (sudo + SSH login alerts)
+    if [[ -x /usr/local/bin/cipi-auth-notify ]]; then
+        if ! grep -q 'cipi-auth-notify' /etc/pam.d/sudo 2>/dev/null; then
+            echo 'session optional pam_exec.so seteuid /usr/local/bin/cipi-auth-notify' >> /etc/pam.d/sudo
+        fi
+        if ! grep -q 'cipi-auth-notify' /etc/pam.d/sshd 2>/dev/null; then
+            echo 'session optional pam_exec.so seteuid /usr/local/bin/cipi-auth-notify' >> /etc/pam.d/sshd
+        fi
+        echo -e "${GREEN}✓ PAM auth notifications${NC}"
+    fi
 }
 
 # ── MARIADB ───────────────────────────────────────────────────
@@ -586,10 +597,14 @@ install_cipi() {
     cp cipi-install/lib/cipi-cron-notify.sh /usr/local/bin/cipi-cron-notify
     chmod 700 /usr/local/bin/cipi-cron-notify
 
+    # PAM auth notification script
+    cp cipi-install/lib/cipi-auth-notify.sh /usr/local/bin/cipi-auth-notify
+    chmod 700 /usr/local/bin/cipi-auth-notify
+
     # Templates (if any)
     cp cipi-install/templates/* /opt/cipi/templates/ 2>/dev/null || true
 
-    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /opt/cipi
+    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /usr/local/bin/cipi-auth-notify /opt/cipi
 
     # Generate vault key for config encryption
     if [ ! -f /etc/cipi/.vault_key ]; then

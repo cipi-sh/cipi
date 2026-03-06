@@ -142,7 +142,7 @@ show_help() {
     echo -e "    ${CYAN}cipi smtp status${NC}                    SMTP status"
     echo -e "    ${CYAN}cipi smtp test${NC}                      Send test email"
     echo -e "    ${CYAN}cipi smtp disable|enable|delete${NC}     Toggle or remove"
-    echo -e "    ${DIM}  Alerts on backup/deploy failures when enabled${NC}"
+    echo -e "    ${DIM}  Alerts on backup/deploy failures, sudo and SSH logins${NC}"
 }
 
 show_status() {

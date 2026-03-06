@@ -98,6 +98,8 @@ _api_ensure_laravel_app() {
         (cd /tmp/cipi-api-build && composer require laravel/mcp --no-interaction 2>/dev/null) || true
 
         # 3. Configure .env
+        sed -i "s|^APP_ENV=.*|APP_ENV=production|" /tmp/cipi-api-build/.env
+        sed -i "s|^APP_DEBUG=.*|APP_DEBUG=false|" /tmp/cipi-api-build/.env
         sed -i "s|^QUEUE_CONNECTION=.*|QUEUE_CONNECTION=database|" /tmp/cipi-api-build/.env
 
         # 4. Publish assets and run setup
@@ -328,6 +330,8 @@ api_upgrade() {
     if [[ -f "${backup_dir}/.env" ]]; then
         cp "${backup_dir}/.env" /tmp/cipi-api-build/.env
     else
+        sed -i "s|^APP_ENV=.*|APP_ENV=production|" /tmp/cipi-api-build/.env
+        sed -i "s|^APP_DEBUG=.*|APP_DEBUG=false|" /tmp/cipi-api-build/.env
         sed -i "s|^QUEUE_CONNECTION=.*|QUEUE_CONNECTION=database|" /tmp/cipi-api-build/.env
         (cd /tmp/cipi-api-build && php artisan key:generate --force 2>/dev/null) || true
     fi

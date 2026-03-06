@@ -138,7 +138,7 @@ EOF
 ██      ██ ██      ██
  ██████ ██ ██      ██
 
-Type 'cipi help' for available commands.
+Easy Laravel Deployments
 
 EOF
 

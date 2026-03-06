@@ -14,6 +14,8 @@ All notable changes to Cipi are documented in this file.
 
 - `ensure_apps_json_api_access()` now creates and uses a `cipi-api` group instead of relying on the `www-data` group directly
 - Migration `4.0.8.sh` fixes permissions on existing servers and restarts PHP-FPM to pick up the new group
+- API `.env` now defaults to `APP_ENV=production` and `APP_DEBUG=false` on fresh install and upgrade
+- MOTD updated to "Easy Laravel Deployments"
 
 ---
 

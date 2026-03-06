@@ -87,14 +87,21 @@ _deploy_key() {
     [[ ! -f "$kf" ]] && { error "Key not found"; exit 1; }
     echo -e "\n${BOLD}Deploy Key for '${app}'${NC}"
     echo -e "${CYAN}$(cat "$kf")${NC}\n"
-    echo "Add as Deploy Key in your Git provider:"
-    echo "  GitHub:  Repo → Settings → Deploy keys → Add deploy key"
-    echo "  GitLab:  Repo → Settings → Repository → Deploy keys"
-    echo "  Gitea:   Repo → Settings → Deploy keys → Add key"
-    echo "  Forgejo: Repo → Settings → Deploy keys → Add key"
-    echo "  Custom:  append to ~/.ssh/authorized_keys on the git server"
+
+    local git_prov; git_prov=$(app_get "$app" git_provider)
+    local git_dkid; git_dkid=$(app_get "$app" git_deploy_key_id)
+    if [[ -n "$git_prov" && -n "$git_dkid" ]]; then
+        echo -e "  ${GREEN}✓ Auto-configured on ${git_prov} (ID: ${git_dkid})${NC}"
+    else
+        echo "Add as Deploy Key in your Git provider:"
+        echo "  GitHub:  Repo → Settings → Deploy keys → Add deploy key"
+        echo "  GitLab:  Repo → Settings → Repository → Deploy keys"
+        echo "  Gitea:   Repo → Settings → Deploy keys → Add key"
+        echo "  Forgejo: Repo → Settings → Deploy keys → Add key"
+        echo "  Custom:  append to ~/.ssh/authorized_keys on the git server"
+    fi
     echo ""
-    echo "  Then trust the host fingerprint with:"
+    echo "  Trust the host fingerprint with:"
     echo "  ${CYAN}cipi deploy ${app} --trust-host=<host[:port]>${NC}"
     echo ""
 }
@@ -190,14 +197,21 @@ _deploy_webhook() {
     echo -e "  URL:   ${CYAN}https://${d}/cipi/webhook${NC}"
     echo -e "  Token: ${CYAN}${t}${NC}"
     echo ""
-    echo "  GitHub: Repo → Settings → Webhooks → Add"
-    echo "    Payload URL: https://${d}/cipi/webhook"
-    echo "    Secret: ${t}"
-    echo "    Events: Push only"
-    echo ""
-    echo "  GitLab: Repo → Settings → Webhooks"
-    echo "    URL: https://${d}/cipi/webhook"
-    echo "    Secret token: ${t}"
+
+    local git_prov; git_prov=$(app_get "$app" git_provider)
+    local git_whid; git_whid=$(app_get "$app" git_webhook_id)
+    if [[ -n "$git_prov" && -n "$git_whid" ]]; then
+        echo -e "  ${GREEN}✓ Auto-configured on ${git_prov} (ID: ${git_whid})${NC}"
+    else
+        echo "  GitHub: Repo → Settings → Webhooks → Add"
+        echo "    Payload URL: https://${d}/cipi/webhook"
+        echo "    Secret: ${t}"
+        echo "    Events: Push only"
+        echo ""
+        echo "  GitLab: Repo → Settings → Webhooks"
+        echo "    URL: https://${d}/cipi/webhook"
+        echo "    Secret token: ${t}"
+    fi
     echo ""
     echo "  Requires: composer require cipi/agent"
     echo ""

@@ -70,6 +70,10 @@ BASH
     chmod 600 "${home}/.ssh/known_hosts"
     success "Deploy key"
 
+    # 3b. Git provider integration (auto-add deploy key + webhook)
+    source "${CIPI_LIB}/git.sh"
+    git_setup_repo "$app_user" "$repository" "$domain" "$webhook_token" "$deploy_key"
+
     # 4. MariaDB database
     step "Database..."
     local db_root; db_root=$(get_db_root_password)
@@ -144,6 +148,10 @@ ENV
 }
 JSON
 )"
+    # Save git integration IDs (if provider was configured)
+    if [[ -n "${GIT_PROVIDER:-}" ]]; then
+        git_save_app_data "$app_user" "$GIT_PROVIDER" "${GIT_DEPLOY_KEY_ID:-}" "${GIT_WEBHOOK_ID:-}"
+    fi
     log_action "APP CREATED: $app_user domain=$domain php=$php_ver"
 
     # 9. Supervisor default worker
@@ -189,11 +197,20 @@ SUDO
     echo -e "  ${BOLD}SSH${NC}         ${CYAN}${app_user}${NC} / ${CYAN}${user_pass}${NC}"
     echo -e "  ${BOLD}Database${NC}    ${CYAN}${app_user}${NC} / ${CYAN}${db_pass}${NC}"
     echo ""
-    echo -e "  ${BOLD}Deploy Key${NC}  (add to your Git provider)"
-    echo -e "  ${CYAN}${deploy_key}${NC}"
-    echo ""
-    echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${domain}/cipi/webhook${NC}"
-    echo -e "  ${BOLD}Token${NC}       ${CYAN}${webhook_token}${NC}"
+    if [[ -n "${GIT_PROVIDER:-}" && -n "${GIT_DEPLOY_KEY_ID:-}" && -n "${GIT_WEBHOOK_ID:-}" ]]; then
+        echo -e "  ${BOLD}Git${NC}         ${GREEN}${GIT_PROVIDER} auto-configured ✓${NC}"
+        echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${domain}/cipi/webhook${NC}"
+    else
+        echo -e "  ${BOLD}Deploy Key${NC}  (add to your Git provider)"
+        echo -e "  ${CYAN}${deploy_key}${NC}"
+        echo ""
+        echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${domain}/cipi/webhook${NC}"
+        echo -e "  ${BOLD}Token${NC}       ${CYAN}${webhook_token}${NC}"
+        if [[ -z "${GIT_PROVIDER:-}" ]]; then
+            echo ""
+            echo -e "  ${DIM}Tip: cipi git github-token <PAT> to auto-configure next time${NC}"
+        fi
+    fi
     echo ""
     echo -e "  ${BOLD}Next:${NC} composer require cipi/agent  (in your Laravel project)"
     echo -e "        cipi deploy ${app_user}"
@@ -240,6 +257,13 @@ app_show() {
     printf "  %-14s ${CYAN}%s${NC}\n" "Branch" "$b"
     printf "  %-14s ${CYAN}%s${NC}\n" "PHP" "$p"
     printf "  %-14s ${CYAN}%s${NC}\n" "Created" "$ca"
+    local git_prov; git_prov=$(app_get "$app" git_provider)
+    if [[ -n "$git_prov" ]]; then
+        local git_dkid; git_dkid=$(app_get "$app" git_deploy_key_id)
+        local git_whid; git_whid=$(app_get "$app" git_webhook_id)
+        printf "  %-14s ${GREEN}%s${NC} (key:%s hook:%s)\n" "Git" "$git_prov" "${git_dkid:-manual}" "${git_whid:-manual}"
+    fi
+
     echo -e "\n  ${BOLD}Webhook${NC}  ${CYAN}https://${d}/cipi/webhook${NC}"
 
     if [[ -f "/home/${app}/.ssh/id_ed25519.pub" ]]; then
@@ -282,8 +306,25 @@ app_edit() {
         success "Branch → ${ARG_branch}"; changed=true
     fi
     if [[ -n "${ARG_repository:-}" ]]; then
+        local old_repo; old_repo=$(app_get "$app" repository)
         app_set "$app" repository "${ARG_repository}"
         sed -i "s|set('repository', '.*')|set('repository', '${ARG_repository}')|" "/home/${app}/.deployer/deploy.php"
+
+        # Migrate git provider integration
+        source "${CIPI_LIB}/git.sh"
+        git_cleanup_repo "$app" "$old_repo"
+        git_clear_app_data "$app"
+        local pub_key=""
+        [[ -f "/home/${app}/.ssh/id_ed25519.pub" ]] && pub_key=$(cat "/home/${app}/.ssh/id_ed25519.pub")
+        local wt; wt=$(app_get "$app" webhook_token)
+        local d; d=$(app_get "$app" domain)
+        if [[ -n "$pub_key" ]]; then
+            git_setup_repo "$app" "${ARG_repository}" "$d" "$wt" "$pub_key"
+            if [[ -n "${GIT_PROVIDER:-}" ]]; then
+                git_save_app_data "$app" "$GIT_PROVIDER" "${GIT_DEPLOY_KEY_ID:-}" "${GIT_WEBHOOK_ID:-}"
+            fi
+        fi
+
         success "Repository updated"; changed=true
     fi
     [[ "$changed" == false ]] && info "Nothing changed. Use --php, --branch, or --repository"
@@ -302,6 +343,13 @@ app_delete() {
     if [[ "${ARG_force:-}" != "true" ]]; then
         echo ""; warn "Will permanently delete: user, home, database, vhost, workers, SSL"
         confirm "Delete '${app}'?" || { info "Cancelled"; return; }
+    fi
+
+    # Git provider cleanup (remove deploy key + webhook from repo)
+    local repo; repo=$(app_get "$app" repository)
+    if [[ -n "$repo" ]]; then
+        source "${CIPI_LIB}/git.sh"
+        git_cleanup_repo "$app" "$repo"
     fi
 
     step "Workers...";     supervisorctl stop "${app}-worker-*" 2>/dev/null||true; rm -f "/etc/supervisor/conf.d/${app}.conf"; reload_supervisor

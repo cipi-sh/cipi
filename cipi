@@ -108,6 +108,14 @@ show_help() {
     echo -e "    ${CYAN}cipi api status${NC}                   Show API versions and status"
     echo -e "    ${CYAN}cipi api token list|create|revoke${NC} API token management"
     echo ""
+    echo -e "  ${BOLD}${CYAN}GIT INTEGRATION${NC}"
+    echo -e "    ${CYAN}cipi git status${NC}                      Git provider status"
+    echo -e "    ${CYAN}cipi git github-token <token>${NC}        Save GitHub PAT"
+    echo -e "    ${CYAN}cipi git gitlab-token <token>${NC}        Save GitLab PAT"
+    echo -e "    ${CYAN}cipi git gitlab-url <url>${NC}            Self-hosted GitLab URL"
+    echo -e "    ${CYAN}cipi git remove-github${NC}               Remove GitHub token"
+    echo -e "    ${CYAN}cipi git remove-gitlab${NC}               Remove GitLab token + URL"
+    echo ""
     echo -e "  ${BOLD}${CYAN}SSL / PHP / FIREWALL / BACKUP${NC}"
     echo -e "    ${CYAN}cipi ssl install <app>${NC}              SSL certificate"
     echo -e "    ${CYAN}cipi ssl renew${NC}                      Renew all certs"
@@ -186,6 +194,7 @@ main() {
         self-update) require_root; source "${CIPI_LIB}/self-update.sh"; selfupdate_command "$@" ;;
         service)    require_root; source "${CIPI_LIB}/service.sh";    service_command "$@" ;;
         api)        require_root; source "${CIPI_LIB}/api.sh";       api_command "$@" ;;
+        git)        require_root; source "${CIPI_LIB}/git.sh";       git_command "$@" ;;
         *) error "Unknown command: $cmd"; echo "Run 'cipi help'"; exit 1 ;;
     esac
 }

@@ -4,6 +4,34 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [4.0.7] — 2026-03-06
+
+### Added
+
+- **Git provider integration**: `cipi git` — automatic deploy key and webhook configuration for GitHub and GitLab repositories
+- **`cipi git github-token <token>`** — save GitHub Personal Access Token for auto-setup
+- **`cipi git gitlab-token <token>`** — save GitLab Personal Access Token for auto-setup
+- **`cipi git gitlab-url <url>`** — configure self-hosted GitLab instance URL
+- **`cipi git remove-github`** — remove stored GitHub token
+- **`cipi git remove-gitlab`** — remove stored GitLab token and URL
+- **`cipi git status`** — show configured providers, tokens (masked) and per-app integration status
+- **Auto-setup on `cipi app create`**: when a GitHub/GitLab token is configured, Cipi automatically adds the deploy key and creates the webhook on the repository — zero manual configuration needed
+- **Auto-migrate on `cipi app edit --repository=...`**: when changing repository, Cipi removes deploy key + webhook from the old repo and creates them on the new one
+- **Auto-cleanup on `cipi app delete`**: Cipi removes deploy key + webhook from the repository before deleting the app
+- New `lib/git.sh` module with GitHub REST API v3 and GitLab REST API v4 integration (deploy keys + webhooks CRUD)
+- `apps.json` extended with optional `git_provider`, `git_deploy_key_id`, `git_webhook_id` fields per app
+- `server.json` extended on-demand with `github_token`, `gitlab_token`, `gitlab_url` fields
+
+### Changed
+
+- `cipi app show` now displays git provider integration status (provider, deploy key ID, webhook ID)
+- `cipi deploy <app> --key` shows "auto-configured" status when deploy key was added via API
+- `cipi deploy <app> --webhook` shows "auto-configured" status when webhook was added via API
+- `cipi app create` summary adapts: shows "auto-configured" badge when git integration succeeded, or manual instructions with a setup tip when no token is configured
+- Graceful fallback: if no token is configured or the API call fails, Cipi falls back to manual setup (existing behavior) without interrupting the flow
+
+---
+
 ## [4.0.6] — 2026-03-05
 
 ### Added

@@ -1,11 +1,7 @@
-<p align="center">
-  <img src="https://cipi.sh/img/cipi.svg" alt="Cipi" width="120">
-</p>
-
 <h1 align="center">Cipi</h1>
 
 <p align="center">
-  <strong>Cipi Version 3.x is no longer manteined. Move to Cipi v4</strong>
+  <strong>Version 3.x is no longer manteined. Cipi has been moved to v4</strong>
 </p>
 
 <p align="center">
@@ -47,7 +43,3 @@ After years of maintaining a full Laravel web application as the control plane, 
 The result is the brand new version 4.x.
 
 > The full v4 changelog is available on [GitHub Releases](https://github.com/andreapollastri/cipi/releases).
-
-## License
-
-Cipi is open-source software licensed under the [MIT License](LICENSE).

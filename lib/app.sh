@@ -180,6 +180,7 @@ CRON
     step "Permissions..."
     cat > "/etc/sudoers.d/cipi-${app_user}" <<SUDO
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker restart ${app_user}
+${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker stop ${app_user}
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker status ${app_user}
 SUDO
     chmod 440 "/etc/sudoers.d/cipi-${app_user}"
@@ -554,8 +555,13 @@ host('localhost')
 after('deploy:vendors', 'artisan:storage:link');
 after('deploy:vendors', 'artisan:migrate');
 after('deploy:vendors', 'artisan:optimize');
+before('deploy:symlink', 'workers:stop');
 after('deploy:symlink', 'artisan:queue:restart');
 after('deploy:symlink', 'workers:restart');
+
+task('workers:stop', function () {
+    run('sudo /usr/local/bin/cipi-worker stop ${an}');
+});
 
 task('workers:restart', function () {
     run('sudo /usr/local/bin/cipi-worker restart ${an}');

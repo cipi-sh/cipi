@@ -9,9 +9,10 @@ worker_command() {
         add)     _worker_add "$@" ;;
         list|ls) _worker_list "$@" ;;
         remove)  _worker_remove "$@" ;;
+        stop)    _worker_stop "$@" ;;
         restart) _worker_restart "$@" ;;
         edit)    _worker_edit "$@" ;;
-        *) error "Use: add list remove restart edit"; exit 1 ;;
+        *) error "Use: add list remove stop restart edit"; exit 1 ;;
     esac
 }
 
@@ -64,6 +65,13 @@ _worker_remove() {
     reload_supervisor
     log_action "WORKER REMOVE: $app queue=$queue"
     success "Worker '${queue}' removed"
+}
+
+_worker_stop() {
+    local app="${1:-}"; [[ -z "$app" ]] && { error "Usage: cipi worker stop <app>"; exit 1; }
+    app_exists "$app" || { error "Not found"; exit 1; }
+    supervisorctl stop "${app}-worker-*" 2>/dev/null||true
+    success "Workers stopped for '${app}'"
 }
 
 _worker_restart() {

@@ -153,7 +153,9 @@ _create_supervisor_worker() {
 process_name=%(program_name)s_%(process_num)02d
 command=/usr/bin/php${v} /home/${app}/current/artisan queue:work database --sleep=3 --tries=${tries} --max-time=${timeout} --queue=${queue}
 autostart=true
-autorestart=true
+autorestart=unexpected
+startretries=5
+startsecs=3
 stopasgroup=true
 killasgroup=true
 user=${app}

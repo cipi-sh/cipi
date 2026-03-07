@@ -626,6 +626,7 @@ CRON
     # 16. Sudoers
     cat > "/etc/sudoers.d/cipi-${app}" <<SUDO
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker restart ${app}
+${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker stop ${app}
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker status ${app}
 SUDO
     chmod 440 "/etc/sudoers.d/cipi-${app}"

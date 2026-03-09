@@ -280,8 +280,10 @@ app_show() {
         echo -e "\n  ${BOLD}Release${NC}  ${CYAN}$(readlink -f "/home/${app}/current" | xargs basename)${NC}"
     fi
     echo -e "\n  ${BOLD}Workers${NC}"
-    if grep -q "\[program:${app}-worker-" "/etc/supervisor/conf.d/${app}.conf" 2>/dev/null; then
-        supervisorctl status "${app}-worker-*" 2>/dev/null | sed 's/^/  /'
+    local workers
+    workers=$(supervisorctl status 2>/dev/null | grep "^${app}-worker-" || true)
+    if [[ -n "$workers" ]]; then
+        echo "$workers" | sed 's/^/  /'
     else
         echo "  none"
     fi

@@ -1,8 +1,8 @@
 #!/bin/bash
 #############################################
 # Cipi — PAM auth notification
-# Sends email on successful sudo elevation
-# or root/sudoer SSH login.
+# Logs security events and optionally sends
+# email on sudo/su elevation or SSH login.
 # Called by pam_exec.so (session open).
 #
 # Internal operations (API, queue workers,
@@ -14,21 +14,8 @@
 
 readonly CIPI_CONFIG="/etc/cipi"
 readonly CIPI_LIB="/opt/cipi/lib"
-readonly SMTP_CFG="${CIPI_CONFIG}/smtp.json"
-readonly SMTP_RC="${CIPI_CONFIG}/.msmtprc"
-
-# Quick exit if SMTP not configured
-[[ -f "$SMTP_CFG" ]] || exit 0
-[[ -f "$SMTP_RC" ]] || exit 0
-
-source "${CIPI_LIB}/vault.sh" 2>/dev/null || exit 0
-
-_SJ=$(vault_read smtp.json 2>/dev/null) || exit 0
-[[ "$(echo "$_SJ" | jq -r '.enabled // false')" == "true" ]] || exit 0
-
-TO=$(echo "$_SJ" | jq -r '.to // empty')
-FROM=$(echo "$_SJ" | jq -r '.from // "noreply@localhost"')
-[[ -z "$TO" ]] && exit 0
+readonly CIPI_LOG="/var/log/cipi"
+readonly EVENTS_LOG="${CIPI_LOG}/events.log"
 
 HOSTNAME=$(hostname 2>/dev/null || echo "unknown")
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
@@ -37,9 +24,8 @@ USER="${PAM_USER:-unknown}"
 RHOST="${PAM_RHOST:-local}"
 TTY="${PAM_TTY:-unknown}"
 
-# Resolve SSH key name from the key used for the current session.
-# Method 1: SSH_USER_AUTH env (works for sudo via env_keep).
-# Method 2: auth.log fallback (for sshd PAM where SSH_USER_AUTH isn't yet available).
+# ── Helper functions ─────────────────────────────────────────
+
 _resolve_ssh_key_name() {
     local fp=""
 
@@ -73,12 +59,6 @@ _resolve_ssh_key_name() {
     echo "$fp"
 }
 
-SSH_KEY_NAME=$(_resolve_ssh_key_name)
-[[ -z "$SSH_KEY_NAME" ]] && SSH_KEY_NAME="unknown"
-
-# Detect operations triggered by system services rather than interactive users.
-# loginuid 4294967295 = no login session (PHP-FPM, queue workers, cron, systemd).
-# Falls back to process-tree inspection for systems without audit enabled.
 _is_internal() {
     local luid
     luid=$(cat /proc/self/loginuid 2>/dev/null) || luid=""
@@ -97,7 +77,6 @@ _is_internal() {
     return 1
 }
 
-# Resolve the real user who ran sudo (SUDO_USER is often empty inside PAM).
 _resolve_sudo_user() {
     [[ -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "unknown" ]] && { echo "$SUDO_USER"; return; }
     local luid
@@ -109,6 +88,13 @@ _resolve_sudo_user() {
     fi
     echo "unknown"
 }
+
+# ── Resolve context ──────────────────────────────────────────
+
+SSH_KEY_NAME=$(_resolve_ssh_key_name)
+[[ -z "$SSH_KEY_NAME" ]] && SSH_KEY_NAME="unknown"
+
+# ── Build event ──────────────────────────────────────────────
 
 case "$SERVICE" in
     sudo)
@@ -124,7 +110,6 @@ TTY:       ${TTY}
 Time:      ${TIMESTAMP}"
         ;;
     sshd)
-        # Only notify for root or sudoers
         if [[ "$USER" != "root" ]]; then
             id -nG "$USER" 2>/dev/null | grep -qw sudo || exit 0
         fi
@@ -154,6 +139,28 @@ Time:      ${TIMESTAMP}"
         exit 0
         ;;
 esac
+
+# ── Log event (always, regardless of SMTP) ───────────────────
+
+mkdir -p "$CIPI_LOG" 2>/dev/null || true
+echo "[${TIMESTAMP}] [${RHOST}] [key:${SSH_KEY_NAME}] ${SUBJECT}" >> "$EVENTS_LOG" 2>/dev/null || true
+
+# ── Send email (only if SMTP configured) ─────────────────────
+
+readonly SMTP_CFG="${CIPI_CONFIG}/smtp.json"
+readonly SMTP_RC="${CIPI_CONFIG}/.msmtprc"
+
+[[ -f "$SMTP_CFG" ]] || exit 0
+[[ -f "$SMTP_RC" ]] || exit 0
+
+source "${CIPI_LIB}/vault.sh" 2>/dev/null || exit 0
+
+_SJ=$(vault_read smtp.json 2>/dev/null) || exit 0
+[[ "$(echo "$_SJ" | jq -r '.enabled // false')" == "true" ]] || exit 0
+
+TO=$(echo "$_SJ" | jq -r '.to // empty')
+FROM=$(echo "$_SJ" | jq -r '.from // "noreply@localhost"')
+[[ -z "$TO" ]] && exit 0
 
 printf "From: %s\nTo: %s\nSubject: %s\n\n%s\n" "$FROM" "$TO" "$SUBJECT" "$BODY" | \
     msmtp -C "$SMTP_RC" "$TO" 2>/dev/null &

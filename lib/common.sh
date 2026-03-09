@@ -16,6 +16,13 @@ log_action() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "${CIPI_LOG}/cipi.log"
 }
 
+log_event() {
+    mkdir -p "${CIPI_LOG}"
+    local ip; ip=$(_get_client_ip 2>/dev/null || echo "local")
+    local key; key=$(_get_session_key_name 2>/dev/null || echo "n/a")
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [${ip}] [key:${key}] $*" >> "${CIPI_LOG}/events.log"
+}
+
 _get_client_ip() {
     if [[ -n "${SSH_CLIENT:-}" ]]; then
         echo "${SSH_CLIENT%% *}"

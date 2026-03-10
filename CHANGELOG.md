@@ -4,14 +4,6 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
-## [4.2.8] — 2026-03-10
-
-### Changed
-
-- **Auth notifications: cipi→root only** — PAM auth notification emails are now sent exclusively when user `cipi` escalates to root (via sudo or su), including the SSH key name/comment; all other events (SSH logins, other users' escalations) are silenced but still logged to `/var/log/cipi/events.log`
-
----
-
 ## [4.2.7] — 2026-03-10
 
 ### Fixed

@@ -2,17 +2,16 @@
 #############################################
 # Cipi — PAM auth notification
 # Logs security events and optionally sends
-# email when user cipi escalates to root.
+# email on sudo/su elevation or SSH login.
 # Called by pam_exec.so (session open).
 #
 # Internal operations (API, queue workers,
 # cron) are silently skipped so only real
 # interactive security events trigger alerts.
 #
-# All events are logged to events.log.
-# Email notifications are sent ONLY when
-# user cipi escalates to root (sudo/su),
-# including the SSH key name/comment.
+# Privileged-to-inferior: notifications from
+# cipi/root towards app users (non-sudo) are
+# suppressed unless part of app create/edit/delete.
 #############################################
 
 [[ "${PAM_TYPE:-}" == "open_session" ]] || exit 0
@@ -152,8 +151,6 @@ _should_suppress_privileged_to_inferior() {
 
 # ── Build event ──────────────────────────────────────────────
 
-SEND_NOTIFY=false
-
 case "$SERVICE" in
     sudo)
         _is_internal && exit 0
@@ -173,7 +170,6 @@ From:      ${DISPLAY_FROM}
 SSH Key:   ${SSH_KEY_NAME}
 TTY:       ${TTY}
 Time:      ${TIMESTAMP}"
-        [[ "$SUDO_BY" == "cipi" && "$USER" == "root" ]] && SEND_NOTIFY=true
         ;;
     sshd)
         if [[ "$USER" != "root" ]]; then
@@ -207,7 +203,6 @@ From:      ${DISPLAY_FROM}
 SSH Key:   ${SSH_KEY_NAME}
 TTY:       ${TTY}
 Time:      ${TIMESTAMP}"
-        [[ "$SU_BY" == "cipi" && "$USER" == "root" ]] && SEND_NOTIFY=true
         ;;
     *)
         exit 0
@@ -219,9 +214,7 @@ esac
 mkdir -p "$CIPI_LOG" 2>/dev/null || true
 echo "[${TIMESTAMP}] [${DISPLAY_FROM:-$RHOST}] [key:${SSH_KEY_NAME}] ${SUBJECT}" >> "$EVENTS_LOG" 2>/dev/null || true
 
-# ── Send email (only for cipi→root escalation, if SMTP configured) ───
-
-[[ "$SEND_NOTIFY" == true ]] || exit 0
+# ── Send email (only if SMTP configured) ─────────────────────
 
 readonly SMTP_CFG="${CIPI_CONFIG}/smtp.json"
 readonly SMTP_RC="${CIPI_CONFIG}/.msmtprc"

@@ -9,14 +9,6 @@ All notable changes to Cipi are documented in this file.
 ### Changed
 
 - **Auth notifications: cipi→root only** — PAM auth notification emails are now sent exclusively when user `cipi` escalates to root (via sudo or su), including the SSH key name/comment; all other events (SSH logins, other users' escalations) are silenced but still logged to `/var/log/cipi/events.log`
-- **Auto-sudo escalation** — `cipi` now automatically re-executes itself with `sudo` when run by a non-root user; app users can simply run `cipi deploy myapp` or `cipi ssl install myapp` without manually prefixing `sudo` (sudoers rules still control per-user access)
-- **Binary permissions** — `/usr/local/bin/cipi` changed from `700` to `755` so non-root users can execute the binary
-
-### Added
-
-- **App user self-service: deploy** — app users can now run `cipi deploy <app>` (and `--rollback`, `--releases`, `--unlock`, `--key`, `--webhook`) scoped to their own app only; `cipi deploy otherapp` is blocked by sudoers
-- **App user self-service: SSL install** — app users can now run `cipi ssl install <app>` scoped to their own app only
-- **Migration 4.2.8** — patches existing app sudoers files to add deploy and ssl install permissions; fixes cipi binary permissions
 
 ---
 

@@ -187,9 +187,6 @@ CRON
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker restart ${app_user}
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker stop ${app_user}
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker status ${app_user}
-${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi deploy ${app_user}
-${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi deploy ${app_user} *
-${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi ssl install ${app_user}
 SUDO
     chmod 440 "/etc/sudoers.d/cipi-${app_user}"
     success "Permissions"

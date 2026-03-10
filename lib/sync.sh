@@ -638,14 +638,11 @@ CRON
         success "Deployer (recreated)"
     fi
 
-    # 16. Sudoers (worker + deploy + ssl, scoped to own app)
+    # 16. Sudoers
     cat > "/etc/sudoers.d/cipi-${app}" <<SUDO
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker restart ${app}
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker stop ${app}
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker status ${app}
-${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi deploy ${app}
-${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi deploy ${app} *
-${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi ssl install ${app}
 SUDO
     chmod 440 "/etc/sudoers.d/cipi-${app}"
 

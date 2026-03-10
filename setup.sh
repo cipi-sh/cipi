@@ -726,7 +726,7 @@ install_cipi() {
 
     # Main CLI
     cp cipi-install/cipi /usr/local/bin/cipi
-    chmod 755 /usr/local/bin/cipi
+    chmod 700 /usr/local/bin/cipi
 
     # Lib scripts
     cp cipi-install/lib/*.sh /opt/cipi/lib/

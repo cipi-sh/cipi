@@ -25,7 +25,8 @@ source "${CIPI_LIB}/common.sh"
 
 require_root() {
     if [[ $EUID -ne 0 ]]; then
-        exec sudo /usr/local/bin/cipi "$@"
+        error "Run as root: sudo cipi $*"
+        exit 1
     fi
 }
 
@@ -204,36 +205,30 @@ show_status() {
 main() {
     [[ $# -eq 0 ]] && { show_help; exit 0; }
 
-    case "$1" in
-        help|--help|-h)       show_help; return ;;
-        version|--version|-v) echo "Cipi v${CIPI_VERSION}"; return ;;
-    esac
-
-    # Auto-escalate to root via sudo (sudoers rules control per-user access)
-    [[ $EUID -ne 0 ]] && exec sudo /usr/local/bin/cipi "$@"
-
     local cmd="$1"; shift || true
 
     case "$cmd" in
-        status)      show_status ;;
-        app)         source "${CIPI_LIB}/app.sh";         app_command "$@" ;;
-        alias)       source "${CIPI_LIB}/app.sh";         alias_command "$@" ;;
-        auth)        source "${CIPI_LIB}/app.sh";         auth_command "$@" ;;
-        deploy)      source "${CIPI_LIB}/deploy.sh";      deploy_command "$@" ;;
-        worker)      source "${CIPI_LIB}/worker.sh";      worker_command "$@" ;;
-        db)          source "${CIPI_LIB}/db.sh";           db_command "$@" ;;
-        ssl)         source "${CIPI_LIB}/ssl.sh";          ssl_command "$@" ;;
-        php)         source "${CIPI_LIB}/php.sh";          php_command "$@" ;;
-        firewall)    source "${CIPI_LIB}/firewall.sh";     firewall_command "$@" ;;
-        backup)      source "${CIPI_LIB}/backup.sh";       backup_command "$@" ;;
-        self-update) source "${CIPI_LIB}/self-update.sh";  selfupdate_command "$@" ;;
-        service)     source "${CIPI_LIB}/service.sh";      service_command "$@" ;;
-        api)         source "${CIPI_LIB}/api.sh";          api_command "$@" ;;
-        git)         source "${CIPI_LIB}/git.sh";          git_command "$@" ;;
-        sync)        source "${CIPI_LIB}/sync.sh";         sync_command "$@" ;;
-        ssh)         source "${CIPI_LIB}/ssh.sh";          ssh_command "$@" ;;
-        smtp)        source "${CIPI_LIB}/smtp.sh";         smtp_command "$@" ;;
-        reset)       source "${CIPI_LIB}/reset.sh";        reset_command "$@" ;;
+        help|--help|-h)       show_help ;;
+        version|--version|-v) echo "Cipi v${CIPI_VERSION}" ;;
+        status)     require_root; show_status ;;
+        app)        require_root; source "${CIPI_LIB}/app.sh";         app_command "$@" ;;
+        alias)      require_root; source "${CIPI_LIB}/app.sh";         alias_command "$@" ;;
+        auth)       require_root; source "${CIPI_LIB}/app.sh";         auth_command "$@" ;;
+        deploy)     require_root; source "${CIPI_LIB}/deploy.sh";      deploy_command "$@" ;;
+        worker)     require_root; source "${CIPI_LIB}/worker.sh";      worker_command "$@" ;;
+        db)         require_root; source "${CIPI_LIB}/db.sh";          db_command "$@" ;;
+        ssl)        require_root; source "${CIPI_LIB}/ssl.sh";         ssl_command "$@" ;;
+        php)        require_root; source "${CIPI_LIB}/php.sh";         php_command "$@" ;;
+        firewall)   require_root; source "${CIPI_LIB}/firewall.sh";    firewall_command "$@" ;;
+        backup)     require_root; source "${CIPI_LIB}/backup.sh";      backup_command "$@" ;;
+        self-update) require_root; source "${CIPI_LIB}/self-update.sh"; selfupdate_command "$@" ;;
+        service)    require_root; source "${CIPI_LIB}/service.sh";    service_command "$@" ;;
+        api)        require_root; source "${CIPI_LIB}/api.sh";       api_command "$@" ;;
+        git)        require_root; source "${CIPI_LIB}/git.sh";       git_command "$@" ;;
+        sync)       require_root; source "${CIPI_LIB}/sync.sh";      sync_command "$@" ;;
+        ssh)        require_root; source "${CIPI_LIB}/ssh.sh";       ssh_command "$@" ;;
+        smtp)       require_root; source "${CIPI_LIB}/smtp.sh";      smtp_command "$@" ;;
+        reset)      require_root; source "${CIPI_LIB}/reset.sh";     reset_command "$@" ;;
         *) error "Unknown command: $cmd"; echo "Run 'cipi help'"; exit 1 ;;
     esac
 }

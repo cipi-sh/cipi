@@ -515,7 +515,7 @@ alias php='/usr/bin/php${php_ver}'
 alias artisan='php ${home}/current/artisan'
 alias composer='/usr/local/bin/composer'
 alias tinker='artisan tinker'
-alias deploy='dep deploy -f ${home}/.deployer/deploy.php'
+alias deploy='/usr/bin/php${php_ver} /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php'
 PS1='\[\033[0;32m\]\u\[\033[0m\]@\h:\[\033[0;34m\]\w\[\033[0m\]\$ '
 BASH
     success "Directories"
@@ -620,7 +620,7 @@ SQL
     step "Crontab..."
     cat <<CRON | crontab -u "$app" -
 * * * * * /usr/bin/php${php_ver} ${home}/current/artisan schedule:run >> /dev/null 2>&1
-* * * * * test -f ${home}/.deploy-trigger && rm -f ${home}/.deploy-trigger && cd ${home} && /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php >> ${home}/logs/deploy.log 2>&1
+* * * * * test -f ${home}/.deploy-trigger && rm -f ${home}/.deploy-trigger && cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php >> ${home}/logs/deploy.log 2>&1
 CRON
     success "Crontab"
 
@@ -649,7 +649,7 @@ SUDO
     # 17. Deploy
     if [[ "$run_deploy" == "true" ]]; then
         step "Deploying..."
-        if sudo -u "$app" bash -c "cd ${home} && /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php" 2>&1; then
+        if sudo -u "$app" bash -c "cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php" 2>&1; then
             success "Deploy completed"
         else
             warn "Deploy failed — run manually: cipi deploy ${app}"
@@ -776,7 +776,7 @@ _sync_update_app() {
     # 11. Deploy
     if [[ "$run_deploy" == "true" ]]; then
         step "Deploying..."
-        if sudo -u "$app" bash -c "cd ${home} && /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php" 2>&1; then
+        if sudo -u "$app" bash -c "cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php" 2>&1; then
             success "Deploy completed"
         else
             warn "Deploy failed — run manually: cipi deploy ${app}"

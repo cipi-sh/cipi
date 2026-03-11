@@ -52,7 +52,7 @@ alias php='/usr/bin/php${php_ver}'
 alias artisan='php ${home}/current/artisan'
 alias composer='/usr/local/bin/composer'
 alias tinker='artisan tinker'
-alias deploy='dep deploy -f ${home}/.deployer/deploy.php'
+alias deploy='/usr/bin/php${php_ver} /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php'
 PS1='\[\033[0;32m\]\u\[\033[0m\]@\h:\[\033[0;34m\]\w\[\033[0m\]\$ '
 BASH
     chown -R "${app_user}:${app_user}" "$home"
@@ -172,7 +172,7 @@ JSON
 # Laravel Scheduler
 * * * * * /usr/bin/php${php_ver} ${home}/current/artisan schedule:run >> /dev/null 2>&1
 # Cipi deploy trigger (written by cipi/agent webhook)
-* * * * * test -f ${home}/.deploy-trigger && rm -f ${home}/.deploy-trigger && cd ${home} && /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php >> ${home}/logs/deploy.log 2>&1
+* * * * * test -f ${home}/.deploy-trigger && rm -f ${home}/.deploy-trigger && cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php >> ${home}/logs/deploy.log 2>&1
 CRON
     success "Scheduler + deploy trigger"
 

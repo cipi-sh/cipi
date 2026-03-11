@@ -22,13 +22,14 @@ deploy_command() {
 _deploy_run() {
     local app="$1" home="/home/${app}"
     local df="${home}/.deployer/deploy.php"
+    local php_ver; php_ver=$(app_get "$app" php)
+
     if [[ ! -f "$df" ]]; then
         step "Creating deployer config..."
         source "${CIPI_LIB}/app.sh"
-        local repo branch php_ver
+        local repo branch
         repo=$(app_get "$app" repository)
         branch=$(app_get "$app" branch)
-        php_ver=$(app_get "$app" php)
         [[ -z "$repo" || -z "$php_ver" ]] && { error "App config incomplete (repository/php). Run: cipi app edit $app"; exit 1; }
         _create_deployer_config "$app" "${repo}" "${branch:-main}" "$php_ver"
         success "Deployer config created"
@@ -36,7 +37,7 @@ _deploy_run() {
 
     info "Deploying '${app}'..."
     echo ""
-    sudo -u "$app" bash -c "cd ${home} && /usr/local/bin/dep deploy -f ${df} 2>&1"
+    sudo -u "$app" bash -c "cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep deploy -f ${df} 2>&1"
     local rc=$?
     echo ""
     if [[ $rc -eq 0 ]]; then
@@ -64,9 +65,10 @@ _deploy_unlock() {
 
 _deploy_rollback() {
     local app="$1" home="/home/${app}"
+    local php_ver; php_ver=$(app_get "$app" php)
     confirm "Rollback '${app}'?" || { info "Cancelled"; return; }
     info "Rolling back..."
-    sudo -u "$app" bash -c "cd ${home} && /usr/local/bin/dep rollback -f ${home}/.deployer/deploy.php 2>&1"
+    sudo -u "$app" bash -c "cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep rollback -f ${home}/.deployer/deploy.php 2>&1"
     [[ $? -eq 0 ]] && success "Rollback done" || error "Rollback failed"
     log_action "ROLLBACK: $app"
 }

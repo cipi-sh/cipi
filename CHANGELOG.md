@@ -4,6 +4,14 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [4.2.9] — 2026-03-11
+
+### Fixed
+
+- **Deploy uses wrong PHP version** — Deployer (`dep`) and all deploy-related commands (deploy, rollback, crontab webhook trigger, user shell alias) now run with the app's configured PHP version (`/usr/bin/phpX.Y`) instead of the system default; affects `cipi deploy`, `cipi deploy --rollback`, crontab deploy triggers, `.bashrc` deploy alias, and `cipi sync import` deploys
+
+---
+
 ## [4.2.8] — 2026-03-11
 
 ### Fixed

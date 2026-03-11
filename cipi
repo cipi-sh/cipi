@@ -134,7 +134,7 @@ show_help() {
     echo -e "    ${CYAN}cipi ssh add [key]${NC}                 Add an SSH public key"
     echo -e "    ${CYAN}cipi ssh remove [n]${NC}                Remove an SSH key by number"
     echo ""
-    echo -e "  ${BOLD}${CYAN}SSL / PHP / FIREWALL / BACKUP${NC}"
+    echo -e "  ${BOLD}${CYAN}SSL / PHP / FIREWALL / BAN / BACKUP${NC}"
     echo -e "    ${CYAN}cipi ssl install <app>${NC}              SSL certificate"
     echo -e "    ${CYAN}cipi ssl renew${NC}                      Renew all certs"
     echo -e "    ${CYAN}cipi php list${NC}                       PHP versions"
@@ -142,6 +142,8 @@ show_help() {
     echo -e "    ${CYAN}cipi php switch <ver>${NC}                Switch system default PHP"
     echo -e "    ${CYAN}cipi firewall allow <port>${NC}          Allow port"
     echo -e "    ${CYAN}cipi firewall list${NC}                  Firewall rules"
+    echo -e "    ${CYAN}cipi ban list${NC}                       List banned IPs"
+    echo -e "    ${CYAN}cipi ban unban <IP>${NC}                 Unban an IP"
     echo -e "    ${CYAN}cipi backup configure${NC}               Configure S3"
     echo -e "    ${CYAN}cipi backup run [app]${NC}               Run backup"
     echo -e "    ${CYAN}cipi backup list [app]${NC}              List S3 backups"
@@ -221,6 +223,7 @@ main() {
         ssl)        require_root; source "${CIPI_LIB}/ssl.sh";         ssl_command "$@" ;;
         php)        require_root; source "${CIPI_LIB}/php.sh";         php_command "$@" ;;
         firewall)   require_root; source "${CIPI_LIB}/firewall.sh";    firewall_command "$@" ;;
+        ban)        require_root; source "${CIPI_LIB}/ban.sh";         ban_command "$@" ;;
         backup)     require_root; source "${CIPI_LIB}/backup.sh";      backup_command "$@" ;;
         self-update) require_root; source "${CIPI_LIB}/self-update.sh"; selfupdate_command "$@" ;;
         service)    require_root; source "${CIPI_LIB}/service.sh";    service_command "$@" ;;

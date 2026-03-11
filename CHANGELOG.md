@@ -4,6 +4,19 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [4.3.0] — 2026-03-11
+
+### Added
+
+- **`cipi ban list`** — List all IPs currently banned by fail2ban, grouped by jail
+- **`cipi ban unban <IP>`** — Unban a specific IP from all fail2ban jails
+
+### Changed
+
+- **Fail2ban hardening** — Progressive banning with exponential backoff (24h base, doubles each time, 7-day cap); reduced max retries from 5 to 3; added `recidive` jail that bans repeat offenders for 7 days after 3 bans in 24h; migration 4.3.0 upgrades existing installations automatically
+
+---
+
 ## [4.2.9] — 2026-03-11
 
 ### Added

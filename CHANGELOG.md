@@ -4,6 +4,14 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [4.3.1] — 2026-03-12
+
+### Fixed
+
+- **Self-update crash on version upgrade** — The `cipi` main script was read lazily by bash; when `cipi self-update` replaced the file on disk mid-execution, bash would resume reading the new file at the old byte offset, causing `syntax error near unexpected token ';;'` whenever the new version had different line lengths (e.g. added commands); wrapped the entire script in a `{ …; exit; }` block so bash reads it fully into memory before executing, making on-disk replacement safe
+
+---
+
 ## [4.3.0] — 2026-03-11
 
 ### Added

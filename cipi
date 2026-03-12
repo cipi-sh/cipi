@@ -8,6 +8,7 @@
 #############################################
 
 set -euo pipefail
+{
 
 readonly CIPI_LIB="/opt/cipi/lib"
 readonly CIPI_CONFIG="/etc/cipi"
@@ -238,3 +239,5 @@ main() {
 }
 
 main "$@"
+exit
+}

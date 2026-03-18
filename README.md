@@ -4,8 +4,8 @@
 
 # Cipi
 
-**The open-source CLI built exclusively for Laravel.**  
-One command installs a complete production stack. One command ships your app.
+**PHP hosting without the cognitive overhead. Laravel first.**  
+One command installs a complete production stack. One command deploys your app. No panel, no bloat — so you can focus on what you love: building your application.
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/cipi-sh/cipi?style=flat&color=yellow)](https://github.com/cipi-sh/cipi/stargazers)
@@ -20,7 +20,7 @@ One command installs a complete production stack. One command ships your app.
 
 ## What is Cipi?
 
-Cipi turns any Ubuntu VPS into a **multi-app Laravel hosting platform** — with full isolation, zero-downtime deploys, SSL, queue workers, and S3 backups — all managed from a single CLI.
+Cipi turns any Ubuntu VPS into a **multi-app PHP hosting platform — Laravel first** — with full isolation, zero-downtime deploys, SSL, queue workers, and S3 backups — all managed from a single CLI.
 
 No web panel. No bloat. No sleepless nights fighting Nginx configs or PHP-FPM pools.  
 Just SSH and the `cipi` command.
@@ -41,7 +41,7 @@ $ wget -O - https://cipi.sh/setup.sh | bash
 wget -O - https://cipi.sh/setup.sh | bash
 ```
 
-**2. Create your app** and answer a few prompts:
+**2. Create your app** (Laravel by default) and answer a few prompts:
 
 ```bash
 cipi app create
@@ -62,7 +62,7 @@ That's it. Your Laravel app is live.
 
 ## Stack
 
-Every app gets a fully isolated environment:
+Every app gets a fully isolated environment. Laravel first; same stack for WordPress, static sites, and generic PHP.
 
 | Component | Details |
 |---|---|
@@ -88,11 +88,14 @@ Deployer clones your repo, runs `composer install`, links storage, runs migratio
 ### 🔗 Webhook Auto-Deploy
 Native GitHub and GitLab integration — deploy keys and webhooks configured automatically. HMAC signature verification. Or plug in any custom Git provider.
 
+### 📦 Multiple App Types
+Laravel first; then WordPress, static, and generic PHP from the same CLI. Use **`--wordpress`** for WordPress (shared wp-config and wp-content, no webhook), **`--static`** for static sites and SPAs (index.html + 404.html, no DB or PHP; docroot: `/`, `build`, `dist`, `out`, `docs`, `public`), **`--generic`** for any PHP app (configurable docroot: `/`, `public`, `web`, `htdocs`, `www`; DB and minimal .env; no webhook). No cron or workers for WordPress, static, or generic — just Nginx, deploy key, and optional DB.
+
 ### 🌐 Aliases & SSL
 Add multiple domains or subdomains to any app. A single SAN certificate covers all of them. Auto-renew handles the rest.
 
 ### 🤖 AI Agent Ready (MCP)
-Cipi ships with a built-in MCP server. Install the `cipi-agent` Laravel package, point your AI client at the endpoint, and deploy, rollback, query logs, and run Artisan commands via natural language — no SSH required.
+Cipi ships with a built-in MCP server. Laravel first: install the `cipi-agent` Laravel package, point your AI client at the endpoint, and deploy, rollback, query logs, and run Artisan commands via natural language — no SSH required.
 
 Works with Claude, Cursor, VS Code, OpenAI, Gemini, and more.
 
@@ -112,8 +115,8 @@ Move entire stacks or single apps between Cipi servers — for migration, failov
 
 ## Who uses Cipi?
 
-- **Solo developers** — ship Laravel without the DevOps overhead
-- **Agencies** — one VPS, many isolated client projects, onboard a new client in minutes
+- **Solo developers** — ship Laravel first, without the DevOps overhead
+- **Agencies** — one VPS, many isolated client projects (Laravel first), onboard a new client in minutes
 - **Startups & SaaS** — atomic deploys, instant rollbacks, grow without changing your workflow
 - **Datacenters & automation pipelines** — every Cipi command is a plain shell call, wire it into Ansible or any provisioning script
 

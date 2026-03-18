@@ -4,6 +4,25 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [4.3.3] — 2026-03-18
+
+### Added
+
+- **`cipi app create --wordpress`** — Creates an app configured for WordPress: document root is the release root (no `/public`), Nginx uses `try_files` with `index.php?$args`, shared `wp-config.php` (DB and salts) and `wp-content` in shared; no webhook (deploy key only), no queue workers, no Laravel scheduler; Deployer uses `recipe/wordpress.php` with shared `wp-config.php` and `wp-content`
+- **`cipi app create --static`** — Creates a static-site app: Nginx serves only static files with `index.html` as index and `404.html` as fallback (no PHP); document root is chosen among `/`, `build`, `dist`, `out`, `docs`, `public` (e.g. for SPAs or static generators); no database, no webhook, no PHP-FPM pool, no cron, no workers; minimal Deployer config (git clone + release)
+- **`cipi app create --generic`** — Creates a generic PHP app: document root chosen among `/`, `public`, `web`, `htdocs`, `www`; Nginx uses `try_files` to `index.php?$query_string`; database and minimal `.env` (DB only) are created; no webhook, no cron, no workers; Deployer uses `recipe/common.php` with shared `.env`
+- **`--docroot=<path>` for create** — When using `--static` or `--generic`, docroot can be set via `--docroot=dist` or `--docroot=public` to skip the interactive prompt
+
+### Changed
+
+- **App type mutual exclusion** — Only one of `--wordpress`, `--static`, or `--generic` can be used with `cipi app create` (or none for Laravel)
+- **`cipi app show`** — Displays app type (WordPress, Static, Generic) and docroot when applicable; Webhook line is shown only for Laravel apps (apps with a webhook token)
+- **`cipi app env`** — For WordPress opens `shared/wp-config.php`; for static apps exits with an error (no .env)
+- **`cipi app reset-db-password`** — For static apps exits with an error (no database)
+- **`cipi app delete`** — Skips database drop for static apps (none was created)
+
+---
+
 ## [4.3.2] — 2026-03-14
 
 ### Added

@@ -11,8 +11,9 @@ set('git_ssh_command', 'ssh -i __CIPI_DEPLOY_PATH__/.ssh/id_ed25519 -o StrictHos
 set('bin/php', '/usr/bin/php__CIPI_PHP_VERSION__');
 set('writable_mode', 'chmod');
 
-add('shared_files', ['wp-config.php']);
-add('shared_dirs', ['wp-content']);
+// Override recipe defaults: share whole wp-content (not wp-content/uploads only) to avoid conflict
+set('shared_files', ['wp-config.php']);
+set('shared_dirs', ['wp-content']);
 set('writable_dirs', ['wp-content', 'wp-content/uploads']);
 
 // WordPress: no composer in repo root — skip deploy:vendors

@@ -22,8 +22,8 @@ app_create() {
     [[ -z "${ARG_branch:-}" ]] && read_input "Branch" "$branch" branch
     [[ -z "${ARG_php:-}" ]] && read_input "PHP version" "$php_ver" php_ver
 
-    # Custom app: docroot, try_files fallback, entry point (index)
-    local docroot="" try_files="" entry_point=""
+    # Custom app: docroot only (Nginx always uses index.php)
+    local docroot=""
     if [[ "$app_type" == "custom" ]]; then
         docroot="${ARG_docroot:-}"
         if [[ -z "$docroot" ]]; then
@@ -31,18 +31,6 @@ app_create() {
             read_input "Docroot" "/" docroot
         fi
         [[ "$docroot" == "/" || "$docroot" == "." ]] && docroot=""
-        if [[ -z "${ARG_try_files:-}" ]]; then
-            echo -e "  Nginx try_files fallback: ${CYAN}index.php${NC}, ${CYAN}index.html${NC}, ${CYAN}404.html${NC}"
-            read_input "Try files fallback" "index.php" try_files
-        else
-            try_files="${ARG_try_files}"
-        fi
-        if [[ -z "${ARG_entry_point:-}" ]]; then
-            echo -e "  Entry point (index): ${CYAN}index.php${NC} or ${CYAN}index.html${NC}"
-            read_input "Entry point" "index.php" entry_point
-        else
-            entry_point="${ARG_entry_point}"
-        fi
     fi
 
     # Validate
@@ -188,7 +176,7 @@ ENV
     # 7. Nginx vhost
     step "Nginx vhost..."
     if [[ "$app_type" == "custom" ]]; then
-        _create_nginx_vhost "$app_user" "$domain" "$php_ver" "" "custom" "$docroot" "$try_files" "$entry_point"
+        _create_nginx_vhost "$app_user" "$domain" "$php_ver" "" "custom" "$docroot"
     else
         _create_nginx_vhost "$app_user" "$domain" "$php_ver" ""
     fi
@@ -208,8 +196,6 @@ ENV
     "php": "${php_ver}",
     "custom": true,
     "docroot": "${docroot}",
-    "try_files": "${try_files}",
-    "entry_point": "${entry_point}",
     "created_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 }
 JSON
@@ -293,8 +279,6 @@ SUDO
     echo -e "  PHP:        ${CYAN}${php_ver}${NC}"
     echo -e "  Home:       ${CYAN}${home}${NC}"
     [[ "$app_type" == "custom" ]] && echo -e "  Docroot:    ${CYAN}/${docroot:-}${NC}"
-    [[ "$app_type" == "custom" ]] && echo -e "  Try files:  ${CYAN}${try_files}${NC}"
-    [[ "$app_type" == "custom" ]] && echo -e "  Entry:      ${CYAN}${entry_point}${NC}"
     echo ""
     echo -e "  ${BOLD}SSH${NC}         ${CYAN}${app_user}${NC} / ${CYAN}${user_pass}${NC}"
     if [[ "$app_type" == "laravel" ]]; then
@@ -370,17 +354,13 @@ app_show() {
     aliases=$(vault_read apps.json | jq -r --arg a "$app" '.[$a].aliases//[]|join(", ")')
     [[ -z "$aliases" ]] && aliases="none"
 
-    local is_custom docroot_show try_show entry_show
+    local is_custom docroot_show
     is_custom=$(app_get "$app" custom)
     docroot_show=$(app_get "$app" docroot)
-    try_show=$(app_get "$app" try_files)
-    entry_show=$(app_get "$app" entry_point)
     echo -e "\n${BOLD}${app}${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     [[ "$is_custom" == "true" ]] && printf "  %-14s ${CYAN}%s${NC}\n" "Type" "Custom"
     [[ "$is_custom" == "true" ]] && [[ -n "$docroot_show" ]] && printf "  %-14s ${CYAN}/%s${NC}\n" "Docroot" "$docroot_show"
-    [[ "$is_custom" == "true" ]] && [[ -n "$try_show" ]] && printf "  %-14s ${CYAN}%s${NC}\n" "Try files" "$try_show"
-    [[ "$is_custom" == "true" ]] && [[ -n "$entry_show" ]] && printf "  %-14s ${CYAN}%s${NC}\n" "Entry point" "$entry_show"
     printf "  %-14s ${CYAN}%s${NC}\n" "Domain" "$d"
     printf "  %-14s ${CYAN}%s${NC}\n" "Aliases" "$aliases"
     printf "  %-14s ${CYAN}%s${NC}\n" "Repository" "$repo"
@@ -649,7 +629,7 @@ EOF
 
 _create_nginx_vhost() {
     local app="$1" domain="$2" v="$3"
-    local names aliases_raw vhost_type docroot try_files_fb entry_point
+    local names aliases_raw vhost_type docroot
     if [[ $# -ge 4 ]]; then
         aliases_raw="${4:-}"
     else
@@ -658,16 +638,12 @@ _create_nginx_vhost() {
     if [[ $# -ge 5 && -n "${5:-}" ]]; then
         vhost_type="${5}"
         docroot="${6:-}"
-        try_files_fb="${7:-}"
-        entry_point="${8:-}"
     else
         if [[ "$(app_get "$app" custom)" == "true" ]]; then
             vhost_type="custom"
             docroot=$(app_get "$app" docroot)
-            try_files_fb=$(app_get "$app" try_files)
-            entry_point=$(app_get "$app" entry_point)
         else
-            vhost_type="laravel"; docroot=""; try_files_fb=""; entry_point=""
+            vhost_type="laravel"; docroot=""
         fi
     fi
     names=$(echo -e "${domain}\n${aliases_raw}" | grep -v '^[[:space:]]*$' | awk '!seen[$0]++' | tr '\n' ' ' | sed 's/ $//')
@@ -680,25 +656,13 @@ _create_nginx_vhost() {
     fi
 
     if [[ "$vhost_type" == "custom" ]]; then
-        [[ -z "$try_files_fb" ]] && try_files_fb="index.php"
-        [[ -z "$entry_point" ]] && entry_point="index.php"
-        local try_line
-        case "$try_files_fb" in
-            index.php) try_line='try_files \$uri \$uri/ /index.php?\$query_string;' ;;
-            index.html) try_line='try_files \$uri \$uri/ /index.html;' ;;
-            404.html) try_line='try_files \$uri \$uri/ /404.html;' ;;
-            *) try_line='try_files \$uri \$uri/ /index.php?\$query_string;' ;;
-        esac
-        local need_php="no"
-        [[ "$entry_point" == "index.php" || "$try_files_fb" == "index.php" ]] && need_php="yes"
-        if [[ "$need_php" == "yes" ]]; then
-            cat > "/etc/nginx/sites-available/${app}" <<EOF
+        cat > "/etc/nginx/sites-available/${app}" <<EOF
 server {
     listen 80;
     listen [::]:80;
     server_name ${names};
     root ${root_path};
-    index ${entry_point};
+    index index.html index.php;
     access_log /home/${app}/logs/nginx-access.log;
     error_log /home/${app}/logs/nginx-error.log;
     add_header X-Frame-Options "SAMEORIGIN" always;
@@ -706,7 +670,7 @@ server {
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     client_max_body_size 256M;
     location / {
-        ${try_line}
+        try_files \$uri \$uri/ /index.php?\$args;
     }
     location ~ \.php$ {
         fastcgi_pass unix:/run/php/${app}.sock;
@@ -718,40 +682,9 @@ server {
     location ~ /\.(?!well-known) { deny all; }
     location = /favicon.ico { access_log off; log_not_found off; }
     location = /robots.txt  { access_log off; log_not_found off; }
-EOF
-        # Only use error_page 404 for static 404.html — avoid loop when fallback is index.php/index.html
-        if [[ "$try_files_fb" == "404.html" ]]; then
-            echo "    error_page 404 /404.html;" >> "/etc/nginx/sites-available/${app}"
-        fi
-        cat >> "/etc/nginx/sites-available/${app}" <<'END'
+    error_page 404 /404.html;
 }
-END
-        else
-            cat > "/etc/nginx/sites-available/${app}" <<EOF
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${names};
-    root ${root_path};
-    index ${entry_point};
-    access_log /home/${app}/logs/nginx-access.log;
-    error_log /home/${app}/logs/nginx-error.log;
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-    client_max_body_size 256M;
-    location / {
-        ${try_line}
-    }
-    location ~ /\.(?!well-known) { deny all; }
-    location = /favicon.ico { access_log off; log_not_found off; }
-    location = /robots.txt  { access_log off; log_not_found off; }
 EOF
-        if [[ "$try_files_fb" == "404.html" ]]; then
-            echo "    error_page 404 /404.html;" >> "/etc/nginx/sites-available/${app}"
-        fi
-        echo "}" >> "/etc/nginx/sites-available/${app}"
-        fi
     else
         cat > "/etc/nginx/sites-available/${app}" <<EOF
 server {

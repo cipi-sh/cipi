@@ -9,35 +9,73 @@ app_create() {
     parse_args "$@"
     local app_user="${ARG_user:-}" domain="${ARG_domain:-}" repository="${ARG_repository:-}"
     local branch="${ARG_branch:-main}" php_ver="${ARG_php:-8.5}"
-    local is_wp="${ARG_wordpress:-false}"
+    local is_wp="${ARG_wordpress:-false}" is_static="${ARG_static:-false}" is_generic="${ARG_generic:-false}"
+
+    # App type: exactly one of laravel, wordpress, static, generic
+    local app_type="laravel"
+    [[ "$is_wp" == "true" ]] && app_type="wordpress"
+    [[ "$is_static" == "true" ]] && app_type="static"
+    [[ "$is_generic" == "true" ]] && app_type="generic"
+    if [[ "$is_wp" == "true" && "$is_static" == "true" ]] || [[ "$is_wp" == "true" && "$is_generic" == "true" ]] || [[ "$is_static" == "true" && "$is_generic" == "true" ]]; then
+        error "Use only one of: --wordpress, --static, --generic (or none for Laravel)"
+        exit 1
+    fi
 
     # Interactive prompts for missing fields
     [[ -z "$app_user" ]]    && read_input "App username (lowercase, min 3 chars)" "" app_user
     [[ -z "$domain" ]]      && read_input "Primary domain" "" domain
     [[ -z "$repository" ]]  && read_input "Git repository URL (SSH)" "" repository
     [[ -z "${ARG_branch:-}" ]] && read_input "Branch" "$branch" branch
-    [[ -z "${ARG_php:-}" ]]   && read_input "PHP version" "$php_ver" php_ver
+    if [[ "$app_type" != "static" ]]; then
+        [[ -z "${ARG_php:-}" ]]   && read_input "PHP version" "$php_ver" php_ver
+    else
+        php_ver="${ARG_php:-8.5}"
+    fi
+
+    # Docroot choice for static (/ , /build, /dist, /out, /docs, /public) or generic (/ , /public, /web, /htdocs, /www)
+    local docroot="${ARG_docroot:-}"
+    if [[ "$app_type" == "static" ]]; then
+        if [[ -z "$docroot" ]]; then
+            echo -e "  Document root (inside repo): ${CYAN}/${NC} (root), ${CYAN}build${NC}, ${CYAN}dist${NC}, ${CYAN}out${NC}, ${CYAN}docs${NC}, ${CYAN}public${NC}"
+            read_input "Docroot" "dist" docroot
+        fi
+        [[ "$docroot" == "/" || "$docroot" == "." ]] && docroot=""
+    elif [[ "$app_type" == "generic" ]]; then
+        if [[ -z "$docroot" ]]; then
+            echo -e "  Document root (inside repo): ${CYAN}/${NC} (root), ${CYAN}public${NC}, ${CYAN}web${NC}, ${CYAN}htdocs${NC}, ${CYAN}www${NC}"
+            read_input "Docroot" "public" docroot
+        fi
+        [[ "$docroot" == "/" || "$docroot" == "." ]] && docroot=""
+    fi
 
     # Validate
     validate_username "$app_user"  || { error "Invalid username '${app_user}'"; exit 1; }
     validate_domain "$domain"      || { error "Invalid domain '${domain}'"; exit 1; }
-    validate_php_version "$php_ver" || { error "Invalid PHP version. Use: 7.4 8.0 8.1 8.2 8.3 8.4 8.5"; exit 1; }
-    php_is_installed "$php_ver"    || { error "PHP $php_ver not installed. Run: cipi php install $php_ver"; exit 1; }
+    if [[ "$app_type" != "static" ]]; then
+        validate_php_version "$php_ver" || { error "Invalid PHP version. Use: 7.4 8.0 8.1 8.2 8.3 8.4 8.5"; exit 1; }
+        php_is_installed "$php_ver"    || { error "PHP $php_ver not installed. Run: cipi php install $php_ver"; exit 1; }
+    fi
     app_exists "$app_user"         && { error "App '${app_user}' already exists"; exit 1; }
     id "$app_user" &>/dev/null     && { error "User '${app_user}' already exists"; exit 1; }
     domain_is_used_by_other_app "$domain" && { error "Domain '${domain}' is already used by app '${DOMAIN_USED_BY_APP}'"; exit 1; }
 
-    echo ""; info "Creating '${app_user}'..."; echo ""
+    echo ""; info "Creating '${app_user}' (${app_type})..."; echo ""
 
     local user_pass db_pass webhook_token app_key home
     user_pass=$(generate_password 40)
-    db_pass=$(generate_password 40)
-    if [[ "$is_wp" != "true" ]]; then
+    db_pass=""
+    if [[ "$app_type" == "generic" ]]; then
+        db_pass=$(generate_password 40)
+    elif [[ "$app_type" == "laravel" ]]; then
+        db_pass=$(generate_password 40)
         webhook_token=$(generate_token)
         app_key=$(generate_app_key)
     else
         webhook_token=""
         app_key=""
+    fi
+    if [[ "$app_type" == "wordpress" ]]; then
+        db_pass=$(generate_password 40)
     fi
     home="/home/${app_user}"
 
@@ -51,12 +89,16 @@ app_create() {
 
     # 2. Directories
     step "Directories..."
-    if [[ "$is_wp" == "true" ]]; then
+    if [[ "$app_type" == "wordpress" ]]; then
         mkdir -p "${home}"/{shared/wp-content/{uploads,plugins,themes},logs,.ssh,.deployer}
+    elif [[ "$app_type" == "static" ]]; then
+        mkdir -p "${home}"/{logs,.ssh,.deployer}
+    elif [[ "$app_type" == "generic" ]]; then
+        mkdir -p "${home}"/{shared,logs,.ssh,.deployer}
     else
         mkdir -p "${home}"/{shared/storage/{app/public,framework/{cache/data,sessions,views},logs},logs,.ssh,.deployer}
     fi
-    if [[ "$is_wp" == "true" ]]; then
+    if [[ "$app_type" == "wordpress" || "$app_type" == "static" || "$app_type" == "generic" ]]; then
         cat > "${home}/.bashrc" <<BASH
 export PATH="/usr/local/bin:\$PATH"
 alias php='/usr/bin/php${php_ver}'
@@ -92,16 +134,17 @@ BASH
 
     # 3b. Git provider integration (auto-add deploy key; webhook only for Laravel)
     source "${CIPI_LIB}/git.sh"
-    if [[ "$is_wp" == "true" ]]; then
-        git_setup_repo "$app_user" "$repository" "$domain" "" "$deploy_key" "skip_webhook"
-    else
+    if [[ "$app_type" == "laravel" ]]; then
         git_setup_repo "$app_user" "$repository" "$domain" "$webhook_token" "$deploy_key"
+    else
+        git_setup_repo "$app_user" "$repository" "$domain" "" "$deploy_key" "skip_webhook"
     fi
 
-    # 4. MariaDB database
-    step "Database..."
-    local db_root; db_root=$(get_db_root_password)
-    mariadb -u root -p"${db_root}" <<SQL
+    # 4. MariaDB database (skip for static)
+    if [[ "$app_type" != "static" ]]; then
+        step "Database..."
+        local db_root; db_root=$(get_db_root_password)
+        mariadb -u root -p"${db_root}" <<SQL
 CREATE DATABASE IF NOT EXISTS \`${app_user}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${app_user}'@'localhost' IDENTIFIED BY '${db_pass}';
 CREATE USER IF NOT EXISTS '${app_user}'@'127.0.0.1' IDENTIFIED BY '${db_pass}';
@@ -109,10 +152,11 @@ GRANT ALL PRIVILEGES ON \`${app_user}\`.* TO '${app_user}'@'localhost';
 GRANT ALL PRIVILEGES ON \`${app_user}\`.* TO '${app_user}'@'127.0.0.1';
 FLUSH PRIVILEGES;
 SQL
-    success "Database"
+        success "Database"
+    fi
 
-    # 5. Config: .env (Laravel) or wp-config.php (WordPress)
-    if [[ "$is_wp" == "true" ]]; then
+    # 5. Config: .env (Laravel / generic) or wp-config.php (WordPress); skip for static
+    if [[ "$app_type" == "wordpress" ]]; then
         step "wp-config.php..."
         local wp_table_prefix="wp_"
         local wp_keys
@@ -139,7 +183,7 @@ WPCONFIG
         chown "${app_user}:${app_user}" "${home}/shared/wp-config.php"
         chmod 640 "${home}/shared/wp-config.php"
         success "wp-config.php in shared"
-    else
+    elif [[ "$app_type" == "laravel" ]]; then
         step ".env..."
         cat > "${home}/shared/.env" <<ENV
 APP_NAME="${app_user}"
@@ -172,18 +216,36 @@ ENV
         chown "${app_user}:${app_user}" "${home}/shared/.env"
         chmod 640 "${home}/shared/.env"
         success ".env with DB + webhook"
+    elif [[ "$app_type" == "generic" ]]; then
+        step ".env..."
+        cat > "${home}/shared/.env" <<ENV
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=${app_user}
+DB_USERNAME=${app_user}
+DB_PASSWORD=${db_pass}
+ENV
+        chown "${app_user}:${app_user}" "${home}/shared/.env"
+        chmod 640 "${home}/shared/.env"
+        success ".env (DB only)"
     fi
 
-    # 6. PHP-FPM pool
-    step "PHP-FPM pool..."
-    _create_fpm_pool "$app_user" "$php_ver"
-    reload_php_fpm "$php_ver"
-    success "PHP-FPM ${php_ver}"
+    # 6. PHP-FPM pool (skip for static)
+    if [[ "$app_type" != "static" ]]; then
+        step "PHP-FPM pool..."
+        _create_fpm_pool "$app_user" "$php_ver"
+        reload_php_fpm "$php_ver"
+        success "PHP-FPM ${php_ver}"
+    fi
 
     # 7. Nginx vhost
     step "Nginx vhost..."
-    if [[ "$is_wp" == "true" ]]; then
-        _create_nginx_vhost "$app_user" "$domain" "$php_ver" "" "wordpress"
+    if [[ "$app_type" == "wordpress" ]]; then
+        _create_nginx_vhost "$app_user" "$domain" "$php_ver" "" "wordpress" ""
+    elif [[ "$app_type" == "static" ]]; then
+        _create_nginx_vhost "$app_user" "$domain" "$php_ver" "" "static" "$docroot"
+    elif [[ "$app_type" == "generic" ]]; then
+        _create_nginx_vhost "$app_user" "$domain" "$php_ver" "" "generic" "$docroot"
     else
         _create_nginx_vhost "$app_user" "$domain" "$php_ver" ""
     fi
@@ -192,7 +254,7 @@ ENV
     success "Nginx → ${domain}"
 
     # 8. Save config early (so app is registered even if later steps fail)
-    if [[ "$is_wp" == "true" ]]; then
+    if [[ "$app_type" == "wordpress" ]]; then
         app_save "$app_user" "$(cat <<JSON
 {
     "user": "${app_user}",
@@ -202,6 +264,36 @@ ENV
     "branch": "${branch}",
     "php": "${php_ver}",
     "wordpress": true,
+    "created_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+}
+JSON
+)"
+    elif [[ "$app_type" == "static" ]]; then
+        app_save "$app_user" "$(cat <<JSON
+{
+    "user": "${app_user}",
+    "domain": "${domain}",
+    "aliases": [],
+    "repository": "${repository}",
+    "branch": "${branch}",
+    "php": "${php_ver}",
+    "static": true,
+    "docroot": "${docroot}",
+    "created_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+}
+JSON
+)"
+    elif [[ "$app_type" == "generic" ]]; then
+        app_save "$app_user" "$(cat <<JSON
+{
+    "user": "${app_user}",
+    "domain": "${domain}",
+    "aliases": [],
+    "repository": "${repository}",
+    "branch": "${branch}",
+    "php": "${php_ver}",
+    "generic": true,
+    "docroot": "${docroot}",
     "created_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 }
 JSON
@@ -232,21 +324,24 @@ JSON
         "Cipi app created: ${app_user} on $(hostname)" \
         "A new app was created.\n\nServer: $(hostname)\nApp: ${app_user}\nDomain: ${domain}\nPHP: ${php_ver}\nBranch: ${branch}\nRepository: ${repository}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')"
 
-    # 9. Supervisor default worker (Laravel only; WordPress has no queue worker)
+    # 9. Supervisor (Laravel only; static/generic/WordPress have no queue worker)
     step "Queue worker..."
     echo "" > "/etc/supervisor/conf.d/${app_user}.conf"
-    if [[ "$is_wp" != "true" ]]; then
+    if [[ "$app_type" == "laravel" ]]; then
         _create_supervisor_worker "$app_user" "$php_ver" "default"
         reload_supervisor
         success "Worker (default queue)"
     else
         reload_supervisor
-        success "Skipped (WordPress)"
+        success "Skipped"
     fi
 
-    # 10. Crontab
+    # 10. Crontab (static/generic: none; WordPress: deploy trigger only; Laravel: scheduler + deploy trigger)
     step "Crontab..."
-    if [[ "$is_wp" == "true" ]]; then
+    if [[ "$app_type" == "static" || "$app_type" == "generic" ]]; then
+        crontab -u "$app_user" -r 2>/dev/null || true
+        success "None"
+    elif [[ "$app_type" == "wordpress" ]]; then
         cat <<CRON | crontab -u "$app_user" -
 # Cipi deploy trigger (manual: cipi deploy ${app_user})
 * * * * * test -f ${home}/.deploy-trigger && rm -f ${home}/.deploy-trigger && cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php >> ${home}/logs/deploy.log 2>&1
@@ -264,8 +359,12 @@ CRON
 
     # 11. Deployer config
     step "Deployer..."
-    if [[ "$is_wp" == "true" ]]; then
+    if [[ "$app_type" == "wordpress" ]]; then
         _create_deployer_config_wordpress "$app_user" "$repository" "$branch" "$php_ver"
+    elif [[ "$app_type" == "static" ]]; then
+        _create_deployer_config_static "$app_user" "$repository" "$branch" "$php_ver"
+    elif [[ "$app_type" == "generic" ]]; then
+        _create_deployer_config_generic "$app_user" "$repository" "$branch" "$php_ver"
     else
         _create_deployer_config "$app_user" "$repository" "$branch" "$php_ver"
     fi
@@ -289,18 +388,44 @@ SUDO
     local server_ip; server_ip=$(curl -s --max-time 3 https://checkip.amazonaws.com 2>/dev/null || hostname)
     echo -e "  Domain:     ${CYAN}${domain}${NC}"
     echo -e "  IP:         ${CYAN}${server_ip}${NC}"
-    echo -e "  PHP:        ${CYAN}${php_ver}${NC}"
+    [[ "$app_type" != "static" ]] && echo -e "  PHP:        ${CYAN}${php_ver}${NC}"
     echo -e "  Home:       ${CYAN}${home}${NC}"
+    [[ "$app_type" == "static" ]] && echo -e "  Docroot:    ${CYAN}/${docroot:-}${NC}"
+    [[ "$app_type" == "generic" ]] && echo -e "  Docroot:    ${CYAN}/${docroot:-}${NC}"
     echo ""
     echo -e "  ${BOLD}SSH${NC}         ${CYAN}${app_user}${NC} / ${CYAN}${user_pass}${NC}"
-    echo -e "  ${BOLD}Database${NC}    ${CYAN}${app_user}${NC} / ${CYAN}${db_pass}${NC}"
-    echo ""
-    echo -e "  ${BOLD}MariaDB URL${NC}"
-    echo -e "  ${CYAN}mariadb+ssh://${app_user}:${user_pass}@${server_ip}/${app_user}:${db_pass}@127.0.0.1/${app_user}${NC}"
-    echo ""
-    if [[ "$is_wp" == "true" ]]; then
+    if [[ "$app_type" != "static" ]]; then
+        echo -e "  ${BOLD}Database${NC}    ${CYAN}${app_user}${NC} / ${CYAN}${db_pass}${NC}"
+        echo ""
+        echo -e "  ${BOLD}MariaDB URL${NC}"
+        echo -e "  ${CYAN}mariadb+ssh://${app_user}:${user_pass}@${server_ip}/${app_user}:${db_pass}@127.0.0.1/${app_user}${NC}"
+        echo ""
+    fi
+    if [[ "$app_type" == "static" ]]; then
         if [[ -n "${GIT_PROVIDER:-}" && -n "${GIT_DEPLOY_KEY_ID:-}" ]]; then
-            echo -e "  ${BOLD}Git${NC}         ${GREEN}${GIT_PROVIDER} deploy key ✓${NC} (no webhook — WordPress)"
+            echo -e "  ${BOLD}Git${NC}         ${GREEN}${GIT_PROVIDER} deploy key ✓${NC}"
+        else
+            echo -e "  ${BOLD}Deploy Key${NC}  (add to your Git provider)"
+            echo -e "  ${CYAN}${deploy_key}${NC}"
+            [[ -z "${GIT_PROVIDER:-}" ]] && echo -e "  ${DIM}Tip: cipi git github-token <PAT> to auto-configure next time${NC}"
+        fi
+        echo ""
+        echo -e "  ${BOLD}Next:${NC} cipi deploy ${app_user}"
+        echo -e "        cipi ssl install ${app_user}"
+    elif [[ "$app_type" == "generic" ]]; then
+        if [[ -n "${GIT_PROVIDER:-}" && -n "${GIT_DEPLOY_KEY_ID:-}" ]]; then
+            echo -e "  ${BOLD}Git${NC}         ${GREEN}${GIT_PROVIDER} deploy key ✓${NC}"
+        else
+            echo -e "  ${BOLD}Deploy Key${NC}  (add to your Git provider)"
+            echo -e "  ${CYAN}${deploy_key}${NC}"
+            [[ -z "${GIT_PROVIDER:-}" ]] && echo -e "  ${DIM}Tip: cipi git github-token <PAT> to auto-configure next time${NC}"
+        fi
+        echo ""
+        echo -e "  ${BOLD}Next:${NC} cipi deploy ${app_user}"
+        echo -e "        cipi ssl install ${app_user}"
+    elif [[ "$app_type" == "wordpress" ]]; then
+        if [[ -n "${GIT_PROVIDER:-}" && -n "${GIT_DEPLOY_KEY_ID:-}" ]]; then
+            echo -e "  ${BOLD}Git${NC}         ${GREEN}${GIT_PROVIDER} deploy key ✓${NC} (no webhook)"
         else
             echo -e "  ${BOLD}Deploy Key${NC}  (add to your Git provider)"
             echo -e "  ${CYAN}${deploy_key}${NC}"
@@ -364,10 +489,17 @@ app_show() {
     aliases=$(vault_read apps.json | jq -r --arg a "$app" '.[$a].aliases//[]|join(", ")')
     [[ -z "$aliases" ]] && aliases="none"
 
-    local is_wp; is_wp=$(app_get "$app" wordpress)
+    local is_wp is_static is_generic docroot_show
+    is_wp=$(app_get "$app" wordpress)
+    is_static=$(app_get "$app" static)
+    is_generic=$(app_get "$app" generic)
+    docroot_show=$(app_get "$app" docroot)
     echo -e "\n${BOLD}${app}${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     [[ "$is_wp" == "true" ]] && printf "  %-14s ${CYAN}%s${NC}\n" "Type" "WordPress"
+    [[ "$is_static" == "true" ]] && printf "  %-14s ${CYAN}%s${NC}\n" "Type" "Static"
+    [[ "$is_generic" == "true" ]] && printf "  %-14s ${CYAN}%s${NC}\n" "Type" "Generic"
+    [[ "$is_static" == "true" || "$is_generic" == "true" ]] && [[ -n "$docroot_show" ]] && printf "  %-14s ${CYAN}/%s${NC}\n" "Docroot" "$docroot_show"
     printf "  %-14s ${CYAN}%s${NC}\n" "Domain" "$d"
     printf "  %-14s ${CYAN}%s${NC}\n" "Aliases" "$aliases"
     printf "  %-14s ${CYAN}%s${NC}\n" "Repository" "$repo"
@@ -381,8 +513,8 @@ app_show() {
         printf "  %-14s ${GREEN}%s${NC} (key:%s hook:%s)\n" "Git" "$git_prov" "${git_dkid:-manual}" "${git_whid:-manual}"
     fi
 
-    local is_wp; is_wp=$(app_get "$app" wordpress)
-    if [[ "$is_wp" != "true" ]]; then
+    local show_webhook; show_webhook=$(app_get "$app" webhook_token)
+    if [[ -n "$show_webhook" ]]; then
         echo -e "\n  ${BOLD}Webhook${NC}  ${CYAN}https://${d}/cipi/webhook${NC}"
     fi
 
@@ -497,7 +629,10 @@ app_delete() {
     step "Workers...";     supervisorctl stop "${app}-worker-*" 2>/dev/null||true; rm -f "/etc/supervisor/conf.d/${app}.conf"; reload_supervisor
     step "Nginx...";       rm -f "/etc/nginx/sites-enabled/${app}" "/etc/nginx/sites-available/${app}"; reload_nginx
     step "PHP-FPM...";     rm -f "/etc/php/${p}/fpm/pool.d/${app}.conf"; reload_php_fpm "$p" 2>/dev/null||true
-    step "Database...";    local dbr; dbr=$(get_db_root_password); mariadb -u root -p"$dbr" -e "DROP DATABASE IF EXISTS \`${app}\`; DROP USER IF EXISTS '${app}'@'localhost'; DROP USER IF EXISTS '${app}'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null||true
+    local is_static_del; is_static_del=$(app_get "$app" static)
+    if [[ "$is_static_del" != "true" ]]; then
+        step "Database...";    local dbr; dbr=$(get_db_root_password); mariadb -u root -p"$dbr" -e "DROP DATABASE IF EXISTS \`${app}\`; DROP USER IF EXISTS '${app}'@'localhost'; DROP USER IF EXISTS '${app}'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null||true
+    fi
     step "Crontab...";     crontab -u "$app" -r 2>/dev/null||true
     step "Sudoers...";     rm -f "/etc/sudoers.d/cipi-${app}"
     step "SSL...";         certbot delete --cert-name "$d" --non-interactive 2>/dev/null||true
@@ -519,6 +654,8 @@ app_delete() {
 app_env() {
     local app="${1:-}"; [[ -z "$app" ]] && { error "Usage: cipi app env <app>"; exit 1; }
     app_exists "$app" || { error "Not found"; exit 1; }
+    local is_static; is_static=$(app_get "$app" static)
+    [[ "$is_static" == "true" ]] && { error "Static apps have no .env"; exit 1; }
     local is_wp; is_wp=$(app_get "$app" wordpress)
     if [[ "$is_wp" == "true" ]]; then
         ${EDITOR:-nano} "/home/${app}/shared/wp-config.php"
@@ -632,20 +769,80 @@ EOF
 
 _create_nginx_vhost() {
     local app="$1" domain="$2" v="$3"
-    local names aliases_raw is_wp
+    local names aliases_raw vhost_type docroot
     if [[ $# -ge 4 ]]; then
         aliases_raw="${4:-}"
     else
         aliases_raw=$(vault_read apps.json | jq -r --arg a "$app" --arg d "$domain" '.[$a].aliases // [] | map(select(. != $d)) | .[]' 2>/dev/null || true)
     fi
     if [[ $# -ge 5 && -n "${5:-}" ]]; then
-        is_wp=true
+        vhost_type="${5}"
+        docroot="${6:-}"
     else
-        is_wp=$(app_get "$app" wordpress)
-        [[ "$is_wp" == "true" ]] || is_wp=false
+        if [[ "$(app_get "$app" wordpress)" == "true" ]]; then vhost_type="wordpress"; docroot=""
+        elif [[ "$(app_get "$app" static)" == "true" ]]; then vhost_type="static"; docroot=$(app_get "$app" docroot)
+        elif [[ "$(app_get "$app" generic)" == "true" ]]; then vhost_type="generic"; docroot=$(app_get "$app" docroot)
+        else vhost_type="laravel"; docroot=""
+        fi
     fi
     names=$(echo -e "${domain}\n${aliases_raw}" | grep -v '^[[:space:]]*$' | awk '!seen[$0]++' | tr '\n' ' ' | sed 's/ $//')
-    if [[ "$is_wp" == "true" ]]; then
+    local root_path="/home/${app}/current"
+    [[ -n "$docroot" ]] && root_path="${root_path}/${docroot}"
+
+    if [[ "$vhost_type" == "static" ]]; then
+        cat > "/etc/nginx/sites-available/${app}" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${names};
+    root ${root_path};
+    index index.html;
+    access_log /home/${app}/logs/nginx-access.log;
+    error_log /home/${app}/logs/nginx-error.log;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    client_max_body_size 256M;
+    location / {
+        try_files \$uri \$uri/ /404.html;
+    }
+    location ~ /\.(?!well-known) { deny all; }
+    location = /favicon.ico { access_log off; log_not_found off; }
+    location = /robots.txt  { access_log off; log_not_found off; }
+    error_page 404 /404.html;
+}
+EOF
+    elif [[ "$vhost_type" == "generic" ]]; then
+        cat > "/etc/nginx/sites-available/${app}" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${names};
+    root ${root_path};
+    index index.php;
+    access_log /home/${app}/logs/nginx-access.log;
+    error_log /home/${app}/logs/nginx-error.log;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    client_max_body_size 256M;
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+    location ~ \.php$ {
+        fastcgi_pass unix:/run/php/${app}.sock;
+        fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
+        include fastcgi_params;
+        fastcgi_hide_header X-Powered-By;
+        fastcgi_read_timeout 300;
+    }
+    location ~ /\.(?!well-known) { deny all; }
+    location = /favicon.ico { access_log off; log_not_found off; }
+    location = /robots.txt  { access_log off; log_not_found off; }
+    error_page 404 /index.php;
+}
+EOF
+    elif [[ "$vhost_type" == "wordpress" ]]; then
         cat > "/etc/nginx/sites-available/${app}" <<EOF
 server {
     listen 80;
@@ -790,6 +987,59 @@ PHP
     chown -R "${an}:${an}" "${dh}/.deployer"
 }
 
+_create_deployer_config_static() {
+    local an="$1" repo="$2" branch="$3" v="$4"
+    local dh="/home/${an}"
+    cat > "${dh}/.deployer/deploy.php" <<PHP
+<?php
+namespace Deployer;
+require 'recipe/common.php';
+
+set('application', '${an}');
+set('repository', '${repo}');
+set('branch', '${branch}');
+set('deploy_path', '${dh}');
+set('keep_releases', 5);
+set('git_ssh_command', 'ssh -i ${dh}/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new');
+set('bin/php', '/usr/bin/php${v}');
+
+host('localhost')
+    ->set('remote_user', '${an}')
+    ->set('deploy_path', '${dh}')
+    ->set('ssh_arguments', ['-o StrictHostKeyChecking=accept-new', '-i ${dh}/.ssh/id_ed25519']);
+PHP
+    chown -R "${an}:${an}" "${dh}/.deployer"
+}
+
+_create_deployer_config_generic() {
+    local an="$1" repo="$2" branch="$3" v="$4"
+    local dh="/home/${an}"
+    cat > "${dh}/.deployer/deploy.php" <<PHP
+<?php
+namespace Deployer;
+require 'recipe/common.php';
+
+set('application', '${an}');
+set('repository', '${repo}');
+set('branch', '${branch}');
+set('deploy_path', '${dh}');
+set('keep_releases', 5);
+set('git_ssh_command', 'ssh -i ${dh}/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new');
+set('bin/php', '/usr/bin/php${v}');
+set('bin/composer', '/usr/bin/php${v} /usr/local/bin/composer');
+set('writable_mode', 'chmod');
+
+add('shared_files', ['.env']);
+add('shared_dirs', []);
+
+host('localhost')
+    ->set('remote_user', '${an}')
+    ->set('deploy_path', '${dh}')
+    ->set('ssh_arguments', ['-o StrictHostKeyChecking=accept-new', '-i ${dh}/.ssh/id_ed25519']);
+PHP
+    chown -R "${an}:${an}" "${dh}/.deployer"
+}
+
 # ── AUTH ──────────────────────────────────────────────────────
 
 auth_create() {
@@ -889,6 +1139,8 @@ app_reset_password() {
 app_reset_db_password() {
     local app="${1:-}"; [[ -z "$app" ]] && { error "Usage: cipi app reset-db-password <app>"; exit 1; }
     app_exists "$app" || { error "App '$app' not found"; exit 1; }
+    local is_static; is_static=$(app_get "$app" static)
+    [[ "$is_static" == "true" ]] && { error "Static apps have no database"; exit 1; }
 
     local new_pass dbr
     new_pass=$(generate_password 40)

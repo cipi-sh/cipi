@@ -8,6 +8,10 @@ All notable changes to Cipi are documented in this file.
 
 ### Added
 
+- **`cipi ssh enable-root [--password]`** — Re-enables SSH as `root` after Cipi hardening (`PermitRootLogin no` + `AllowGroups` without the `root` group). Default: `Match User root` with `PermitRootLogin prohibit-password` and `root` prepended to `AllowGroups`; `--password` also allows root password auth. Runs `sshd -t` and restarts SSH; restores the previous config if the test fails. Sends the usual email alert if SMTP is configured.
+
+- **`cipi ssh disable-root`** — Reverts `enable-root`: removes the `cipi-ssh-root-access` block from `sshd_config` and strips the `root` token from `AllowGroups`. No-op with a short message if nothing was enabled. Same `sshd -t`, restart, backup-on-failure, and optional email notification.
+
 - **Optional Git for custom apps** — On `cipi app create --custom`, the Git repository prompt can be left empty to provision SFTP-only hosting (no clone): `htdocs` is created with a placeholder page, branch is omitted, and `cipi deploy` explains that there is no repository until you set one with `cipi app edit <app> --repository=...`.
 
 ---

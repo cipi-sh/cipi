@@ -8,11 +8,13 @@ AUTHORIZED_KEYS="/home/cipi/.ssh/authorized_keys"
 ssh_command() {
     local sub="${1:-}"; shift||true
     case "$sub" in
-        list)   _ssh_list ;;
-        add)    _ssh_add "$@" ;;
-        remove) _ssh_remove "$@" ;;
-        rename) _ssh_rename "$@" ;;
-        *)      error "Use: list add remove rename"; exit 1 ;;
+        list)        _ssh_list ;;
+        add)         _ssh_add "$@" ;;
+        remove)      _ssh_remove "$@" ;;
+        rename)      _ssh_rename "$@" ;;
+        enable-root)  _ssh_enable_root "$@" ;;
+        disable-root) _ssh_disable_root "$@" ;;
+        *)            error "Use: list add remove rename enable-root disable-root"; exit 1 ;;
     esac
 }
 
@@ -32,6 +34,159 @@ _get_session_fingerprint() {
         fp=$(echo "$key_type $key_data" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
         [[ -n "$fp" ]] && echo "$fp"
     fi
+}
+
+# ── ENABLE ROOT SSH ─────────────────────────────────────────
+# Cipi hardening sets PermitRootLogin no and AllowGroups without the root
+# group, so root cannot SSH. This reverses that (key-only by default).
+
+_ssh_enable_root() {
+    local with_password=false
+    for arg in "$@"; do
+        case "$arg" in
+            --password) with_password=true ;;
+            *)
+                error "Unknown option: $arg"
+                echo "Use: cipi ssh enable-root [--password]"
+                exit 1
+                ;;
+        esac
+    done
+
+    local SSHD="/etc/ssh/sshd_config"
+    if [[ ! -f "$SSHD" ]]; then
+        error "Missing ${SSHD}"
+        exit 1
+    fi
+
+    local bak="${SSHD}.bak.cipi-enable-root.$(date +%s)"
+    cp -a "$SSHD" "$bak"
+
+    # Root's primary group is "root"; it must appear in AllowGroups when set.
+    if grep -qE '^[[:space:]]*AllowGroups[[:space:]]' "$SSHD"; then
+        if ! grep -qE '^[[:space:]]*AllowGroups[[:space:]].*[[:space:]]root([[:space:]]|$)' "$SSHD"; then
+            sed -i 's/^\([[:space:]]*AllowGroups[[:space:]]\+\)/\1root /' "$SSHD"
+        fi
+    fi
+
+    if grep -q 'BEGIN cipi-ssh-root-access' "$SSHD"; then
+        sed -i '/# BEGIN cipi-ssh-root-access/,/# END cipi-ssh-root-access/d' "$SSHD"
+    fi
+
+    if [[ "$with_password" == true ]]; then
+        cat >> "$SSHD" <<'EOF'
+
+# BEGIN cipi-ssh-root-access (cipi ssh enable-root)
+Match User root
+    PermitRootLogin yes
+    PasswordAuthentication yes
+# END cipi-ssh-root-access
+EOF
+    else
+        cat >> "$SSHD" <<'EOF'
+
+# BEGIN cipi-ssh-root-access (cipi ssh enable-root)
+Match User root
+    PermitRootLogin prohibit-password
+# END cipi-ssh-root-access
+EOF
+    fi
+
+    if ! sshd -t 2>/dev/null; then
+        cp -a "$bak" "$SSHD"
+        error "sshd -t failed — config restored from backup"
+        echo "  ${DIM}Backup kept at: ${bak}${NC}" >&2
+        exit 1
+    fi
+
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd
+
+    local mode_msg="public key only (prohibit-password)"
+    [[ "$with_password" == true ]] && mode_msg="password and public key"
+
+    success "SSH login as root enabled (${mode_msg})"
+    echo -e "  ${DIM}Ensure /root/.ssh/authorized_keys has your key, or use: cipi reset root-password${NC}"
+    echo -e "  ${YELLOW}When finished:${NC} ${DIM}cipi ssh disable-root${NC}"
+
+    log_action "SSH ENABLE-ROOT: mode=${with_password}"
+
+    local server_ip; server_ip=$(curl -s --max-time 3 https://checkip.amazonaws.com 2>/dev/null || hostname)
+    cipi_notify \
+        "Cipi: root SSH enabled on $(hostname)" \
+        "Root SSH login was enabled via cipi ssh enable-root.\n\nServer: $(hostname) (${server_ip})\nMode: ${mode_msg}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nRun cipi ssh disable-root when no longer needed."
+}
+
+# ── DISABLE ROOT SSH ────────────────────────────────────────
+# Undoes cipi ssh enable-root: removes the marked Match block and drops the
+# root group from AllowGroups when present.
+
+_ssh_disable_root() {
+    if [[ $# -gt 0 ]]; then
+        error "Unknown option: $*"
+        echo "Use: cipi ssh disable-root"
+        exit 1
+    fi
+
+    local SSHD="/etc/ssh/sshd_config"
+    if [[ ! -f "$SSHD" ]]; then
+        error "Missing ${SSHD}"
+        exit 1
+    fi
+
+    local bak="${SSHD}.bak.cipi-disable-root.$(date +%s)"
+    cp -a "$SSHD" "$bak"
+
+    local changed=false
+
+    if grep -q 'BEGIN cipi-ssh-root-access' "$SSHD"; then
+        sed -i '/# BEGIN cipi-ssh-root-access/,/# END cipi-ssh-root-access/d' "$SSHD"
+        changed=true
+    fi
+
+    if grep -qE '^[[:space:]]*AllowGroups[[:space:]].*[[:space:]]root([[:space:]]|$)' "$SSHD"; then
+        local tmp
+        tmp=$(mktemp)
+        awk '
+        /^[[:space:]]*AllowGroups[[:space:]]/ {
+            rest = $0
+            sub(/^[[:space:]]*AllowGroups[[:space:]]+/, "", rest)
+            n = split(rest, a, /[[:space:]]+/)
+            out = ""
+            for (i = 1; i <= n; i++) {
+                if (a[i] != "" && a[i] != "root") {
+                    out = (out == "" ? a[i] : out " " a[i])
+                }
+            }
+            print "AllowGroups " out
+            next
+        }
+        { print }
+        ' "$SSHD" > "$tmp" && mv "$tmp" "$SSHD"
+        changed=true
+    fi
+
+    if [[ "$changed" != true ]]; then
+        rm -f "$bak"
+        info "Nothing to do — no cipi root-access block and AllowGroups has no root"
+        exit 0
+    fi
+
+    if ! sshd -t 2>/dev/null; then
+        cp -a "$bak" "$SSHD"
+        error "sshd -t failed — config restored from backup"
+        echo "  ${DIM}Backup kept at: ${bak}${NC}" >&2
+        exit 1
+    fi
+
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd
+
+    success "SSH login as root disabled (Cipi-style)"
+    log_action "SSH DISABLE-ROOT"
+
+    local server_ip; server_ip=$(curl -s --max-time 3 https://checkip.amazonaws.com 2>/dev/null || hostname)
+    cipi_notify \
+        "Cipi: root SSH disabled on $(hostname)" \
+        "Root SSH was restricted via cipi ssh disable-root.\n\nServer: $(hostname) (${server_ip})\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')"
 }
 
 # ── LIST ─────────────────────────────────────────────────────

@@ -135,6 +135,8 @@ show_help() {
     echo -e "    ${CYAN}cipi ssh list${NC}                      List authorized SSH keys"
     echo -e "    ${CYAN}cipi ssh add [key]${NC}                 Add an SSH public key"
     echo -e "    ${CYAN}cipi ssh remove [n]${NC}                Remove an SSH key by number"
+    echo -e "    ${CYAN}cipi ssh enable-root [--password]${NC} Allow SSH as root (emergency; key-only by default)"
+    echo -e "    ${CYAN}cipi ssh disable-root${NC}            Restore default (no root SSH via Cipi sshd rules)"
     echo ""
     echo -e "  ${BOLD}${CYAN}SSL / PHP / FIREWALL / BAN / BACKUP${NC}"
     echo -e "    ${CYAN}cipi ssl install <app>${NC}              SSL certificate"

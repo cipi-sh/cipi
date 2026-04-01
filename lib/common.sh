@@ -3,6 +3,10 @@
 # Cipi — Common Functions
 #############################################
 
+# When sourced outside the main cipi binary (e.g. migrations), these may be unset.
+CIPI_CONFIG="${CIPI_CONFIG:-/etc/cipi}"
+CIPI_LOG="${CIPI_LOG:-/var/log/cipi}"
+
 source "${CIPI_LIB}/vault.sh"
 
 info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
@@ -207,7 +211,10 @@ reload_supervisor() {
 
 # App home is 750 (app:app): user cipi cannot traverse /home/<app>/ without ACLs.
 # Nginx writes vhost logs as www-data; directory uses setgid www-data so new files stay group-readable.
-# Laravel storage/logs stays app:app — only ACLs for cipi there.
+#
+# Do NOT apply setfacl -R or default ACLs on shared/storage/logs — Deployer chmod on Laravel log
+# files fails with "Operation not permitted" when per-file ACLs exist. Directory ACLs are enough:
+# cipi traverses via rx on dirs; log files are typically 644 (other read).
 ensure_app_logs_permissions() {
     local app="${1:-}"
     [[ -z "$app" || "$app" == "cipi" ]] && return 0
@@ -222,8 +229,6 @@ ensure_app_logs_permissions() {
     if command -v setfacl &>/dev/null && id cipi &>/dev/null; then
         setfacl -m u:cipi:rx "${home}" 2>/dev/null || true
         setfacl -m u:cipi:rx "${home}/logs" 2>/dev/null || true
-        setfacl -d -m u:cipi:r "${home}/logs" 2>/dev/null || true
-        setfacl -R -m u:cipi:rX "${home}/logs" 2>/dev/null || true
         if [[ -d "${home}/shared" ]]; then
             setfacl -m u:cipi:rx "${home}/shared" 2>/dev/null || true
         fi
@@ -232,8 +237,6 @@ ensure_app_logs_permissions() {
         fi
         if [[ -d "${home}/shared/storage/logs" ]]; then
             setfacl -m u:cipi:rx "${home}/shared/storage/logs" 2>/dev/null || true
-            setfacl -d -m u:cipi:r "${home}/shared/storage/logs" 2>/dev/null || true
-            setfacl -R -m u:cipi:rX "${home}/shared/storage/logs" 2>/dev/null || true
         fi
     fi
 }

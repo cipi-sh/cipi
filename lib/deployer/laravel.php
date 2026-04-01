@@ -14,9 +14,9 @@ set('writable_mode', 'chmod');
 
 add('shared_files', ['.env']);
 add('shared_dirs', ['storage']);
-// Do not list parent "storage" or "storage/logs" — chmod -R would touch laravel-*.log and can
-// fail (EPERM) with ACLs/immutable bits. Subdirs below are enough; logs dir is chmod'd separately.
-add('writable_dirs', [
+// Override recipe/laravel.php writable_dirs: do NOT include "storage" or "storage/logs" — chmod -R
+// would touch laravel-*.log and fail (EPERM). The logs directory is chmod'd by cipi:chmod_storage_logs_dir.
+set('writable_dirs', [
     'bootstrap/cache',
     'storage/app', 'storage/app/public',
     'storage/framework', 'storage/framework/cache', 'storage/framework/cache/data',

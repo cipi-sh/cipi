@@ -4,6 +4,14 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [4.4.12] — 2026-04-02
+
+### Fixed
+
+- **Deployer `writable_dirs`: `set()` instead of `add()`** — The Laravel recipe (`recipe/laravel.php`) already defines `writable_dirs` with `storage` and `storage/logs`; using `add()` appended our list but kept those entries, so `chmod -R` still touched `laravel-*.log`. Changed to **`set('writable_dirs', [...])`** to fully override the recipe defaults. **Migration 4.4.12** regenerates `deploy.php` for all Laravel apps.
+
+---
+
 ## [4.4.11] — 2026-04-02
 
 ### Fixed

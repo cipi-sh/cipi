@@ -121,6 +121,18 @@ When you need to manage apps programmatically or integrate with external pipelin
 
 Move entire stacks or single apps between Cipi servers — for migration, failover, or disaster recovery. Archives are encrypted in transit.
 
+### 🖥️ CLI Client
+
+A standalone Go binary that talks to the Cipi REST API from your local machine — no SSH required. Manage apps, databases, SSL, aliases, and deployments from any terminal. Pre-built binaries for Linux and macOS (amd64/arm64).
+
+[Docs](https://cipi.sh/docs/cli-client) · [GitHub](https://github.com/cipi-sh/cli)
+
+### 🛒 WHMCS Module
+
+An official provisioning module that bridges the WHMCS lifecycle to the Cipi REST API — automate app creation, deletion, SSL certificates, deployments, and package changes for your hosting customers. Self-contained drop-in, no Composer dependencies.
+
+[Docs](https://cipi.sh/docs/advanced#whmcs) · [GitHub](https://github.com/cipi-sh/whmcs)
+
 ---
 
 ## Who uses Cipi?

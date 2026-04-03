@@ -31,6 +31,8 @@ _api_token_abilities_default() {
 }
 
 # Terminal checklist (no whiptail): toggle numbers, Enter to confirm. Default: all on.
+# NOTE: This is often run inside $(...) for assignment; stdout is captured, so all UI must go to stderr.
+#       Reads must use /dev/tty so input is not lost when stdin is not the TTY in a subshell.
 _api_token_select_abilities() {
     local -a keys descs
     local k d
@@ -48,9 +50,9 @@ _api_token_select_abilities() {
     done
 
     while true; do
-        echo ""
-        echo -e "${BOLD}Token abilities${NC}  ${DIM}· toggle number(s) · ${BOLD}a${DIM}=all · ${BOLD}n${DIM}=none · ${BOLD}Enter${DIM}=confirm${NC}"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "" >&2
+        echo -e "${BOLD}Token abilities${NC}  ${DIM}· toggle number(s) · ${BOLD}a${DIM}=all · ${BOLD}n${DIM}=none · ${BOLD}Enter${DIM}=confirm${NC}" >&2
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
         for ((i = 0; i < n; i++)); do
             local mark
             if [[ ${sel[i]} -eq 1 ]]; then
@@ -58,12 +60,16 @@ _api_token_select_abilities() {
             else
                 mark="${DIM}·${NC}"
             fi
-            printf "  %b  %2d  ${CYAN}%-18s${NC} %s\n" "$mark" "$((i + 1))" "${keys[i]}" "${descs[i]}"
+            printf "  %b  %2d  ${CYAN}%-18s${NC} %s\n" "$mark" "$((i + 1))" "${keys[i]}" "${descs[i]}" >&2
         done
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        printf "${CYAN}›${NC} "
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+        printf "${CYAN}›${NC} " >&2
         local choice=""
-        read -r choice || true
+        if [[ -r /dev/tty ]]; then
+            read -r choice </dev/tty || true
+        else
+            read -r choice || true
+        fi
         choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         [[ -z "$choice" ]] && break
         case "$choice" in

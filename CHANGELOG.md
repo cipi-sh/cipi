@@ -4,6 +4,17 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.1.3] — 2026-09-07
+
+A hotfix for `cipi ini list`: the table header printed, then the command died on the first setting.
+
+### Fixed
+
+- **`cipi ini list` crashed with `_INI_SOURCE: unbound variable`.** `_ini_effective` recorded which layer a value came from by assigning a global, then the caller captured the value with `val=$(_ini_effective …)`. Command substitution runs in a subshell, so the assignment never reached the parent, and `set -u` killed the process on the first catalog key — after printing the "SETTING / VALUE / SET BY" header and nothing else. The function now sets `_INI_VALUE` and `_INI_SOURCE` in the current shell; `list`, `get` and the companion-limit cascade all read those directly. **No migration:** the next `cipi self-update` copies the new `lib/ini.sh` and that is the whole fix.
+- **A regression test now fails if this class of bug returns.** `tests/verify-5.1.3.sh` walks the full catalog under `set -u` and refuses a `$(_ini_effective)` call site.
+
+---
+
 ## [5.1.2] — 2026-09-03
 
 WebSockets, done properly. Reverb has been in Cipi since 5.0.0, but only as far as "a port, a Supervisor program and an Nginx proxy" — the parts that decide whether a WebSocket app actually works in production were missing, and one of them was quietly breaking ordinary routes.

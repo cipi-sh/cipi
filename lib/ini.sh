@@ -203,29 +203,38 @@ _ini_read_app() {
     vault_read apps.json | jq -r --arg a "$app" --arg k "$key" '.[$a].ini[$k] // empty' 2>/dev/null
 }
 
-# Value PHP actually applies, and which layer it came from. Sets _INI_SOURCE.
+# Value PHP actually applies, and which layer it came from.
+# Sets _INI_VALUE and _INI_SOURCE in the current shell — do not call via $(),
+# which would run in a subshell and leave both unbound under `set -u`.
 _ini_effective() {
     local key="$1" app="${2:-}" ver="$3" val=""
-    _INI_SOURCE=""
+    _INI_SOURCE="unset"
+    _INI_VALUE=""
     if [[ -n "$app" ]]; then
         val=$(_ini_read_app "$app" "$key")
-        [[ -n "$val" ]] && { _INI_SOURCE="app:${app}"; echo "$val"; return 0; }
+        if [[ -n "$val" ]]; then
+            _INI_SOURCE="app:${app}"; _INI_VALUE="$val"; return 0
+        fi
         # Pool defaults Cipi always writes, whatever the global file says.
         case "$key" in
             memory_limit)
                 val=$(_app_limit "$app" memory_limit "" 2>/dev/null || true)
-                [[ -n "$val" ]] && { _INI_SOURCE="app-limit:${app}"; echo "$val"; return 0; }
+                if [[ -n "$val" ]]; then
+                    _INI_SOURCE="app-limit:${app}"; _INI_VALUE="$val"; return 0
+                fi
                 ;;
         esac
     fi
     val=$(_ini_read_global "$ver" fpm "$key" 2>/dev/null || true)
-    [[ -n "$val" ]] && { _INI_SOURCE="global"; echo "$val"; return 0; }
+    if [[ -n "$val" ]]; then
+        _INI_SOURCE="global"; _INI_VALUE="$val"; return 0
+    fi
     if command -v "php${ver}" >/dev/null 2>&1; then
         val=$("php${ver}" -r 'echo ini_get($argv[1]);' "$key" 2>/dev/null || true)
-        [[ -n "$val" ]] && { _INI_SOURCE="php default"; echo "$val"; return 0; }
+        if [[ -n "$val" ]]; then
+            _INI_SOURCE="php default"; _INI_VALUE="$val"; return 0
+        fi
     fi
-    _INI_SOURCE="unset"
-    echo ""
 }
 
 _ini_list() {
@@ -243,7 +252,8 @@ _ini_list() {
     local k t d val
     while IFS='|' read -r k t d; do
         [[ -n "$k" ]] || continue
-        val=$(_ini_effective "$k" "$app" "$ver")
+        _ini_effective "$k" "$app" "$ver"
+        val="$_INI_VALUE"
         local col="$NC"
         [[ "$_INI_SOURCE" == app* ]] && col="$CYAN"
         [[ "$_INI_SOURCE" == "global" ]] && col="$GREEN"
@@ -270,8 +280,8 @@ _ini_get() {
     fi
     [[ -z "$ver" ]] && ver=$(_ini_installed_versions | tail -1)
     _ini_key_known "$pair" || { error "Unknown or non-settable key: ${pair}"; echo "Run: cipi ini keys"; exit 1; }
-    local val; val=$(_ini_effective "$pair" "$app" "$ver")
-    echo -e "  ${CYAN}${pair}${NC} = ${val:-—}  ${DIM}(${_INI_SOURCE})${NC}"
+    _ini_effective "$pair" "$app" "$ver"
+    echo -e "  ${CYAN}${pair}${NC} = ${_INI_VALUE:-—}  ${DIM}(${_INI_SOURCE})${NC}"
 }
 
 # ── Writing ──────────────────────────────────────────────────
@@ -353,7 +363,8 @@ _ini_cascade() {
 
     local c cur cur_bytes
     for c in "${companions[@]}"; do
-        cur=$(_ini_effective "$c" "$app" "$ver")
+        _ini_effective "$c" "$app" "$ver"
+        cur="$_INI_VALUE"
         [[ -z "$cur" ]] && continue
         cur_bytes=$(_ini_to_bytes "$cur" 2>/dev/null || echo "")
         [[ -z "$cur_bytes" ]] && continue

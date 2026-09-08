@@ -66,8 +66,8 @@ _help_topic_header() {
 _help_topics_list() {
     cat <<'EOF'
 app  domains  www  deploy  worker  schedule  health  db  service  ssl  php
-auth  basicauth  ssh  firewall  ban  backup  sync  git
-ini  yml  nginx  api  gui  smtp  notifications  reset  server
+auth  basicauth  ssh  firewall  ban  crowdsec  scan  backup  sync  git
+ini  yml  nginx  api  gui  smtp  notifications  reset  server  completion
 EOF
 }
 
@@ -89,6 +89,7 @@ show_help() {
     _help_cmd "cipi status"              "Server overview"
     _help_cmd "cipi version"             "Cipi version"
     _help_cmd "cipi self-update"         "Update Cipi  ${DIM}[--check]${NC}"
+    _help_cmd "cipi completion bash|zsh" "Shell tab-completion"
     _help_cmd "cipi service ..."           "nginx, mariadb, php-fpm, ..."
     echo ""
     echo -e "  ${BOLD}Apps & deploy${NC}"
@@ -102,6 +103,8 @@ show_help() {
     echo ""
     echo -e "  ${BOLD}Security & access${NC}"
     _help_cmd "cipi ssl / ssh / firewall / ban"  "Certs, keys, firewall, bans"
+    _help_cmd "cipi crowdsec ..."          "IP reputation (opt-in)  ${DIM}enable|disable|status|rescue${NC}"
+    _help_cmd "cipi scan ..."              "Nightly malware scan (opt-in)  ${DIM}enable|disable|<app>${NC}"
     _help_cmd "cipi auth / basicauth ..."  "Composer auth.json & HTTP basic auth"
     _help_cmd "cipi reset ..."             "Reset root / DB / Valkey passwords"
     echo ""
@@ -136,6 +139,22 @@ show_help_topic() {
             echo ""
             ;;
 
+        completion|complete)
+            _help_topic_header "Shell completion"
+            echo ""
+            _help_cmd "cipi completion bash [--print]"  "Install bash tab-completion"
+            _help_cmd "cipi completion zsh [--print]"   "Install zsh tab-completion"
+            echo ""
+            _help_note "setup.sh and every 'cipi self-update' install this for every"
+            _help_note "shell already (/etc/bash_completion.d + /etc/profile.d) — you only"
+            _help_note "need this command for a non-login shell or a custom rc file."
+            _help_note "It writes /etc/bash_completion.d/cipi and a loader in your rc file;"
+            _help_note "--print writes the script to stdout and changes nothing."
+            _help_note "App names complete when you can read /etc/cipi/apps-public.json"
+            _help_note "(root or the cipi-api group); the rest is static."
+            echo ""
+            ;;
+
         service|services)
             _help_topic_header "Services"
             echo ""
@@ -143,7 +162,7 @@ show_help_topic() {
             _help_cmd "cipi service restart [service|all]"  "Restart service(s)"
             _help_cmd "cipi service start <service>"        "Start a service"
             _help_cmd "cipi service stop <service>"         "Stop a service"
-            _help_note "services: nginx mariadb postgresql supervisor fail2ban php<ver>-fpm"
+            _help_note "services: nginx mariadb postgresql supervisor fail2ban crowdsec php<ver>-fpm"
             echo ""
             ;;
 
@@ -408,8 +427,49 @@ show_help_topic() {
         ban|fail2ban)
             _help_topic_header "Ban"
             echo ""
-            _help_cmd "cipi ban list"                  "List banned IPs"
-            _help_cmd "cipi ban unban <IP>"            "Unban an IP"
+            _help_cmd "cipi ban list"                  "List banned IPs (fail2ban + CrowdSec if enabled)"
+            _help_cmd "cipi ban unban <IP>"            "Unban an IP from both"
+            echo ""
+            ;;
+
+        crowdsec)
+            _help_topic_header "CrowdSec"
+            echo ""
+            _help_cmd "cipi crowdsec enable"           "Install engine + firewall bouncer"
+            _help_cmd "cipi crowdsec disable"          "Flush rules, then remove (fail2ban stays)"
+            _help_cmd "cipi crowdsec status"           "Engine / bouncer / rescue / decisions"
+            _help_cmd "cipi crowdsec allow <ip|cidr>"  "Never ban this address"
+            _help_cmd "cipi crowdsec unallow <ip|cidr>" "Drop an extra allow"
+            _help_cmd "cipi crowdsec rescue token"     "Print the break-glass curl (on-box)"
+            _help_cmd "cipi crowdsec rescue rotate"    "New one-shot token + mail"
+            echo ""
+            _help_note "Off by default. enable does not run on self-update."
+            _help_note "Needs ≥512MB free RAM. Registers the bouncer via cscli bouncers add"
+            _help_note "(nftables when iptables is the nft backend, else iptables)."
+            _help_note "Refuse if nginx looks like a reverse proxy without real_ip (--force to override)."
+            _help_note "This SSH session is added to the allowlist automatically."
+            _help_note "disable flushes CrowdSec chains/tables before purge so DROP rules cannot linger."
+            _help_note "Rescue is a TLS listener, not a login: one GET with the token allowlists"
+            _help_note "the calling IP (and unbans fail2ban), then the token dies and you get mail."
+            echo ""
+            ;;
+
+        scan|clamav|malware)
+            _help_topic_header "Malware scan"
+            echo ""
+            _help_cmd "cipi scan enable"              "Nightly integrity + upload ClamAV"
+            _help_cmd "cipi scan disable"             "Remove scanner and cron"
+            _help_cmd "cipi scan status"              "Enabled? signatures?"
+            _help_cmd "cipi scan"                     "Run now"
+            _help_cmd "cipi scan <app>"               "One app now"
+            _help_cmd "cipi scan manifest [app]"      "Rewrite integrity manifests"
+            _help_cmd "cipi scan report"              "Last report"
+            echo ""
+            _help_note "Off by default. enable does not run on self-update."
+            _help_note "Integrity: sha256 of current/ (or htdocs/) vs the manifest written"
+            _help_note "at deploy in /var/lib/cipi/manifests (root-only, not in the app home)."
+            _help_note "ClamAV: one run on upload dirs only, plus rfxn PHP-webshell signatures."
+            _help_note "A timeout or failed signature update emails scan_incomplete — not 'clean'."
             echo ""
             ;;
 
@@ -583,6 +643,8 @@ show_help_all() {
     show_help_topic php
     show_help_topic firewall
     show_help_topic ban
+    show_help_topic crowdsec
+    show_help_topic scan
     show_help_topic backup
     show_help_topic ini
     show_help_topic yml
@@ -590,6 +652,7 @@ show_help_all() {
     show_help_topic smtp
     show_help_topic notifications
     show_help_topic reset
+    show_help_topic completion
     unset CIPI_HELP_INLINE
     echo ""
 }
@@ -618,13 +681,18 @@ show_status() {
     echo -e "\n${BOLD}Services${NC}"
     local -a status_svcs=(nginx mariadb supervisor fail2ban)
     systemctl list-unit-files --quiet postgresql.service &>/dev/null && status_svcs+=(postgresql)
+    systemd_unit_exists crowdsec && status_svcs+=(crowdsec)
+    systemd_unit_exists crowdsec-firewall-bouncer && status_svcs+=(crowdsec-firewall-bouncer)
+    # The rescue listener is the way back in after a ban; a silent one is worse
+    # than no listener at all, so it belongs on the status page.
+    systemd_unit_exists cipi-crowdsec-rescue && status_svcs+=(cipi-crowdsec-rescue)
     for svc in "${status_svcs[@]}"; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
-            printf "  %-16s ${GREEN}● running${NC}\n" "$svc"
+            printf "  %-26s ${GREEN}● running${NC}\n" "$svc"
         elif systemctl list-unit-files --quiet "${svc}.service" &>/dev/null; then
-            printf "  %-16s ${RED}● stopped${NC}\n" "$svc"
+            printf "  %-26s ${RED}● stopped${NC}\n" "$svc"
         else
-            printf "  %-16s ${DIM}● not installed${NC}\n" "$svc"
+            printf "  %-26s ${DIM}● not installed${NC}\n" "$svc"
         fi
     done
 
@@ -649,6 +717,7 @@ main() {
     case "$cmd" in
         help|--help|-h)       show_help "$@" ;;
         version|--version|-v) echo "Cipi v${CIPI_VERSION}" ;;
+        completion)           source "${CIPI_LIB}/completion.sh"; completion_command "$@" ;;
         status)     require_root; show_status ;;
         app)        _maybe_cmd_help app "$@";        require_root; source "${CIPI_LIB}/app.sh";         app_command "$@" ;;
         alias)      _maybe_cmd_help domains "$@";    require_root; source "${CIPI_LIB}/app.sh";         alias_command "$@" ;;
@@ -665,6 +734,8 @@ main() {
         php)        _maybe_cmd_help php "$@";        require_root; source "${CIPI_LIB}/php.sh";         php_command "$@" ;;
         firewall)   _maybe_cmd_help firewall "$@";   require_root; source "${CIPI_LIB}/firewall.sh";    firewall_command "$@" ;;
         ban)        _maybe_cmd_help ban "$@";        require_root; source "${CIPI_LIB}/ban.sh";         ban_command "$@" ;;
+        crowdsec)   _maybe_cmd_help crowdsec "$@";   require_root; source "${CIPI_LIB}/crowdsec.sh";    crowdsec_command "$@" ;;
+        scan)       _maybe_cmd_help scan "$@";       require_root; source "${CIPI_LIB}/scan.sh";        scan_command "$@" ;;
         backup)     _maybe_cmd_help backup "$@";     require_root; source "${CIPI_LIB}/backup.sh";      backup_command "$@" ;;
         ini)        _maybe_cmd_help ini "$@";        require_root; source "${CIPI_LIB}/ini.sh";         ini_command "$@" ;;
         yml|yaml)   _maybe_cmd_help yml "$@";        require_root; source "${CIPI_LIB}/yml.sh";        yml_command "$@" ;;

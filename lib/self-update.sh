@@ -90,9 +90,23 @@ selfupdate_command() {
     [[ -f "${tmp}/lib/cipi-app-notify.sh" ]] && cp "${tmp}/lib/cipi-app-notify.sh" /usr/local/bin/cipi-app-notify && chmod 700 /usr/local/bin/cipi-app-notify
     [[ -f "${tmp}/lib/cipi-app-deploy.sh" ]] && cp "${tmp}/lib/cipi-app-deploy.sh" /usr/local/bin/cipi-app-deploy && chmod 755 /usr/local/bin/cipi-app-deploy
     [[ -f "${tmp}/lib/cipi-health-check.sh" ]] && cp "${tmp}/lib/cipi-health-check.sh" /usr/local/bin/cipi-health-check && chmod 700 /usr/local/bin/cipi-health-check
+    [[ -f "${tmp}/lib/cipi-scan-manifest.sh" ]] && cp "${tmp}/lib/cipi-scan-manifest.sh" /usr/local/bin/cipi-scan-manifest && chmod 755 /usr/local/bin/cipi-scan-manifest
+    [[ -f "${tmp}/lib/cipi-crowdsec-rescue.py" ]] && cp "${tmp}/lib/cipi-crowdsec-rescue.py" /usr/local/bin/cipi-crowdsec-rescue && chmod 700 /usr/local/bin/cipi-crowdsec-rescue
+    [[ -f "${tmp}/lib/cipi-crowdsec-rescue-hole.sh" ]] && cp "${tmp}/lib/cipi-crowdsec-rescue-hole.sh" /usr/local/bin/cipi-crowdsec-rescue-hole && chmod 700 /usr/local/bin/cipi-crowdsec-rescue-hole
+    if systemctl is-active --quiet cipi-crowdsec-rescue 2>/dev/null; then
+        systemctl restart cipi-crowdsec-rescue 2>/dev/null || true
+    fi
     [[ -f "${tmp}/lib/cipi-read-app-logs.sh" ]] && cp "${tmp}/lib/cipi-read-app-logs.sh" /usr/local/bin/cipi-read-app-logs && chmod 755 /usr/local/bin/cipi-read-app-logs
     [[ -d "${tmp}/cipi-api" ]] && rm -rf /opt/cipi/cipi-api && cp -a "${tmp}/cipi-api" /opt/cipi/cipi-api
     chown -R root:root /usr/local/bin/cipi /opt/cipi
+
+    # Refresh shell completion from the just-copied lib (also backfills servers
+    # that predate the feature). Best effort — never abort an update.
+    if [[ -f /opt/cipi/lib/completion.sh ]]; then
+        # shellcheck source=/dev/null
+        source /opt/cipi/lib/completion.sh
+        _completion_install_system || true
+    fi
 
     # This process started with pre-update common.sh; reload lib helpers copied above
     # so migrations and composer steps see functions added in this release.

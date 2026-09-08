@@ -201,6 +201,9 @@ _deploy_run() {
         # succeeded" while the site returns 500 would be worse than silence.
         _deploy_apply_yml "$app"
         local health_line; health_line=$(_deploy_health_check "$app")
+        if [[ -x /usr/local/bin/cipi-scan-manifest ]]; then
+            /usr/local/bin/cipi-scan-manifest "$app" >/dev/null 2>&1 || true
+        fi
         cipi_notify \
             "Cipi deploy succeeded: ${app} release ${rel_after:-?} on $(hostname)" \
             "Deploy completed successfully.\n\n$(_deploy_release_details "$app" "$rel_after" "$branch_disp" "$secs")Previous release: ${rel_before:-none}\nHealthcheck: ${health_line}\n" \
@@ -505,6 +508,13 @@ _deploy_rollback() {
     local secs=$(( SECONDS - t0 ))
     if [[ $rc -eq 0 ]]; then
         deploy_log_close "$app" "ROLLBACK OK" "$rel_after" "$secs" "$rc"
+        # `current` now points at an older tree, so the manifest from the newer
+        # release would read as integrity drift every night until the next
+        # deploy — training the operator to ignore the one alert that means
+        # "webshell".
+        if [[ -x /usr/local/bin/cipi-scan-manifest ]]; then
+            /usr/local/bin/cipi-scan-manifest "$app" >/dev/null 2>&1 || true
+        fi
         success "Rollback done${rel_after:+  (now on release ${rel_after})}"
         log_action "ROLLBACK OK: $app ${rel_before:-?} → ${rel_after:-?}"
         cipi_notify \

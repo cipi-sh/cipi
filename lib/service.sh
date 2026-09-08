@@ -30,6 +30,8 @@ _resolve_services() {
         all|"")
             local list=("${CIPI_SERVICES[@]}")
             systemd_unit_exists postgresql && list+=("postgresql")
+            systemd_unit_exists crowdsec && list+=("crowdsec")
+            systemd_unit_exists crowdsec-firewall-bouncer && list+=("crowdsec-firewall-bouncer")
             for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
                 systemd_unit_exists "php${v}-fpm" && list+=("php${v}-fpm")
             done
@@ -40,7 +42,7 @@ _resolve_services() {
                 systemd_unit_exists "php${v}-fpm" && echo -n "php${v}-fpm "
             done
             ;;
-        nginx|mariadb|valkey-server|supervisor|fail2ban|postgresql)
+        nginx|mariadb|valkey-server|supervisor|fail2ban|postgresql|crowdsec|crowdsec-firewall-bouncer)
             echo "$name"
             ;;
         pgsql|postgres)
@@ -54,7 +56,7 @@ _resolve_services() {
             ;;
         *)
             error "Unknown service: ${name}"
-            echo -e "  Valid names: ${CYAN}nginx mariadb postgresql valkey-server supervisor fail2ban php<ver>-fpm all${NC}" >&2
+            echo -e "  Valid names: ${CYAN}nginx mariadb postgresql valkey-server supervisor fail2ban crowdsec php<ver>-fpm all${NC}" >&2
             return 1
             ;;
     esac

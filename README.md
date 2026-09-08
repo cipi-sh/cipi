@@ -80,7 +80,7 @@ Every app gets a fully isolated environment. **Laravel** (default): zero-downtim
 | **Queue workers**  | Supervisor with per-app pools — `queue:work` or **Horizon**; optional **Reverb** for WebSockets (wss:// + credentials + fd limits) |
 | **Deployments**    | Deployer — Laravel: atomic symlink, 5 releases, rollback, optional Node build; Custom: clone into htdocs     |
 | **SSL**            | Let's Encrypt via Certbot — HTTP-01 by default; optional **DNS-01 (Cloudflare)** + wildcards                 |
-| **Security**       | Fail2ban + UFW, per-app Linux user + PHP-FPM/Octane + SSH key                                                |
+| **Security**       | Fail2ban + UFW, optional CrowdSec (firewall bouncer) and nightly integrity/upload scan, per-app Linux user + PHP-FPM/Octane + SSH key |
 | **Healthchecks**   | HTTP probes every 5 minutes, plus a post-deploy check with optional automatic rollback of a broken release    |
 | **Backups**        | Backup profiles: what, how often, where, how long — S3/S3-compatible/local, client-side encryption           |
 | **Configuration**  | `cipi ini` for php.ini; optional per-project `cipi.yml` for aliases, databases, workers, Reverb and backups  |
@@ -92,6 +92,14 @@ Every app gets a fully isolated environment. **Laravel** (default): zero-downtim
 ### 🔒 Security & Isolation by Design
 
 Each app runs under its own Linux user with an isolated filesystem, PHP-FPM pool (or Octane process), and database. A compromise in one app cannot touch the others. Configs are encrypted at rest with AES-256 (Vault). GDPR-compliant log rotation included. Per-app **resource limits** (`cipi app limits`) cap FPM children, memory, Octane workers, and queue processes.
+
+Optional, off until you turn them on — `setup.sh` / `self-update` never install them:
+
+```bash
+cipi crowdsec enable    # IP reputation → firewall bouncer (not a WAF)
+                        # includes a TLS rescue URL: one GET allowlists your IP
+cipi scan enable        # nightly: release integrity + ClamAV on uploads
+```
 
 ### ⚡ Zero-Downtime Deploys
 

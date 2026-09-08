@@ -130,4 +130,11 @@ sudo /usr/local/bin/cipi-app-notify "$APP" deploy-ok 0 "$LOG" \
     "${DETAIL}
 Healthcheck: ${HEALTH_LINE}" 2>/dev/null || true
 
+# Integrity manifest for cipi scan: hash of this release (symlinks not followed).
+# Root-only writer, reached through the per-app sudoers entry — the manifest
+# lives outside /home/<app> so the app user cannot rewrite its own baseline.
+if [[ -x /usr/local/bin/cipi-scan-manifest ]]; then
+    sudo /usr/local/bin/cipi-scan-manifest "$APP" >/dev/null 2>&1 || true
+fi
+
 exit 0

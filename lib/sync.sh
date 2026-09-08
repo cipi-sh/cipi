@@ -712,6 +712,7 @@ CRON
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker restart ${app}
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker stop ${app}
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker status ${app}
+${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-scan-manifest ${app}
 SUDO
     chmod 440 "/etc/sudoers.d/cipi-${app}"
 

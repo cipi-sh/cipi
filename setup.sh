@@ -147,7 +147,7 @@ install_basics() {
         software-properties-common curl wget nano vim git \
         zip unzip openssl expect apt-transport-https \
         ca-certificates gnupg lsb-release jq bc acl \
-        logrotate cron htop ncdu \
+        logrotate cron htop ncdu bash-completion \
         unattended-upgrades apt-listchanges
 
     echo -e "${GREEN}✓ Base packages${NC}"
@@ -307,8 +307,11 @@ setup_ssh() {
     chown -R cipi:cipi /home/cipi/.ssh
 
     # 4. Allow cipi to run cipi CLI as root without password
+    # SSH_CLIENT/SSH_CONNECTION survive sudo so `cipi crowdsec enable` can
+    # allowlist the session it is typed from. Without them PermitRootLogin=no
+    # plus `sudo cipi` means the operator's own IP is never allowlisted.
     cat > /etc/sudoers.d/cipi-sudo <<'SUDOEOF'
-Defaults:cipi env_keep += "SSH_USER_AUTH"
+Defaults:cipi env_keep += "SSH_USER_AUTH SSH_CLIENT SSH_CONNECTION"
 cipi ALL=(root) NOPASSWD: /usr/local/bin/cipi *
 SUDOEOF
     chmod 440 /etc/sudoers.d/cipi-sudo
@@ -923,6 +926,15 @@ install_cipi() {
     # HTTP healthcheck cron helper
     cp cipi-install/lib/cipi-health-check.sh /usr/local/bin/cipi-health-check
     chmod 700 /usr/local/bin/cipi-health-check
+    cp cipi-install/lib/cipi-scan-manifest.sh /usr/local/bin/cipi-scan-manifest
+    chmod 755 /usr/local/bin/cipi-scan-manifest
+    # Integrity baselines live outside /home/<app>, root-only: the app user must
+    # not be able to rewrite the manifest it is checked against.
+    install -d -m 700 -o root -g root /var/lib/cipi/manifests
+    cp cipi-install/lib/cipi-crowdsec-rescue.py /usr/local/bin/cipi-crowdsec-rescue
+    chmod 700 /usr/local/bin/cipi-crowdsec-rescue
+    cp cipi-install/lib/cipi-crowdsec-rescue-hole.sh /usr/local/bin/cipi-crowdsec-rescue-hole
+    chmod 700 /usr/local/bin/cipi-crowdsec-rescue-hole
     mkdir -p /var/log/cipi/health
     if [ ! -f /etc/cron.d/cipi-health ]; then
         cat > /etc/cron.d/cipi-health <<'EOF'
@@ -935,7 +947,16 @@ EOF
     # Templates (if any)
     cp cipi-install/templates/* /opt/cipi/templates/ 2>/dev/null || true
 
-    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /usr/local/bin/cipi-auth-notify /usr/local/bin/cipi-app-notify /usr/local/bin/cipi-app-deploy /usr/local/bin/cipi-read-app-logs /usr/local/bin/cipi-health-check /opt/cipi
+    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /usr/local/bin/cipi-auth-notify /usr/local/bin/cipi-app-notify /usr/local/bin/cipi-app-deploy /usr/local/bin/cipi-read-app-logs /usr/local/bin/cipi-health-check /usr/local/bin/cipi-scan-manifest /usr/local/bin/cipi-crowdsec-rescue /usr/local/bin/cipi-crowdsec-rescue-hole /opt/cipi
+
+    # Shell tab-completion — installed for every shell, no activation needed:
+    # /etc/bash_completion.d/cipi, the zsh vendor file, and an /etc/profile.d
+    # loader that works even without the bash-completion package.
+    if [ -f /opt/cipi/lib/completion.sh ]; then
+        # shellcheck source=/dev/null
+        . /opt/cipi/lib/completion.sh
+        _completion_install_system || true
+    fi
 
     # Generate vault key for config encryption
     if [ ! -f /etc/cipi/.vault_key ]; then

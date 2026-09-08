@@ -445,6 +445,7 @@ ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker stop ${app_user}
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker status ${app_user}
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-app-notify ${app_user} *
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi health postdeploy ${app_user} --auto
+${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-scan-manifest ${app_user}
 SUDO
     chmod 440 "/etc/sudoers.d/cipi-${app_user}"
     success "Permissions"

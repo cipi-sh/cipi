@@ -50,6 +50,13 @@ ssh_key_remove|SSH keys|SSH key removed
 ssh_login|Security|SSH login (cipi/root/sudo users)
 sudo|Security|Sudo elevation
 su|Security|su to root by cipi
+crowdsec_enable|Security|CrowdSec enabled
+crowdsec_disable|Security|CrowdSec disabled
+crowdsec_rescue|Security|CrowdSec rescue token used or rotated
+scan_enable|Security|Nightly malware scan enabled
+scan_hit|Security|Malware scan found infected files
+scan_incomplete|Security|Malware scan did not finish
+scan_integrity|Security|Release files drifted from the deploy manifest
 backup_fail|Backup|Backup failed
 backup_stale|Backup|Backup overdue (no successful run in its window)
 cron_fail|Cron|Cron job failed

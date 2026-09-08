@@ -483,19 +483,33 @@ _crowdsec_reload() {
     systemctl reload crowdsec 2>/dev/null || systemctl restart crowdsec 2>/dev/null || true
 }
 
-_crowdsec_apply_parsers() {
-    _crowdsec_write_static_whitelist
-    _crowdsec_write_acme_whitelist
-    _crowdsec_write_extra_whitelist
+_crowdsec_apply_allowlists() {
+    _crowdsec_write_static_whitelist || return 1
+    _crowdsec_write_acme_whitelist || return 1
+    _crowdsec_write_extra_whitelist || return 1
     _crowdsec_write_github_whitelist || warn "GitHub webhook CIDRs unchanged (fetch failed — kept the previous list)"
-    _crowdsec_write_nginx_acquis
-    if command -v cscli >/dev/null 2>&1; then
-        cscli hub update >/dev/null 2>&1 || true
-        cscli collections install crowdsecurity/linux --force >/dev/null 2>&1 || true
-        cscli collections install crowdsecurity/nginx --force >/dev/null 2>&1 || true
-        cscli collections install crowdsecurity/sshd --force >/dev/null 2>&1 || true
-    fi
+    _crowdsec_write_nginx_acquis || return 1
     _crowdsec_reload
+}
+
+# Hub update + collections can take minutes and spike RAM. Never run this before
+# the bouncer and rescue are up — a OOM kill mid-enable must not leave the
+# operator without break-glass.
+_crowdsec_install_collections() {
+    command -v cscli >/dev/null 2>&1 || return 0
+    cscli hub update >/dev/null 2>&1 || {
+        warn "cscli hub update failed — scenarios may be stale"
+        return 0
+    }
+    cscli collections install crowdsecurity/linux --force >/dev/null 2>&1 || true
+    cscli collections install crowdsecurity/nginx --force >/dev/null 2>&1 || true
+    cscli collections install crowdsecurity/sshd --force >/dev/null 2>&1 || true
+    _crowdsec_reload
+}
+
+_crowdsec_apply_parsers() {
+    _crowdsec_apply_allowlists || return 1
+    _crowdsec_install_collections || true
 }
 
 _crowdsec_write_cron() {
@@ -905,9 +919,11 @@ _crowdsec_enable() {
     _crowdsec_check_real_ip || exit 1
     _crowdsec_allow_this_ssh
 
+    local fresh=0 rescue_was=0 fwmode
     if _crowdsec_installed && _crowdsec_running; then
         info "CrowdSec engine already running — completing setup"
     else
+        fresh=1
         _crowdsec_install_packages || exit 1
         if ! _crowdsec_running; then
             error "CrowdSec installed but the engine did not start"
@@ -917,17 +933,28 @@ _crowdsec_enable() {
         fi
     fi
 
-    step "Allowlists (localhost, private nets, Let's Encrypt, GitHub/GitLab webhooks, this SSH)..."
-    _crowdsec_apply_parsers
-    _crowdsec_write_cron
+    # Bouncer + rescue first. cscli hub update (later) can take minutes and has
+    # killed enable mid-flight on small boxes — leaving engine up, bouncer down,
+    # rescue missing.
     step "Registering firewall bouncer (cscli bouncers add)..."
     _crowdsec_register_bouncer || exit 1
 
-    local fwmode rescue_was=0
-    fwmode=$(_crowdsec_fw_mode)
     systemctl is-active --quiet cipi-crowdsec-rescue 2>/dev/null && rescue_was=1
     step "Starting rescue TLS listener (allowlist only, not a login)..."
     _crowdsec_rescue_start || exit 1
+
+    step "Allowlists (localhost, private nets, Let's Encrypt, GitHub/GitLab webhooks, this SSH)..."
+    _crowdsec_apply_allowlists || {
+        error "Could not write CrowdSec allowlists"
+        exit 1
+    }
+    if [[ "$fresh" -eq 1 ]]; then
+        step "Installing CrowdSec scenarios (hub update — may take a minute)..."
+        _crowdsec_install_collections || warn "Scenario install did not finish — run: cipi crowdsec refresh"
+    fi
+    _crowdsec_write_cron
+
+    fwmode=$(_crowdsec_fw_mode)
     log_action "crowdsec enable"
     log_event "CrowdSec enabled on $(hostname)"
     local rescue_curl

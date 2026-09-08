@@ -225,9 +225,18 @@ _crowdsec_wait_lapi() {
 }
 
 _crowdsec_bouncer_diag() {
-    local unit="${1:-crowdsec-firewall-bouncer}"
+    local unit="${1:-crowdsec-firewall-bouncer}" log
     echo "  Check:  systemctl status ${unit}" >&2
+    echo "  Start:   systemctl start ${unit}   (then re-run cipi crowdsec enable)" >&2
     echo "  Logs:    journalctl -u ${unit} -n 25 --no-pager" >&2
+    # The bouncer defaults to log_mode: file — an empty journal usually means it
+    # never started, not that nothing went wrong.
+    for log in /var/log/crowdsec-firewall-bouncer.log \
+               /var/log/crowdsec-firewall-bouncer*.log; do
+        [[ -f "$log" ]] || continue
+        echo "  File:    tail -30 ${log}" >&2
+        break
+    done
 }
 
 _crowdsec_bouncer_registered() {

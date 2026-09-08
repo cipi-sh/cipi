@@ -213,49 +213,104 @@ _crowdsec_bouncer_yaml() {
     ls /etc/crowdsec/bouncers/*.yaml 2>/dev/null | head -1
 }
 
+_crowdsec_wait_lapi() {
+    local i
+    for i in $(seq 1 45); do
+        systemctl is-active --quiet crowdsec 2>/dev/null || return 1
+        cscli lapi status >/dev/null 2>&1 && return 0
+        curl -fsS --max-time 2 http://127.0.0.1:8080/v1/heartbeat >/dev/null 2>&1 && return 0
+        sleep 1
+    done
+    return 1
+}
+
+_crowdsec_bouncer_diag() {
+    local unit="${1:-crowdsec-firewall-bouncer}"
+    echo "  Check:  systemctl status ${unit}" >&2
+    echo "  Logs:    journalctl -u ${unit} -n 25 --no-pager" >&2
+}
+
+_crowdsec_bouncer_registered() {
+    cscli bouncers list -o json 2>/dev/null \
+        | jq -r --arg n "$CROWDSEC_BOUNCER_NAME" '[.[]? | select(.name==$n)] | length' 2>/dev/null \
+        || echo 0
+}
+
+_crowdsec_read_bouncer_key() {
+    local yaml="${1:-}" raw
+    [[ -n "$yaml" && -f "$yaml" ]] || return 1
+    raw=$(awk '/^api_key:/{sub(/^api_key:[[:space:]]*/,""); print; exit}' "$yaml")
+    raw="${raw#\"}"; raw="${raw%\"}"
+    raw="${raw#\'}"; raw="${raw%\'}"
+    [[ -n "$raw" ]] || return 1
+    printf '%s' "$raw"
+}
+
+_crowdsec_write_bouncer_yaml() {
+    local yaml="$1" key="$2" mode="$3"
+    local tmp; tmp=$(mktemp)
+    if [[ -f "$yaml" ]]; then
+        grep -Ev '^(mode|api_key|api_url):' "$yaml" > "$tmp" || true
+    fi
+    {
+        echo "mode: ${mode}"
+        echo "api_url: http://127.0.0.1:8080/"
+        echo "api_key: ${key}"
+        cat "$tmp"
+    } > "${yaml}.new"
+    mv "${yaml}.new" "$yaml"
+    rm -f "$tmp"
+}
+
 # Decisions without a registered bouncer never hit the firewall.
 _crowdsec_register_bouncer() {
     command -v cscli >/dev/null 2>&1 || { error "cscli missing after install"; return 1; }
     systemctl enable --now crowdsec 2>/dev/null || true
-    sleep 1
+    _crowdsec_wait_lapi || {
+        error "CrowdSec LAPI did not become ready — cannot register the bouncer"
+        echo "  Check:  systemctl status crowdsec" >&2
+        echo "  Logs:    journalctl -u crowdsec -n 25 --no-pager" >&2
+        return 1
+    }
 
-    local yaml key mode
+    local yaml key mode unit registered i ok=0
     yaml=$(_crowdsec_bouncer_yaml)
     [[ -n "$yaml" ]] || { error "Firewall bouncer config not found under /etc/crowdsec/bouncers/"; return 1; }
     mode=$(_crowdsec_fw_mode)
+    registered=$(_crowdsec_bouncer_registered)
+    key=$(_crowdsec_read_bouncer_key "$yaml" 2>/dev/null || true)
 
-    if grep -q "^api_key:" "$yaml" 2>/dev/null; then
-        key=$(awk '/^api_key:/{print $2; exit}' "$yaml")
-        key="${key#\"}"; key="${key%\"}"
-    fi
-    if [[ -z "${key:-}" || "$key" == '${API_KEY}' || "$key" == "API_KEY" ]]; then
+    if [[ "${registered:-0}" -eq 0 ]] \
+        || [[ -z "${key:-}" || "$key" == '${API_KEY}' || "$key" == "API_KEY" || "$key" == "<"* ]]; then
         cscli bouncers delete "$CROWDSEC_BOUNCER_NAME" >/dev/null 2>&1 || true
         key=$(cscli bouncers add "$CROWDSEC_BOUNCER_NAME" -o raw 2>/dev/null | tr -d '[:space:]')
-        [[ -n "$key" ]] || { error "cscli bouncers add ${CROWDSEC_BOUNCER_NAME} produced no API key"; return 1; }
+        [[ -n "$key" ]] || {
+            error "cscli bouncers add ${CROWDSEC_BOUNCER_NAME} produced no API key"
+            echo "  Try:  cscli bouncers add ${CROWDSEC_BOUNCER_NAME}" >&2
+            return 1
+        }
     fi
 
     # Pin mode to the same netfilter world as fail2ban (iptables-nft → nftables).
-    if grep -q '^mode:' "$yaml"; then
-        sed -i "s/^mode:.*/mode: ${mode}/" "$yaml"
-    else
-        echo "mode: ${mode}" >> "$yaml"
-    fi
-    if grep -q '^api_key:' "$yaml"; then
-        sed -i "s|^api_key:.*|api_key: ${key}|" "$yaml"
-    else
-        echo "api_key: ${key}" >> "$yaml"
-    fi
-    if grep -q '^api_url:' "$yaml"; then
-        sed -i 's|^api_url:.*|api_url: http://127.0.0.1:8080/|' "$yaml"
-    else
-        echo "api_url: http://127.0.0.1:8080/" >> "$yaml"
-    fi
+    _crowdsec_write_bouncer_yaml "$yaml" "$key" "$mode"
 
-    local unit
     unit=$(_crowdsec_bouncer_unit)
     [[ -n "$unit" ]] || { error "Firewall bouncer package installed but no systemd unit"; return 1; }
-    systemctl enable --now "$unit" 2>/dev/null || { error "Could not start ${unit}"; return 1; }
-    systemctl is-active --quiet "$unit" || { error "${unit} is not running — no IP will be banned"; return 1; }
+    systemctl enable "$unit" 2>/dev/null || true
+    systemctl restart "$unit" 2>/dev/null || systemctl start "$unit" 2>/dev/null || {
+        error "Could not start ${unit}"
+        _crowdsec_bouncer_diag "$unit"
+        return 1
+    }
+    for i in $(seq 1 15); do
+        systemctl is-active --quiet "$unit" && { ok=1; break; }
+        sleep 1
+    done
+    if [[ "$ok" -eq 0 ]]; then
+        error "${unit} is not running — no IP will be banned"
+        _crowdsec_bouncer_diag "$unit"
+        return 1
+    fi
 }
 
 # Drop every CrowdSec netfilter artefact *before* purge, or DROP rules stay
@@ -763,8 +818,23 @@ _crowdsec_rescue_cli() {
             ;;
         token|url|curl)
             _crowdsec_installed || { error "CrowdSec is not installed"; exit 1; }
-            local curl
-            curl=$(_crowdsec_rescue_curl) || { error "Rescue is not configured — cipi crowdsec enable"; exit 1; }
+            local curl unit
+            curl=$(_crowdsec_rescue_curl) || {
+                error "Rescue is not configured"
+                if _crowdsec_running; then
+                    echo "  enable stopped before the rescue listener started." >&2
+                    unit=$(_crowdsec_bouncer_unit)
+                    if [[ -n "${unit:-}" ]] && ! systemctl is-active --quiet "$unit" 2>/dev/null; then
+                        echo "  The firewall bouncer is not running — fix it, then re-run enable:" >&2
+                        _crowdsec_bouncer_diag "$unit"
+                    else
+                        echo "  Re-run:  cipi crowdsec enable" >&2
+                    fi
+                else
+                    echo "  Run:  cipi crowdsec enable" >&2
+                fi
+                exit 1
+            }
             echo "$curl"
             ;;
         rotate)
@@ -826,37 +896,27 @@ _crowdsec_enable() {
     _crowdsec_check_real_ip || exit 1
     _crowdsec_allow_this_ssh
 
-    if _crowdsec_running && [[ -n "$(_crowdsec_bouncer_unit)" ]] \
-        && systemctl is-active --quiet "$(_crowdsec_bouncer_unit)" 2>/dev/null; then
-        step "CrowdSec already running — refreshing allowlists and bouncer registration"
-        _crowdsec_apply_parsers
-        _crowdsec_register_bouncer || exit 1
-        _crowdsec_write_cron
-        local rescue_was=0
-        systemctl is-active --quiet cipi-crowdsec-rescue 2>/dev/null && rescue_was=1
-        _crowdsec_rescue_start || exit 1
-        success "CrowdSec is enabled (engine + firewall bouncer)"
-        _crowdsec_rescue_print
-        if [[ "$rescue_was" -eq 0 ]]; then
-            _crowdsec_rescue_mail "CrowdSec rescue listener is on $(hostname). Save this curl; one use, then the token dies."
+    if _crowdsec_installed && _crowdsec_running; then
+        info "CrowdSec engine already running — completing setup"
+    else
+        _crowdsec_install_packages || exit 1
+        if ! _crowdsec_running; then
+            error "CrowdSec installed but the engine did not start"
+            echo "  Check:  systemctl status crowdsec"
+            echo "  Logs:    journalctl -u crowdsec -n 25 --no-pager"
+            exit 1
         fi
-        return 0
     fi
 
-    _crowdsec_install_packages || exit 1
     step "Allowlists (localhost, private nets, Let's Encrypt, GitHub/GitLab webhooks, this SSH)..."
     _crowdsec_apply_parsers
     _crowdsec_write_cron
+    step "Registering firewall bouncer (cscli bouncers add)..."
     _crowdsec_register_bouncer || exit 1
 
-    if ! _crowdsec_running; then
-        error "CrowdSec installed but the engine did not start"
-        echo "  Check:  systemctl status crowdsec"
-        exit 1
-    fi
-
-    local fwmode
+    local fwmode rescue_was=0
     fwmode=$(_crowdsec_fw_mode)
+    systemctl is-active --quiet cipi-crowdsec-rescue 2>/dev/null && rescue_was=1
     step "Starting rescue TLS listener (allowlist only, not a login)..."
     _crowdsec_rescue_start || exit 1
     log_action "crowdsec enable"
@@ -870,6 +930,9 @@ _crowdsec_enable() {
     success "CrowdSec enabled (engine + ${fwmode} bouncer)"
     info "cipi ban list|unban now includes CrowdSec decisions"
     _crowdsec_rescue_print
+    if [[ "$rescue_was" -eq 0 ]]; then
+        _crowdsec_rescue_mail "CrowdSec rescue listener is on $(hostname). Save this curl; one use, then the token dies."
+    fi
 }
 
 _crowdsec_disable() {
@@ -942,8 +1005,7 @@ _crowdsec_status() {
     echo -e "  ${DIM}not a login — cipi crowdsec rescue token|rotate${NC}"
     if command -v cscli >/dev/null 2>&1; then
         local bn
-        bn=$(cscli bouncers list -o json 2>/dev/null | jq -r --arg n "$CROWDSEC_BOUNCER_NAME" \
-            '[.[]? | select(.name==$n or .name != "")] | length' 2>/dev/null || echo 0)
+        bn=$(_crowdsec_bouncer_registered)
         printf "  %-16s ${CYAN}%s${NC}\n" "Registered" "${bn:-0} bouncer(s)"
     fi
     if [[ -s "$CROWDSEC_ALLOW_FILE" ]]; then

@@ -147,6 +147,12 @@ if awk '/^_crowdsec_allow_this_ssh\(\)/,/^# ── Rescue/' "${LIB}/crowdsec.sh"
 else
     fail "enable is silent when it cannot allowlist the session"
 fi
+if awk '/^_crowdsec_write_extra_whitelist\(\)/,/^_crowdsec_write_github_whitelist\(\)/' "${LIB}/crowdsec.sh" \
+    | grep -qE 'if \[\[ -n "\$ips" \]\]|if \[\[ -n "\$cidrs" \]\]'; then
+    pass "extra allowlist write survives set -e (IPs only, no CIDRs)"
+else
+    fail "extra allowlist still uses bare [[ ]] && chains (set -e aborts when cidrs is empty)"
+fi
 grep -q 'set_real_ip_from' "${LIB}/crowdsec.sh" \
     && pass "enable checks nginx real_ip" || fail "no real_ip check"
 # Cipi vhosts are sites-available/<app> with no extension: an --include='*.conf'

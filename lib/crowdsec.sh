@@ -351,8 +351,18 @@ _crowdsec_flush_firewall() {
     done
 }
 
+_crowdsec_ensure_config_writable() {
+    local d
+    for d in /etc/crowdsec "$CROWDSEC_PARSER_DIR" "$CROWDSEC_ACQUIS_DIR"; do
+        [[ -n "$d" ]] || continue
+        mkdir -p "$d" 2>/dev/null || true
+        chmod u+rwx "$d" 2>/dev/null || true
+    done
+}
+
 _crowdsec_write_static_whitelist() {
-    mkdir -p "$CROWDSEC_PARSER_DIR"
+    _crowdsec_ensure_config_writable
+    mkdir -p "$CROWDSEC_PARSER_DIR" || return 1
     cat > "${CROWDSEC_PARSER_DIR}/cipi-whitelists.yaml" <<'EOF'
 name: crowdsecurity/cipi-whitelists
 description: "Cipi never-ban list (localhost, RFC1918, GitLab.com webhooks)"
@@ -378,10 +388,12 @@ whitelist:
     - "34.74.90.64/28"
     - "34.74.226.0/24"
 EOF
+    return 0
 }
 
 _crowdsec_write_acme_whitelist() {
-    mkdir -p "$CROWDSEC_PARSER_DIR"
+    _crowdsec_ensure_config_writable
+    mkdir -p "$CROWDSEC_PARSER_DIR" || return 1
     cat > "${CROWDSEC_PARSER_DIR}/cipi-acme-whitelists.yaml" <<'EOF'
 name: crowdsecurity/cipi-acme-whitelists
 description: "Let's Encrypt HTTP-01"
@@ -391,10 +403,12 @@ whitelist:
   expression:
     - "true"
 EOF
+    return 0
 }
 
 _crowdsec_write_extra_whitelist() {
-    mkdir -p "$CROWDSEC_PARSER_DIR"
+    _crowdsec_ensure_config_writable
+    mkdir -p "$CROWDSEC_PARSER_DIR" || return 1
     local extra="${CROWDSEC_PARSER_DIR}/cipi-extra-whitelists.yaml"
     if [[ ! -s "$CROWDSEC_ALLOW_FILE" ]]; then
         rm -f "$extra"
@@ -420,9 +434,16 @@ _crowdsec_write_extra_whitelist() {
         echo "filter: \"1 == 1\""
         echo "whitelist:"
         echo "  reason: \"cipi crowdsec allow\""
-        [[ -n "$ips" ]] && { echo "  ip:"; printf '%s' "$ips"; }
-        [[ -n "$cidrs" ]] && { echo "  cidr:"; printf '%s' "$cidrs"; }
-    } > "$extra"
+        if [[ -n "$ips" ]]; then
+            echo "  ip:"
+            printf '%s' "$ips"
+        fi
+        if [[ -n "$cidrs" ]]; then
+            echo "  cidr:"
+            printf '%s' "$cidrs"
+        fi
+    } > "$extra" || return 1
+    return 0
 }
 
 # Fail-open: never replace a good file with an empty fetch.
@@ -467,7 +488,8 @@ _crowdsec_write_github_whitelist() {
 # http-probing / bad-user-agent / bruteforce scenario ever fires. Globs pick up
 # apps created after `crowdsec enable` on their own.
 _crowdsec_write_nginx_acquis() {
-    mkdir -p "$CROWDSEC_ACQUIS_DIR"
+    _crowdsec_ensure_config_writable
+    mkdir -p "$CROWDSEC_ACQUIS_DIR" || return 1
     cat > "${CROWDSEC_ACQUIS_DIR}/cipi-nginx.yaml" <<'EOF'
 filenames:
   - /var/log/nginx/access.log
@@ -477,6 +499,7 @@ filenames:
 labels:
   type: nginx
 EOF
+    return 0
 }
 
 _crowdsec_reload() {
@@ -484,12 +507,13 @@ _crowdsec_reload() {
 }
 
 _crowdsec_apply_allowlists() {
-    _crowdsec_write_static_whitelist || return 1
-    _crowdsec_write_acme_whitelist || return 1
-    _crowdsec_write_extra_whitelist || return 1
+    _crowdsec_write_static_whitelist || { error "Could not write static allowlist"; return 1; }
+    _crowdsec_write_acme_whitelist || { error "Could not write ACME allowlist"; return 1; }
+    _crowdsec_write_extra_whitelist || { error "Could not write extra allowlist"; return 1; }
     _crowdsec_write_github_whitelist || warn "GitHub webhook CIDRs unchanged (fetch failed — kept the previous list)"
-    _crowdsec_write_nginx_acquis || return 1
+    _crowdsec_write_nginx_acquis || { error "Could not write nginx log acquisition config"; return 1; }
     _crowdsec_reload
+    return 0
 }
 
 # Hub update + collections can take minutes and spike RAM. Never run this before
@@ -944,10 +968,9 @@ _crowdsec_enable() {
     _crowdsec_rescue_start || exit 1
 
     step "Allowlists (localhost, private nets, Let's Encrypt, GitHub/GitLab webhooks, this SSH)..."
-    _crowdsec_apply_allowlists || {
-        error "Could not write CrowdSec allowlists"
-        exit 1
-    }
+    if ! _crowdsec_apply_allowlists; then
+        warn "Allowlist write failed — bouncer and rescue are up; fix with: cipi crowdsec refresh"
+    fi
     if [[ "$fresh" -eq 1 ]]; then
         step "Installing CrowdSec scenarios (hub update — may take a minute)..."
         _crowdsec_install_collections || warn "Scenario install did not finish — run: cipi crowdsec refresh"

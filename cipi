@@ -193,6 +193,8 @@ show_help_topic() {
             _help_h "Credentials"
             _help_cmd "cipi app reset-password <app>"    "Reset app SSH password"
             _help_cmd "cipi app reset-db-password <app>" "Reset app DB password"
+            _help_h "Repair"
+            _help_cmd "cipi app fix-permissions [app]"   "Restore home/.ssh/.env/logs modes"
             echo ""
             ;;
 
@@ -367,6 +369,8 @@ show_help_topic() {
             _help_cmd "cipi git gitlab-url <url>"      "Self-hosted GitLab URL"
             _help_cmd "cipi git remove-github"         "Remove GitHub token"
             _help_cmd "cipi git remove-gitlab"         "Remove GitLab token + URL"
+            _help_cmd "cipi git refresh [app]"         "Re-sync deploy keys + webhooks"
+            _help_note "refresh flags: --rotate-keys --rotate-secret --force"
             echo ""
             ;;
 

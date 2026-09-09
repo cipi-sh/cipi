@@ -77,7 +77,13 @@ selfupdate_command() {
     fi
     local nv; nv=$(tr -d '[:space:]' < "${tmp}/version.md" 2>/dev/null)
     [[ -z "$nv" ]] && { error "Invalid package (version.md missing)"; rm -rf "$tmp"; exit 1; }
-    info "Updating v${CIPI_VERSION} → v${nv}"
+    # Snapshot before we rewrite /etc/cipi/version or re-source libs — the
+    # nightly cron always refreshes files, but the mail must fire only on a bump.
+    local old_ver="${CIPI_VERSION}" version_changed=false
+    if [[ "$nv" != "$old_ver" ]]; then
+        version_changed=true
+    fi
+    info "Updating v${old_ver} → v${nv}"
     cp -r /opt/cipi "/opt/cipi.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null||true
     cp "${tmp}/cipi" /usr/local/bin/cipi; chmod 700 /usr/local/bin/cipi
     cp "${tmp}"/lib/*.sh /opt/cipi/lib/; chmod 700 /opt/cipi/lib/*.sh
@@ -213,14 +219,15 @@ selfupdate_command() {
         purge_orphan_app_users || true
     fi
 
-    log_action "SELF-UPDATE: v${CIPI_VERSION} → v${nv}"
+    log_action "SELF-UPDATE: v${old_ver} → v${nv}"
 
-    # Updates arrive unattended from the nightly cron, so without this the only
-    # way to learn the server changed was to go looking for it.
-    if [[ "$nv" != "${CIPI_VERSION}" ]]; then
+    # Same-version refresh (nightly cron, --branch of a tag already installed)
+    # still copies libs; it must not mail. version_changed was decided from the
+    # snapshot above, not from CIPI_VERSION after /etc/cipi/version was rewritten.
+    if [[ "$version_changed" == true ]]; then
         cipi_notify \
             "Cipi updated to v${nv} on $(hostname)" \
-            "Cipi updated itself.\n\nServer: $(hostname)\nVersion: v${CIPI_VERSION} → v${nv}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nChangelog: https://github.com/cipi-sh/cipi/blob/master/CHANGELOG.md\n\nTurn this off with: cipi notifications disable self_update" \
+            "Cipi updated itself.\n\nServer: $(hostname)\nVersion: v${old_ver} → v${nv}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nChangelog: https://github.com/cipi-sh/cipi/blob/master/CHANGELOG.md\n\nTurn this off with: cipi notifications disable self_update" \
             self_update
     fi
     success "Updated to v${nv}"

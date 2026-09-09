@@ -3576,6 +3576,43 @@ app_webhook_recreate() {
     git_recreate_webhook "$app" "$@" || exit 1
 }
 
+# Restore home / .ssh / .env / storage / logs ownership and modes.
+# Usage: cipi app fix-permissions [app]
+app_fix_permissions() {
+    local app="${1:-}"
+    if [[ -n "$app" ]]; then
+        app_exists "$app" || { error "App '${app}' not found"; exit 1; }
+        step "Restoring permissions for ${app}..."
+        ensure_app_permissions "$app"
+        log_action "APP PERMISSIONS RESTORED: ${app}"
+        success "Permissions restored for ${app}"
+        return 0
+    fi
+
+    if [[ ! -f "${CIPI_CONFIG}/apps.json" ]]; then
+        info "No apps"
+        return 0
+    fi
+    local apps; apps=$(vault_read apps.json | jq -r 'keys[]')
+    if [[ -z "$apps" ]]; then
+        info "No apps"
+        return 0
+    fi
+
+    echo -e "\n${BOLD}App permissions${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    local n=0
+    while IFS= read -r app; do
+        [[ -z "$app" ]] && continue
+        step "${app}..."
+        ensure_app_permissions "$app"
+        success "${app}"
+        n=$((n + 1))
+    done <<< "$apps"
+    log_action "APP PERMISSIONS RESTORED: all apps (${n})"
+    success "Permissions restored for ${n} app(s)"
+}
+
 # ── ROUTERS ───────────────────────────────────────────────────
 
 app_command() {
@@ -3616,7 +3653,8 @@ app_command() {
         unsuspend) app_unsuspend "$@" ;;
         reset-password)    app_reset_password "$@" ;;
         reset-db-password) app_reset_db_password "$@" ;;
-        *) error "Unknown: $sub"; echo "Use: create list show edit delete convert clone reverb limits env webhook logs tinker artisan run deploy-config suspend unsuspend reset-password reset-db-password"; echo "      webhook recreate <app> [--rotate-secret]"; echo "      logs read <app> [--type=T] [--page=N] [--per-page=N]  (API snapshot)"; echo "      run --commands [--json]  (list whitelisted binaries)"; exit 1 ;;
+        fix-permissions|fixperms) app_fix_permissions "$@" ;;
+        *) error "Unknown: $sub"; echo "Use: create list show edit delete convert clone reverb limits env webhook logs tinker artisan run deploy-config suspend unsuspend reset-password reset-db-password fix-permissions"; echo "      webhook recreate <app> [--rotate-secret]"; echo "      logs read <app> [--type=T] [--page=N] [--per-page=N]  (API snapshot)"; echo "      run --commands [--json]  (list whitelisted binaries)"; exit 1 ;;
     esac
 }
 

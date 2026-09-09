@@ -608,6 +608,75 @@ ensure_app_logs_permissions() {
     fi
 }
 
+# Restore the permission model `cipi app create` left behind. Do NOT chown -R
+# the whole home as app:app: nginx writes vhost logs as www-data into logs/
+# (2775 setgid), and a 700 home would lock www-data out of the docroot
+# (www-data is in the app group so 750 is enough).
+ensure_app_permissions() {
+    local app="${1:-}"
+    [[ -z "$app" || "$app" == "cipi" ]] && return 0
+    local home="/home/${app}"
+    [[ -d "$home" ]] || return 0
+    id "$app" &>/dev/null || return 0
+
+    chown "${app}:${app}" "$home" 2>/dev/null || true
+    chmod 750 "$home"
+
+    # Own everything except logs/ (nginx). -h: do not follow `current` → a release.
+    find "$home" -mindepth 1 \( -path "${home}/logs" -o -path "${home}/logs/*" \) -prune \
+        -o -exec chown -h "${app}:${app}" {} + 2>/dev/null || true
+
+    if [[ -d "${home}/.ssh" ]]; then
+        chown -R "${app}:${app}" "${home}/.ssh" 2>/dev/null || true
+        chmod 700 "${home}/.ssh"
+        local f
+        for f in authorized_keys id_ed25519 id_rsa known_hosts config; do
+            [[ -f "${home}/.ssh/${f}" ]] && chmod 600 "${home}/.ssh/${f}"
+        done
+        for f in "${home}/.ssh/"*.pub; do
+            [[ -f "$f" ]] && chmod 644 "$f"
+        done
+    fi
+
+    [[ -f "${home}/shared/.env" ]] && chmod 640 "${home}/shared/.env"
+    [[ -f "${home}/shared/auth.json" ]] && chmod 640 "${home}/shared/auth.json"
+    [[ -f "${home}/shared/cipi-databases.env" ]] && chmod 600 "${home}/shared/cipi-databases.env"
+
+    local d
+    for d in \
+        shared/storage \
+        shared/storage/app \
+        shared/storage/app/public \
+        shared/storage/framework \
+        shared/storage/framework/cache \
+        shared/storage/framework/cache/data \
+        shared/storage/framework/sessions \
+        shared/storage/framework/views \
+        shared/storage/logs
+    do
+        if [[ -d "${home}/${d}" ]]; then
+            chown "${app}:${app}" "${home}/${d}" 2>/dev/null || true
+            chmod 775 "${home}/${d}"
+        fi
+    done
+
+    if [[ -d "${home}/releases" ]]; then
+        find "${home}/releases" -type d -path '*/bootstrap/cache' -exec chmod 775 {} \; 2>/dev/null || true
+    fi
+
+    if [[ -d "${home}/.deployer" ]]; then
+        chown -R "${app}:${app}" "${home}/.deployer" 2>/dev/null || true
+        find "${home}/.deployer" -maxdepth 1 -type f -name '*.sh' -exec chmod 755 {} \; 2>/dev/null || true
+    fi
+
+    # logs/ is nginx's (www-data); group www-data + setgid is applied next.
+    if [[ -d "${home}/logs" ]]; then
+        chown -R "${app}:www-data" "${home}/logs" 2>/dev/null || true
+    fi
+
+    ensure_app_logs_permissions "$app"
+}
+
 _create_supervisor_worker() {
     local app="$1" v="$2" queue="${3:-default}" procs="${4:-}" tries="${5:-3}" timeout="${6:-3600}"
     [[ -z "$procs" ]] && procs=$(_app_limit "$app" worker_procs 1 20)

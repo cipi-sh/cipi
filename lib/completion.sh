@@ -94,7 +94,7 @@ _cipi_complete() {
 
         app)
             case $pos in
-                1) sub="create list show edit convert clone reverb limits delete suspend unsuspend env logs tinker artisan run deploy-config reset-password reset-db-password" ;;
+                1) sub="create list show edit convert clone reverb limits delete suspend unsuspend env logs tinker artisan run deploy-config reset-password reset-db-password fix-permissions" ;;
                 2) case "$w1" in
                        create) sub="--custom --octane --engine=" ;;
                        reverb) sub="enable disable status" ;;
@@ -217,7 +217,16 @@ _cipi_complete() {
             esac ;;
 
         gui|panel) [[ $pos -eq 1 ]] && sub="ssl update refresh-theme upgrade status fix-permissions repair reset-user remove" ;;
-        git)       [[ $pos -eq 1 ]] && sub="status github-token gitlab-token gitlab-url remove-github remove-gitlab" ;;
+        git)
+            case $pos in
+                1) sub="status github-token gitlab-token gitlab-url remove-github remove-gitlab refresh" ;;
+                2) case "$w1" in
+                       refresh) sub="$(_cipi_apps) --rotate-keys --rotate-secret --force" ;;
+                   esac ;;
+                3) case "$w1" in
+                       refresh) sub="--rotate-keys --rotate-secret --force" ;;
+                   esac ;;
+            esac ;;
         sync)      [[ $pos -eq 1 ]] && sub="export import push list pubkey trust" ;;
         ssh)       [[ $pos -eq 1 ]] && sub="list add remove" ;;
 

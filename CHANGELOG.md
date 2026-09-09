@@ -4,6 +4,26 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.2.1] — 2026-09-09
+
+Recovery commands: re-sync GitHub/GitLab deploy keys and webhooks, and restore an app home to the permission model Cipi created it with.
+
+### Added
+
+- **`cipi git refresh [app]`.** Walks every app with a GitHub or GitLab repository (or one named app) and re-registers the local SSH deploy key plus the deploy webhook. Stale IDs in `apps.json` are replaced. Remote leftovers titled `cipi:<app>` or pointing at this app's webhook URL are removed first so duplicates are not left behind. Custom/SFTP apps get the key only. A missing or rejected PAT is reported per app (`cipi git github-token` / `gitlab-token` first). **`--rotate-keys`** mints a new ed25519 key and swaps it in `authorized_keys` (Deployer still SSHs to localhost with it). **`--rotate-secret`** mints a new `CIPI_WEBHOOK_TOKEN` in `apps.json` and `shared/.env`. Both ask before touching every app unless **`--force`**. If GitHub refuses the existing pubkey because it is already a deploy key on another repo, refresh generates a new key for that app and continues.
+- **`cipi app fix-permissions [app]`.** The panel already had `cipi api fix-permissions` and `cipi gui fix-permissions`; apps did not. A blunt `chown -R app:app /home/<app>` is wrong: nginx writes vhost logs as `www-data` into `logs/` (2775 setgid), the home must stay **750** so `www-data` (in the app group) can read the docroot, `.ssh` must be **700** or OpenSSH StrictModes refuses the deploy key, and `shared/.env` is **640**. This command reapplies that layout — ownership of the tree except `logs/`, then the log/ACL helper, storage dirs **775**, Composer `auth.json` **640**, `cipi-databases.env` **600**. One named app, or every app. **No migration:** `self-update` copies the libs and refreshes shell completion. The panel sudoers file lists the new command so a future GUI can call it; existing servers pick that line up the next time sudoers is rewritten (the CLI runs as root and does not need it).
+
+### Fixed
+
+- **`self_update` mail on a same-version refresh.** The nightly cron always copies the libs even when `version.md` has not moved. The `self_update` email is now decided from a snapshot taken before `/etc/cipi/version` is rewritten, and is sent only when that snapshot differs from the downloaded version. A refresh that stays on the same release is silent.
+
+### Notes
+
+- Deploy keys and webhooks on GitHub/GitLab do not vanish when a PAT expires — they only become unmanageable via API. Refresh is for the case where they were deleted, the stored IDs drifted, or you just installed a new token and want every app re-attached.
+- `cipi deploy` already runs the log-ACL helper before Deployer. `fix-permissions` is the full home, on demand, after someone unpacked a zip as root or chmod'd `.ssh` to 775.
+
+---
+
 ## [5.2.0] — 2026-09-08
 
 Opt-in CrowdSec (engine **and** a registered firewall bouncer) and a nightly integrity check. Neither is installed by `setup.sh` or `cipi self-update`. There is no WAF.

@@ -91,7 +91,7 @@ Every app gets a fully isolated environment. **Laravel** (default): zero-downtim
 
 ### 🔒 Security & Isolation by Design
 
-Each app runs under its own Linux user with an isolated filesystem, PHP-FPM pool (or Octane process), and database. A compromise in one app cannot touch the others. Configs are encrypted at rest with AES-256 (Vault). GDPR-compliant log rotation included. Per-app **resource limits** (`cipi app limits`) cap FPM children, memory, Octane workers, and queue processes.
+Each app runs under its own Linux user with an isolated filesystem, PHP-FPM pool (or Octane process), and database. A compromise in one app cannot touch the others. Configs are encrypted at rest with AES-256 (Vault). GDPR-compliant log rotation included. Per-app **resource limits** (`cipi app limits`) cap FPM children, memory, Octane workers, and queue processes. `cipi app fix-permissions` restores that layout if a deploy or a zip-as-root left the home unreadable.
 
 Optional, off until you turn them on — `setup.sh` / `self-update` never install them:
 
@@ -180,7 +180,7 @@ Horizon is mutually exclusive with `queue:work` workers. Scheduler toggles the c
 
 ### 🔗 Webhook Auto-Deploy
 
-Native GitHub and GitLab integration — deploy keys and webhooks configured automatically. HMAC signature verification. Or plug in any custom Git provider.
+Native GitHub and GitLab integration — deploy keys and webhooks configured automatically. HMAC signature verification. Or plug in any custom Git provider. If a token expires and keys/webhooks drift, `cipi git refresh` re-registers them on every app (`--rotate-keys` / `--rotate-secret` to mint new material).
 
 ### 📦 App Types
 

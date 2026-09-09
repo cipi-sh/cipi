@@ -66,8 +66,8 @@ _help_topic_header() {
 _help_topics_list() {
     cat <<'EOF'
 app  domains  www  deploy  worker  schedule  health  db  search  service  ssl
-php  auth  basicauth  ssh  firewall  ban  crowdsec  scan  backup  sync  git
-ini  yml  nginx  api  gui  smtp  notifications  reset  server  completion
+php  package  auth  basicauth  ssh  firewall  ban  crowdsec  scan  backup  sync
+git  ini  yml  nginx  api  gui  smtp  notifications  reset  server  completion
 EOF
 }
 
@@ -115,6 +115,7 @@ show_help() {
     echo ""
     echo -e "  ${BOLD}Ops${NC}"
     _help_cmd "cipi php / ini"                   "PHP versions and php.ini settings"
+    _help_cmd "cipi package ..."                 "Optional tools  ${DIM}ffmpeg, image optimisers, pdftotext${NC}"
     _help_cmd "cipi backup ..."                  "Backup profiles, schedules, retention"
     _help_cmd "cipi yml ..."                     "Apply a project's cipi.yml"
     _help_cmd "cipi nginx / sync / git"          "Default server, migrate apps, Git tokens"
@@ -349,6 +350,26 @@ show_help_topic() {
             _help_note "then php artisan scout:import \"App\\\\Models\\\\Post\"."
             _help_note "Indexes are derived data: not in cipi backup, and upgrade may drop them."
             _help_note "Small datasets need no service at all — Scout's 'database' driver is enough."
+            echo ""
+            ;;
+
+        package|packages|pkg)
+            _help_topic_header "Packages"
+            echo ""
+            _help_cmd "cipi package list"                "Allowlist + what is installed  ${DIM}[--json]${NC}"
+            _help_cmd "cipi package install <name>"      "Install one entry  ${DIM}[--yes] [--force]${NC}"
+            _help_cmd "cipi package remove <name>"       "Purge it  ${DIM}[--yes] [--autoremove]${NC}"
+            echo ""
+            _help_note "Allowlist: image-optimizers  ffmpeg  imagemagick  poppler-utils"
+            _help_note "A single package inside a group also works (e.g. 'webp', 'jpegoptim')."
+            _help_note "Closed on purpose: stateless binaries from Ubuntu repos only — no daemon,"
+            _help_note "no port, no state. Anything else is a service (cipi search, cipi db install)."
+            _help_note "install shows what apt intends to pull, and asks, before it runs."
+            _help_note "Already in the base stack: the Imagick PHP extension, Ghostscript,"
+            _help_note "fonts-dejavu-core (Recommends of php-imagick) and Node 20."
+            _help_note "Chromium is not here: on Ubuntu it only exists as a snapd transitional"
+            _help_note "package. For browsershot use Puppeteer's own Chromium or Google's repo."
+            _help_note "ffmpeg belongs in a queue worker, never in a web request."
             echo ""
             ;;
 
@@ -672,6 +693,7 @@ show_help_all() {
     show_help_topic ssh
     show_help_topic ssl
     show_help_topic php
+    show_help_topic package
     show_help_topic firewall
     show_help_topic ban
     show_help_topic crowdsec
@@ -766,6 +788,7 @@ main() {
         search)     _maybe_cmd_help search "$@";     require_root; source "${CIPI_LIB}/search.sh";      search_command "$@" ;;
         ssl)        _maybe_cmd_help ssl "$@";        require_root; source "${CIPI_LIB}/ssl.sh";         ssl_command "$@" ;;
         php)        _maybe_cmd_help php "$@";        require_root; source "${CIPI_LIB}/php.sh";         php_command "$@" ;;
+        package|packages) _maybe_cmd_help package "$@"; require_root; source "${CIPI_LIB}/package.sh"; package_command "$@" ;;
         firewall)   _maybe_cmd_help firewall "$@";   require_root; source "${CIPI_LIB}/firewall.sh";    firewall_command "$@" ;;
         ban)        _maybe_cmd_help ban "$@";        require_root; source "${CIPI_LIB}/ban.sh";         ban_command "$@" ;;
         crowdsec)   _maybe_cmd_help crowdsec "$@";   require_root; source "${CIPI_LIB}/crowdsec.sh";    crowdsec_command "$@" ;;

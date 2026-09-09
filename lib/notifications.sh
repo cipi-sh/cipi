@@ -40,6 +40,8 @@ php_install|PHP|PHP version installed
 php_switch|PHP|System PHP switched
 php_remove|PHP|PHP version removed
 php_upgrade|PHP|PHP packages upgraded
+package_install|Packages|Optional package installed
+package_remove|Packages|Optional package removed
 db_create|Database|Database created
 db_delete|Database|Database deleted
 search_install|Search|Meilisearch installed

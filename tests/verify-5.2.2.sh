@@ -258,11 +258,118 @@ fi
 grep -q 'SEARCH_MIN_RAM_KB' "$SEARCH" \
     && pass "install has a RAM guard" || fail "no RAM guard"
 
+echo "-- cipi package: dispatch and help"
+PKG="${LIB}/package.sh"
+[[ -f "$PKG" ]] && pass "lib/package.sh exists" || fail "lib/package.sh missing"
+bash -n "$PKG" 2>/dev/null && pass "syntax package.sh" || { fail "syntax package.sh"; bash -n "$PKG" || true; }
+grep -qE '^[[:space:]]+package\|packages\)' "${ROOT}/cipi" \
+    && pass "cipi dispatches package" || fail "cipi does not dispatch package"
+grep -q 'package_command' "$PKG" \
+    && pass "package_command exists" || fail "no package_command"
+grep -q 'show_help_topic package' "${ROOT}/cipi" \
+    && pass "help all includes the package topic" || fail "help all omits package"
+grep -qE '^[[:space:]]+package\|packages\|pkg\)' "${ROOT}/cipi" \
+    && pass "help topic accepts package|packages|pkg" || fail "no package help topic"
+
+echo "-- cipi package: the allowlist is closed"
+eval "$(sed -n '/^_pkg_catalog()/,/^}/p' "$PKG")"
+eval "$(grep -E '^_pkg_(ids|apt_for|bins_for|desc_for)\(\)' "$PKG")"
+eval "$(sed -n '/^_pkg_resolve()/,/^}/p' "$PKG")"
+ids=$(_pkg_ids | tr '\n' ' ')
+[[ "$(_pkg_ids | wc -l | tr -d ' ')" == "4" ]] \
+    && pass "catalog has 4 entries (${ids})" || fail "unexpected catalog size: ${ids}"
+for want in image-optimizers ffmpeg imagemagick poppler-utils; do
+    grep -qw "$want" <<< "$ids" && pass "catalog has ${want}" || fail "catalog missing ${want}"
+done
+[[ "$(_pkg_resolve webp)" == "image-optimizers" ]] \
+    && pass "a group member resolves to its group" || fail "member names do not resolve"
+for deny in nginx mariadb-server redis-server docker.io snapd sudo bash; do
+    if _pkg_resolve "$deny" >/dev/null 2>&1; then
+        fail "'${deny}' resolves — the allowlist is not closed"
+    else
+        pass "'${deny}' is refused"
+    fi
+done
+# The design decision, asserted: chromium on Ubuntu is a snapd transitional
+# package, so it must never be installable through this command.
+for c in chromium chromium-browser; do
+    if _pkg_resolve "$c" >/dev/null 2>&1; then
+        fail "'${c}' is in the allowlist (it pulls snapd)"
+    else
+        pass "'${c}' stays out of the allowlist"
+    fi
+done
+grep -q 'snapd' "$PKG" \
+    && pass "the refusal explains why chromium is excluded" || fail "no snapd explanation"
+
+echo "-- cipi package: install/remove behaviour"
+grep -q '_pkg_refuse' "$PKG" \
+    && pass "unlisted names hit a single refusal path" || fail "no _pkg_refuse"
+if sed -n '/^_pkg_install()/,/^}/p' "$PKG" | grep -q '_pkg_resolve'; then
+    pass "install resolves through the allowlist"
+else
+    fail "install does not consult the allowlist"
+fi
+if sed -n '/^_pkg_remove()/,/^}/p' "$PKG" | grep -q '_pkg_resolve'; then
+    pass "remove resolves through the allowlist"
+else
+    fail "remove does not consult the allowlist (it could purge anything)"
+fi
+if sed -n '/^_pkg_install()/,/^}/p' "$PKG" | grep -q '_pkg_preview'; then
+    pass "install shows what apt intends to pull first"
+else
+    fail "install runs apt without a preview"
+fi
+if sed -n '/^_pkg_remove()/,/^}/p' "$PKG" | grep -q 'autoremove -s'; then
+    pass "autoremove is previewed, not run blind"
+else
+    fail "autoremove would run without showing what it takes"
+fi
+if sed -n '/^_pkg_remove()/,/^}/p' "$PKG" | grep -q 'present='; then
+    pass "remove purges only packages that are actually installed"
+else
+    fail "remove would name absent packages to apt"
+fi
+grep -q 'PKG_MIN_DISK_KB' "$PKG" \
+    && pass "install has a disk guard" || fail "no disk guard"
+
+echo "-- cipi package: wiring"
+grep -q 'package|packages)' "${LIB}/completion.sh" \
+    && pass "completion handles package" || fail "completion omits package"
+if sed -n '/^        package|packages)/,/^            esac ;;/p' "${LIB}/completion.sh" | grep -q 'image-optimizers'; then
+    pass "completion offers the allowlist"
+else
+    fail "completion does not offer the allowlist"
+fi
+grep -qw package <<< "$(sed -n 's/.*local commands="\([^"]*\)".*/\1/p' "${LIB}/completion.sh")" \
+    && pass "package is in the completion verb list" || fail "package missing from the verb list"
+for t in package_install package_remove; do
+    grep -q "^${t}|Packages|" "${LIB}/notifications.sh" \
+        && pass "trigger ${t}" || fail "missing trigger ${t}"
+    grep -q "$t" "$PKG" || fail "package.sh never fires ${t}"
+done
+grep -q 'cipi package list' "${LIB}/cipi-api-sudoers.sh" \
+    && pass "panel may list packages" || fail "sudoers omits package list"
+for forbidden in "package install" "package remove"; do
+    if grep -q "cipi ${forbidden}" "${LIB}/cipi-api-sudoers.sh"; then
+        fail "sudoers grants '${forbidden}' to www-data (root apt via the panel)"
+    else
+        pass "sudoers withholds '${forbidden}'"
+    fi
+done
+if grep -qE 'package install|package_command' "${ROOT}/setup.sh" "${LIB}/self-update.sh" 2>/dev/null; then
+    fail "setup.sh or self-update installs optional packages"
+else
+    pass "optional packages install only on request"
+fi
+
 echo "-- README"
 grep -q 'cipi search install' "${ROOT}/README.md" \
     && pass "README documents cipi search install" || fail "README omits cipi search install"
 grep -q 'Meilisearch' "${ROOT}/README.md" \
     && pass "README mentions Meilisearch" || fail "README omits Meilisearch"
+grep -q 'cipi package install' "${ROOT}/README.md" \
+    && pass "README documents cipi package install" || fail "README omits cipi package"
 
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="

@@ -6,9 +6,27 @@ All notable changes to Cipi are documented in this file.
 
 ## [5.2.2] — 2026-09-09
 
-Opt-in Meilisearch for Laravel Scout. Not in the default stack, not installed by `setup.sh` or `cipi self-update`, and nothing on an existing server changes until someone types `cipi search install`.
+Two opt-in additions: Meilisearch for Laravel Scout, and an allowlisted `cipi package` for the host binaries a project sometimes needs. Neither is in the default stack, neither is installed by `setup.sh` or `cipi self-update`, and nothing on an existing server changes until someone asks for it.
 
-### Added
+### Added — `cipi package`
+
+- **`cipi package list | install <name> | remove <name>`.** Installs host tools a Laravel project may need — image optimisers, ffmpeg, the ImageMagick CLI, `pdftotext` — from Ubuntu's own repositories. **The allowlist is the feature**: without it the command is a root apt shell with extra steps. The catalog is closed and every entry has to earn its place — a *stateless binary from an Ubuntu repo* (no daemon, no port, no credentials, no state outliving the process) with a real Laravel package behind it. Anything failing that is not a package but a service, and belongs to `cipi search`, `cipi db install` or the container branch. This is the same rule that put Meilisearch on the other side of the line, written down once.
+  - `image-optimizers` → `jpegoptim optipng pngquant gifsicle webp`, exactly the set `spatie/laravel-image-optimizer` documents.
+  - `ffmpeg` → `pbmedia/laravel-ffmpeg`. The install prints the warning that matters: run it from a queue worker, never from a web request — the FPM pool is `request_terminate_timeout = 300` and one ffmpeg will take every core on a box shared with MariaDB.
+  - `imagemagick` → the `convert`/`magick` CLI. **This is genuinely missing today:** `php8.5-imagick` depends on `libmagickcore`/`libmagickwand` and, through them, on `imagemagick-6-common` (config files only). The binaries live in `imagemagick-6.q16`, which nothing in the chain pulls — so PHP-side Imagick works while `exec('convert …')` does not.
+  - `poppler-utils` → `pdftotext`, for `spatie/pdf-to-text` and for feeding PDF content to the Scout indexes above.
+  - A single package inside a group is accepted as a name of its own, so `cipi package install webp` works alongside `install image-optimizers`.
+- **`install` shows what apt intends to do before doing it** — package count and disk delta, read from `apt-get install -s` on the machine rather than from a number hardcoded here — then asks. Afterwards it verifies each expected binary is on `PATH` and names any that is not, instead of letting the application discover it.
+- **`remove` purges only the packages actually present** (naming an absent one turns a no-op into an apt failure), then previews the orphaned dependencies `autoremove` would take and asks before running it — server-wide autoremove on a box that also runs MariaDB and PHP is not something to do silently.
+- **Two notification triggers** under a new **Packages** category: `package_install`, `package_remove`. The panel sudoers file allows `package list` only: installing packages as root stays with the operator on the CLI.
+
+### Notes — `cipi package`
+
+- **Chromium is deliberately not in the allowlist, and the refusal says why.** On Ubuntu 24.04 there is no `chromium` deb at all, and `chromium-browser` is a 48 kB transitional package whose dependencies are `debconf` and **`snapd` — "Daemon and tooling that enable snap packages"**. Installing it would add a daemon and a snap that updates itself outside apt's control, which is precisely what this command exists not to do. For `spatie/browsershot`, use Puppeteer's own Chromium (Node 20 is already installed) or Google's apt repository — both deliberate choices, not a side effect of an allowlist entry.
+- **Ghostscript and `fonts-dejavu-core` are already installed** and are not in the list: they arrive as *Recommends* of `php-imagick`, and `setup.sh` passes no `--no-install-recommends`.
+- **PDF through ImageMagick will still fail after installing it**, and not for a missing package: `imagemagick-6-common` ships `/etc/ImageMagick-6/policy.xml` with the PDF/PS/EPS coders disabled (the Ghostscript CVEs). That file exists on every Cipi server. `pdftotext` is not affected by the policy, which is part of why `poppler-utils` earned a place.
+
+### Added — `cipi search`
 
 - **`cipi search`** — a self-hosted search engine for Scout, wired the way the rest of Cipi is: **native, not a container**. Meilisearch is a single static Rust binary with no runtime dependencies, so it installs as a binary, a config file and a systemd unit alongside Nginx/PHP-FPM/MariaDB/Valkey. Engines that need a runtime around them (Elasticsearch, Typesense, Qdrant) belong in the container branch; this one does not, and that is the line. For a Laravel app it is `cipi search enable <app>` plus a `scout:import` — no Algolia account, no per-record billing.
   - **`cipi search install [--version=] [--port=] [--force]`.** Downloads the release binary for this architecture from GitHub (amd64/aarch64), creates the `meilisearch` system user, `/var/lib/meilisearch` (0750), `/etc/meilisearch.toml` and a hardened unit, then waits on `GET /health` before claiming success. Listens on **127.0.0.1** only — never a public address, so there is no firewall hole to open and no TLS to terminate. Meilisearch publishes no checksum beside its binaries, so the download is verified the only way available: it is executed and asked for its version before it is allowed to replace anything.

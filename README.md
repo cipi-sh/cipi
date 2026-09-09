@@ -196,6 +196,22 @@ Meilisearch is a single static Rust binary, so it installs natively like the res
 
 For a small dataset you may not need any of this: Scout's `database` driver, or Postgres full-text, needs no extra service.
 
+### 📦 Optional host tools
+
+Some projects need a binary on the host — an image optimiser, ffmpeg, `pdftotext`. `cipi package` installs them from Ubuntu's own repositories, from a closed allowlist:
+
+```bash
+cipi package list
+cipi package install image-optimizers   # or ffmpeg, imagemagick, poppler-utils
+cipi package remove ffmpeg
+```
+
+The allowlist is the feature: without it this would be a root apt shell with extra steps. An entry has to be a **stateless binary from an Ubuntu repo** — no daemon, no port, no credentials, no state that outlives the process — with a real Laravel package behind it. Anything else is a service, and goes through `cipi search`, `cipi db install` or the container branch. Chromium is the instructive rejection: on Ubuntu 24.04 `chromium` isn't a deb at all and `chromium-browser` is a transitional package that depends on `snapd`, so "just apt-install it" would quietly add a self-updating daemon.
+
+`install` shows what apt actually intends to pull — package count and disk — and asks before running. `remove` purges only what is present, then shows which orphaned dependencies `autoremove` would take before touching them.
+
+Already in the base stack, so not in the list: the **Imagick PHP extension**, **Ghostscript** and **fonts-dejavu-core** (Recommends of `php-imagick`), and **Node 20**.
+
 ### 🔗 Webhook Auto-Deploy
 
 Native GitHub and GitLab integration — deploy keys and webhooks configured automatically. HMAC signature verification. Or plug in any custom Git provider. If a token expires and keys/webhooks drift, `cipi git refresh` re-registers them on every app (`--rotate-keys` / `--rotate-secret` to mint new material).

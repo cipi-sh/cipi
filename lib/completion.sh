@@ -43,8 +43,8 @@ _cipi_complete() {
         words=("${COMP_WORDS[@]}"); cword=$COMP_CWORD
     fi
 
-    local commands="status version self-update service app alias domains www auth basicauth deploy worker schedule health db search ssl php firewall ban crowdsec scan backup ini yml nginx api gui git sync ssh smtp notifications reset completion help"
-    local topics="app domains www deploy worker schedule health db search service ssl php auth basicauth ssh firewall ban crowdsec scan backup sync git ini yml nginx api gui smtp notifications reset server completion all"
+    local commands="status version self-update service app alias domains www auth basicauth deploy worker schedule health db search ssl php package firewall ban crowdsec scan backup ini yml nginx api gui git sync ssh smtp notifications reset completion help"
+    local topics="app domains www deploy worker schedule health db search service ssl php package auth basicauth ssh firewall ban crowdsec scan backup sync git ini yml nginx api gui smtp notifications reset server completion all"
 
     # skip a leading path/wrapper (e.g. `sudo cipi`, `/usr/local/bin/cipi`)
     local start=1 j
@@ -190,6 +190,20 @@ _cipi_complete() {
             esac ;;
 
         php)      [[ $pos -eq 1 ]] && sub="list install switch upgrade" ;;
+
+        package|packages)
+            case $pos in
+                1) sub="list install remove" ;;
+                2) case "$w1" in
+                       install|remove) sub="image-optimizers ffmpeg imagemagick poppler-utils jpegoptim optipng pngquant gifsicle webp" ;;
+                       list)           sub="--json" ;;
+                   esac ;;
+                3) case "$w1" in
+                       install) sub="--yes --force" ;;
+                       remove)  sub="--yes --autoremove" ;;
+                   esac ;;
+            esac ;;
+
         firewall) [[ $pos -eq 1 ]] && sub="allow list" ;;
         ban)      [[ $pos -eq 1 ]] && sub="list unban" ;;
 

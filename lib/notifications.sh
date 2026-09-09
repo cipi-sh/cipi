@@ -42,6 +42,12 @@ php_remove|PHP|PHP version removed
 php_upgrade|PHP|PHP packages upgraded
 db_create|Database|Database created
 db_delete|Database|Database deleted
+search_install|Search|Meilisearch installed
+search_enable|Search|Search enabled for an app
+search_disable|Search|Search disabled for an app
+search_key_rotate|Search|Meilisearch API key rotated
+search_upgrade|Search|Meilisearch upgraded
+search_remove|Search|Meilisearch removed
 worker_add|Workers|Worker added
 worker_remove|Workers|Worker removed
 ssh_key_add|SSH keys|SSH key added

@@ -65,8 +65,8 @@ _help_topic_header() {
 
 _help_topics_list() {
     cat <<'EOF'
-app  domains  www  deploy  worker  schedule  health  db  service  ssl  php
-auth  basicauth  ssh  firewall  ban  crowdsec  scan  backup  sync  git
+app  domains  www  deploy  worker  schedule  health  db  search  service  ssl
+php  auth  basicauth  ssh  firewall  ban  crowdsec  scan  backup  sync  git
 ini  yml  nginx  api  gui  smtp  notifications  reset  server  completion
 EOF
 }
@@ -100,6 +100,7 @@ show_help() {
     _help_cmd "cipi schedule ..."          "Laravel scheduler on/off"
     _help_cmd "cipi health ..."            "HTTP healthchecks, incl. post-deploy"
     _help_cmd "cipi db ..."                "Databases"
+    _help_cmd "cipi search ..."            "Meilisearch for Scout (opt-in)  ${DIM}install|enable${NC}"
     echo ""
     echo -e "  ${BOLD}Security & access${NC}"
     _help_cmd "cipi ssl / ssh / firewall / ban"  "Certs, keys, firewall, bans"
@@ -323,6 +324,31 @@ show_help_topic() {
             _help_cmd "cipi db password <name>"        "Reset DB user password  ${DIM}[--engine=]${NC}"
             _help_note "MariaDB is native (3306). Optional: cipi db install pgsql (5432)"
             _help_note "app create: --engine=mariadb|pgsql (default from cipi db default)"
+            echo ""
+            ;;
+
+        search|meilisearch|scout)
+            _help_topic_header "Search"
+            echo ""
+            _help_cmd "cipi search install"             "Install Meilisearch  ${DIM}[--version=] [--port=] [--force]${NC}"
+            _help_cmd "cipi search status"              "Engine, apps, data size  ${DIM}[--check] [--json]${NC}"
+            _help_cmd "cipi search enable <app>"        "Scoped key + Scout .env for one app"
+            _help_cmd "cipi search disable <app>"       "Revoke the key  ${DIM}[--purge-indexes]${NC}"
+            _help_cmd "cipi search list"                "Apps, prefixes, index counts  ${DIM}[--json]${NC}"
+            _help_cmd "cipi search key rotate <app>"    "New key for one app"
+            _help_cmd "cipi search key rotate --master" "New master key + rewrite every app"
+            _help_cmd "cipi search key show <app>"      "Key uid, actions, index pattern"
+            _help_cmd "cipi search upgrade"             "New binary  ${DIM}[--version=] [--reset-data] [--yes]${NC}"
+            _help_cmd "cipi search remove"              "Uninstall  ${DIM}[--keep-data] [--force]${NC}"
+            echo ""
+            _help_note "Off by default. install does not run on setup or self-update."
+            _help_note "One instance on 127.0.0.1:7700 — never a public listener, no firewall hole."
+            _help_note "Isolation: per-app key scoped to '<app>-*' plus a Cipi-forced SCOUT_PREFIX."
+            _help_note "The master key stays in the vault and in a root-only EnvironmentFile."
+            _help_note "In the app: composer require laravel/scout meilisearch/meilisearch-php,"
+            _help_note "then php artisan scout:import \"App\\\\Models\\\\Post\"."
+            _help_note "Indexes are derived data: not in cipi backup, and upgrade may drop them."
+            _help_note "Small datasets need no service at all — Scout's 'database' driver is enough."
             echo ""
             ;;
 
@@ -638,6 +664,7 @@ show_help_all() {
     show_help_topic schedule
     show_help_topic health
     show_help_topic db
+    show_help_topic search
     show_help_topic api
     show_help_topic gui
     show_help_topic git
@@ -685,6 +712,8 @@ show_status() {
     echo -e "\n${BOLD}Services${NC}"
     local -a status_svcs=(nginx mariadb supervisor fail2ban)
     systemctl list-unit-files --quiet postgresql.service &>/dev/null && status_svcs+=(postgresql)
+    # Opt-in, so it is listed only where it exists.
+    systemd_unit_exists meilisearch && status_svcs+=(meilisearch)
     systemd_unit_exists crowdsec && status_svcs+=(crowdsec)
     systemd_unit_exists crowdsec-firewall-bouncer && status_svcs+=(crowdsec-firewall-bouncer)
     # The rescue listener is the way back in after a ban; a silent one is worse
@@ -734,6 +763,7 @@ main() {
         schedule)   _maybe_cmd_help schedule "$@";   require_root; source "${CIPI_LIB}/app.sh";         schedule_command "$@" ;;
         health)     _maybe_cmd_help health "$@";     require_root; source "${CIPI_LIB}/health.sh";      health_command "$@" ;;
         db)         _maybe_cmd_help db "$@";         require_root; source "${CIPI_LIB}/db.sh";          db_command "$@" ;;
+        search)     _maybe_cmd_help search "$@";     require_root; source "${CIPI_LIB}/search.sh";      search_command "$@" ;;
         ssl)        _maybe_cmd_help ssl "$@";        require_root; source "${CIPI_LIB}/ssl.sh";         ssl_command "$@" ;;
         php)        _maybe_cmd_help php "$@";        require_root; source "${CIPI_LIB}/php.sh";         php_command "$@" ;;
         firewall)   _maybe_cmd_help firewall "$@";   require_root; source "${CIPI_LIB}/firewall.sh";    firewall_command "$@" ;;

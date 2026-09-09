@@ -906,6 +906,13 @@ app_delete() {
             warn "$(db_engine_label "$eng") not installed — skipping DB drop"
         fi
     fi
+    # The app's Meilisearch key outlives the Linux user unless it is revoked
+    # here: the engine knows nothing about /etc/cipi/apps.json.
+    if [[ -f "${CIPI_CONFIG}/search.json" ]]; then
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/search.sh"
+        search_cleanup_app "$app" || true
+    fi
     step "Crontab...";     crontab -u "$app" -r 2>/dev/null||true
     step "Sudoers...";     rm -f "/etc/sudoers.d/cipi-${app}"
     step "Basic auth...";  rm -f "/etc/nginx/cipi-basicauth/${app}.htpasswd"
@@ -3520,7 +3527,14 @@ app_clone() {
                 # domain below. Copying them would point a staging clone's
                 # frontend at the production socket and hand it the production
                 # app secret.
+                #
+                # MEILISEARCH_*/SCOUT_PREFIX are excluded for a sharper reason:
+                # the source's key is scoped to the source's index prefix, so a
+                # clone that inherited it would not fail — it would reindex
+                # straight into production's indexes. The clone gets its own
+                # key and prefix below.
                 APP_KEY|APP_URL|DB_*|DATABASE_URL|CIPI_*|OCTANE_*|REVERB_*|VITE_REVERB_*) continue ;;
+                MEILISEARCH_*|SCOUT_PREFIX) continue ;;
             esac
             _env_set_or_add "$dst_env" "$key" "${line#*=}"
         done < "$src_env"
@@ -3533,6 +3547,21 @@ app_clone() {
     # at a server that does not exist on the clone.
     if [[ -n "$(app_get "$src" reverb)" ]]; then
         _app_reverb_enable "$name"
+    fi
+
+    # Same for search: the copied SCOUT_DRIVER=meilisearch has no key behind it
+    # until the clone gets one of its own, scoped to its own prefix.
+    # _search_enable exits on failure, so it runs in a subshell — a search that
+    # cannot be set up must not abort a clone that is otherwise complete.
+    if [[ -n "$(app_get "$src" search)" && -f "$dst_env" ]]; then
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/search.sh"
+        if _search_running; then
+            ( _search_enable "$name" ) || warn "Could not enable search for '${name}' — run: cipi search enable ${name}"
+        else
+            _env_set_or_add "$dst_env" "SCOUT_DRIVER" "database"
+            warn "meilisearch is not running — '${name}' was left on SCOUT_DRIVER=database"
+        fi
     fi
 
     if [[ "$with_db" == "true" ]]; then

@@ -77,6 +77,7 @@ Every app gets a fully isolated environment. **Laravel** (default): zero-downtim
 | **PHP & Composer** | Selectable per app — PHP 7.4 to 8.5, hot-swappable                                                           |
 | **Runtime**        | PHP-FPM pools by default; optional **Laravel Octane (FrankenPHP)** per app (`--octane`)                      |
 | **Database**       | MariaDB (default) + optional PostgreSQL; dedicated DB and user per Laravel app                               |
+| **Search**         | Optional **Meilisearch** for Laravel Scout — native binary, loopback only, per-app scoped key + index prefix  |
 | **Queue workers**  | Supervisor with per-app pools — `queue:work` or **Horizon**; optional **Reverb** for WebSockets (wss:// + credentials + fd limits) |
 | **Deployments**    | Deployer — Laravel: atomic symlink, 5 releases, rollback, optional Node build; Custom: clone into htdocs     |
 | **SSL**            | Let's Encrypt via Certbot — HTTP-01 by default; optional **DNS-01 (Cloudflare)** + wildcards                 |
@@ -177,6 +178,23 @@ Enabling Reverb allocates a localhost port, writes a Supervisor program, and pro
 An app with its own `/app` or `/apps` route cannot use Reverb behind the same domain — those paths belong to the protocol. Reverb can also be declared in `cipi.yml` as `workers.reverb: true`.
 
 Horizon is mutually exclusive with `queue:work` workers. Scheduler toggles the crontab `schedule:run` entry.
+
+### 🔎 Meilisearch for Laravel Scout (optional)
+
+A self-hosted alternative to Algolia, off by default and never installed by `setup.sh` or `cipi self-update`:
+
+```bash
+cipi search install          # binary + systemd unit on 127.0.0.1:7700
+cipi search enable myapp     # scoped key + Scout settings in the app .env
+```
+
+Meilisearch is a single static Rust binary, so it installs natively like the rest of the stack — no Docker in the loop. `enable` writes `SCOUT_DRIVER`, `MEILISEARCH_HOST`, `MEILISEARCH_KEY` and `SCOUT_PREFIX` into `shared/.env`; then `composer require laravel/scout meilisearch/meilisearch-php` and `php artisan scout:import "App\Models\Post"` in the app.
+
+**One instance, real isolation.** Meilisearch has no per-tenant databases, so Cipi gives every app an API key scoped to the index pattern `<app>-*` — with only the actions Scout calls, never key management — and **writes `SCOUT_PREFIX` itself** rather than leaving it to you. Cipi usernames contain no hyphens, so `blog-` can never overlap `blogs-`: an app that ignores the prefix gets a 403 rather than its neighbour's documents. The master key stays in the vault and in a root-only `EnvironmentFile`, never in an app `.env` and never on a command line.
+
+`cipi search key rotate <app>` reissues one key; `--master` rotates the master key and rewrites every app's `.env` in the same run (Meilisearch derives each key from the master, so they all change at once). `cipi search upgrade` swaps the binary and does the in-place store upgrade, rolling the binary back if the engine refuses — and only dropping the indexes if you say so, since `scout:import` rebuilds them. Indexes are derived data, so they are deliberately not part of `cipi backup`.
+
+For a small dataset you may not need any of this: Scout's `database` driver, or Postgres full-text, needs no extra service.
 
 ### 🔗 Webhook Auto-Deploy
 

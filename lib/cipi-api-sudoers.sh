@@ -61,6 +61,12 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi db backup *, \
                                /usr/local/bin/cipi db restore *, \
                                /usr/local/bin/cipi db password *, \
+                               /usr/local/bin/cipi search status, \
+                               /usr/local/bin/cipi search status *, \
+                               /usr/local/bin/cipi search list, \
+                               /usr/local/bin/cipi search list *, \
+                               /usr/local/bin/cipi search enable *, \
+                               /usr/local/bin/cipi search disable *, \
                                /usr/local/bin/cipi php list, \
                                /usr/local/bin/cipi php list *, \
                                /usr/local/bin/cipi php install *, \

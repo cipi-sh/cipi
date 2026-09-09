@@ -43,8 +43,8 @@ _cipi_complete() {
         words=("${COMP_WORDS[@]}"); cword=$COMP_CWORD
     fi
 
-    local commands="status version self-update service app alias domains www auth basicauth deploy worker schedule health db ssl php firewall ban crowdsec scan backup ini yml nginx api gui git sync ssh smtp notifications reset completion help"
-    local topics="app domains www deploy worker schedule health db service ssl php auth basicauth ssh firewall ban crowdsec scan backup sync git ini yml nginx api gui smtp notifications reset server completion all"
+    local commands="status version self-update service app alias domains www auth basicauth deploy worker schedule health db search ssl php firewall ban crowdsec scan backup ini yml nginx api gui git sync ssh smtp notifications reset completion help"
+    local topics="app domains www deploy worker schedule health db search service ssl php auth basicauth ssh firewall ban crowdsec scan backup sync git ini yml nginx api gui smtp notifications reset server completion all"
 
     # skip a leading path/wrapper (e.g. `sudo cipi`, `/usr/local/bin/cipi`)
     local start=1 j
@@ -89,7 +89,7 @@ _cipi_complete() {
         service)
             case $pos in
                 1) sub="list restart start stop" ;;
-                2) sub="nginx mariadb postgresql supervisor fail2ban crowdsec all" ;;
+                2) sub="nginx mariadb postgresql valkey-server supervisor fail2ban meilisearch crowdsec php all" ;;
             esac ;;
 
         app)
@@ -159,6 +159,25 @@ _cipi_complete() {
             case $pos in
                 1) sub="engines install uninstall default create list delete backup restore password" ;;
                 2) case "$w1" in install|uninstall|default) sub="mariadb pgsql" ;; esac ;;
+            esac ;;
+
+        search)
+            case $pos in
+                1) sub="install status enable disable list key upgrade remove" ;;
+                2) case "$w1" in
+                       enable)  sub="$(_cipi_apps)" ;;
+                       disable) sub="$(_cipi_apps) --purge-indexes" ;;
+                       key)     sub="rotate show" ;;
+                       install) sub="--version= --port= --force" ;;
+                       upgrade) sub="--version= --reset-data --yes" ;;
+                       remove)  sub="--keep-data --force" ;;
+                       status)  sub="--check --json" ;;
+                       list)    sub="--json" ;;
+                   esac ;;
+                3) case "$w1" in
+                       key)     sub="$(_cipi_apps) --master" ;;
+                       disable) sub="--purge-indexes" ;;
+                   esac ;;
             esac ;;
 
         ssl)

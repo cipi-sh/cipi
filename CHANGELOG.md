@@ -4,6 +4,36 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.2.2] — 2026-09-09
+
+Opt-in Meilisearch for Laravel Scout. Not in the default stack, not installed by `setup.sh` or `cipi self-update`, and nothing on an existing server changes until someone types `cipi search install`.
+
+### Added
+
+- **`cipi search`** — a self-hosted search engine for Scout, wired the way the rest of Cipi is: **native, not a container**. Meilisearch is a single static Rust binary with no runtime dependencies, so it installs as a binary, a config file and a systemd unit alongside Nginx/PHP-FPM/MariaDB/Valkey. Engines that need a runtime around them (Elasticsearch, Typesense, Qdrant) belong in the container branch; this one does not, and that is the line. For a Laravel app it is `cipi search enable <app>` plus a `scout:import` — no Algolia account, no per-record billing.
+  - **`cipi search install [--version=] [--port=] [--force]`.** Downloads the release binary for this architecture from GitHub (amd64/aarch64), creates the `meilisearch` system user, `/var/lib/meilisearch` (0750), `/etc/meilisearch.toml` and a hardened unit, then waits on `GET /health` before claiming success. Listens on **127.0.0.1** only — never a public address, so there is no firewall hole to open and no TLS to terminate. Meilisearch publishes no checksum beside its binaries, so the download is verified the only way available: it is executed and asked for its version before it is allowed to replace anything.
+  - **`cipi search enable <app>`.** Mints an API key scoped to the index pattern `<app>-*` with exactly the actions Scout calls (`search`, `documents.*`, `indexes.*`, `settings.get`, `settings.update`, `tasks.get`, `stats.get` — **not** `keys.*`), then writes `SCOUT_DRIVER`, `SCOUT_PREFIX=<app>-`, `MEILISEARCH_HOST` and `MEILISEARCH_KEY` into `shared/.env`. The previous `SCOUT_DRIVER` is recorded so `disable` can put it back.
+  - **`cipi search disable <app> [--purge-indexes]`**, **`list`**, **`status [--check] [--json]`**, **`key show <app>`**.
+  - **`cipi search key rotate <app>`** and **`cipi search key rotate --master`**.
+  - **`cipi search upgrade [--version=] [--reset-data] [--yes]`** and **`cipi search remove [--keep-data]`**.
+- **Isolation is the design, not a note in the docs.** Meilisearch has no databases and no per-tenant separation, so one shared instance needs an explicit boundary. Cipi's is the index prefix, and **Cipi writes it — the operator does not choose it**: two apps that pick the same index name are not separated by a key pattern. It holds because a Cipi app username is `^[a-z][a-z0-9]{2,31}$` with **no hyphens**, so `blog-` can never be a prefix of `blogs-` or the reverse, and every index name belongs to exactly one app. An app that ignores `SCOUT_PREFIX` does not collide with its neighbour — it gets a 403. `enable` still asserts the non-overlap before minting a key.
+- **The master key never reaches an app, an argument list, or a config file.** It lives in the vault (`/etc/cipi/search.json`) and in `/etc/cipi/meilisearch.env`, mode **0600 root:root**, read by systemd as root *before* the unit drops to the `meilisearch` user. `--master-key` on an `ExecStart` line would put it in `/proc/<pid>/cmdline`, which every app user on the box can read — the same reason `cipi search`'s own HTTP calls pass the `Authorization` header to curl through a stdin config file instead of `-H`.
+- **`cipi app delete` revokes the app's key and drops its indexes.** The engine knows nothing about `apps.json`: without this, deleting an app left a live, working API key behind for a Unix user and a home that no longer exist.
+- **`cipi app clone` gives the clone its own key and prefix.** The source's `MEILISEARCH_*` and `SCOUT_PREFIX` are excluded from the copied `.env` for a sharper reason than the Reverb exclusion next to it: the source's key is valid for the *source's* prefix, so a clone that inherited it would not fail — it would reindex straight into production's indexes.
+- **Meilisearch appears in `cipi status`, `cipi service list|start|stop|restart` (`meilisearch`, or `search`) and shell completion**, but only where the unit exists.
+- **Six notification triggers** under a new **Search** category: `search_install`, `search_enable`, `search_disable`, `search_key_rotate`, `search_upgrade`, `search_remove`.
+- **The panel sudoers file** allows `search status|list|enable|disable`. `install`, `upgrade`, `key rotate` and `remove` are deliberately **not** in it: they change or destroy server state and stay with the operator on the CLI.
+
+### Notes
+
+- **Rotating the master key regenerates every API key on the server.** Meilisearch derives a key's value from its uid and the master key, so the uids survive and the values do not. `key rotate --master` therefore rewrites every enabled app's `.env` in the same run — otherwise the whole server loses search at once, silently, at the next master key change. It says which apps it is about to touch before it starts.
+- **Upgrades are the real cost of this feature, and the command is built around that.** A Meilisearch store is readable only by the version that wrote it. `cipi search upgrade` asks the new binary which in-place upgrade flag it supports (`--upgrade-db` on current releases, `--experimental-dumpless-upgrade` on older ones) rather than guessing from a version number, applies it through a one-shot systemd drop-in, and then restarts **without** it to prove the unit still comes up on its own. If the engine refuses the store, the old binary is put back and the service restarted — nothing is dropped without an explicit answer. Only if you say so does it delete `data.ms`, reissue every app key (a wiped store has no keys, so every `.env` would otherwise be dead) and print the `scout:import` commands.
+- **Meilisearch is not in `cipi backup` and that is deliberate.** A Scout index is derived data; `scout:import` rebuilds it from the database that *is* backed up. Adding it to S3 would mean paying to store a rebuildable artifact whose format is pinned to an engine version.
+- **RAM.** `install` refuses below **512MB** MemAvailable (`--force` overrides) and warns below 1GB. Meilisearch memory-maps its LMDB store, so its RSS understates what it asks the kernel for; on a 1GB VPS already running MariaDB tuned to that RAM, an OOM kill is a real outcome and the kernel does not always pick Meilisearch.
+- **You may not need it.** For a small dataset Scout's `database` driver — or Postgres full-text, already in the stack since 5.0 — needs no extra service, no extra memory and no upgrade path. `cipi search status` says so on a server where it is not installed.
+
+---
+
 ## [5.2.1] — 2026-09-09
 
 Recovery commands: re-sync GitHub/GitLab deploy keys and webhooks, and restore an app home to the permission model Cipi created it with.

@@ -95,6 +95,7 @@ selfupdate_command() {
     [[ -f "${tmp}/lib/cipi-auth-notify.sh" ]] && cp "${tmp}/lib/cipi-auth-notify.sh" /usr/local/bin/cipi-auth-notify && chmod 700 /usr/local/bin/cipi-auth-notify
     [[ -f "${tmp}/lib/cipi-app-notify.sh" ]] && cp "${tmp}/lib/cipi-app-notify.sh" /usr/local/bin/cipi-app-notify && chmod 700 /usr/local/bin/cipi-app-notify
     [[ -f "${tmp}/lib/cipi-app-deploy.sh" ]] && cp "${tmp}/lib/cipi-app-deploy.sh" /usr/local/bin/cipi-app-deploy && chmod 755 /usr/local/bin/cipi-app-deploy
+    [[ -f "${tmp}/lib/cipi-app-post-deploy.sh" ]] && cp "${tmp}/lib/cipi-app-post-deploy.sh" /usr/local/bin/cipi-app-post-deploy && chmod 755 /usr/local/bin/cipi-app-post-deploy
     [[ -f "${tmp}/lib/cipi-health-check.sh" ]] && cp "${tmp}/lib/cipi-health-check.sh" /usr/local/bin/cipi-health-check && chmod 700 /usr/local/bin/cipi-health-check
     [[ -f "${tmp}/lib/cipi-scan-manifest.sh" ]] && cp "${tmp}/lib/cipi-scan-manifest.sh" /usr/local/bin/cipi-scan-manifest && chmod 755 /usr/local/bin/cipi-scan-manifest
     [[ -f "${tmp}/lib/cipi-crowdsec-rescue.py" ]] && cp "${tmp}/lib/cipi-crowdsec-rescue.py" /usr/local/bin/cipi-crowdsec-rescue && chmod 700 /usr/local/bin/cipi-crowdsec-rescue

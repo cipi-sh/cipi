@@ -88,8 +88,11 @@ _cipi_complete() {
 
         service)
             case $pos in
-                1) sub="list restart start stop" ;;
-                2) sub="nginx mariadb postgresql valkey-server supervisor fail2ban meilisearch crowdsec php all" ;;
+                1) sub="list restart start stop upgrade" ;;
+                2) case "$w1" in
+                       upgrade) sub="nginx mariadb postgresql valkey --yes" ;;
+                       *)       sub="nginx mariadb postgresql valkey-server supervisor fail2ban meilisearch crowdsec php all" ;;
+                   esac ;;
             esac ;;
 
         app)
@@ -157,8 +160,11 @@ _cipi_complete() {
 
         db)
             case $pos in
-                1) sub="engines install uninstall default create list delete backup restore password" ;;
-                2) case "$w1" in install|uninstall|default) sub="mariadb pgsql" ;; esac ;;
+                1) sub="engines install uninstall default create list delete backup restore password upgrade" ;;
+                2) case "$w1" in
+                       install|uninstall|default|upgrade) sub="mariadb pgsql" ;;
+                   esac ;;
+                3) case "$w1" in upgrade) sub="--yes" ;; esac ;;
             esac ;;
 
         search)
@@ -229,15 +235,18 @@ _cipi_complete() {
 
         yml|yaml)
             case $pos in
-                1) sub="generate example validate plan apply auto" ;;
+                1) sub="generate example validate plan apply auto post-deploy" ;;
                 2) sub="$(_cipi_apps)" ;;
                 3) case "$w1" in auto) sub="on off status" ;; esac ;;
             esac ;;
 
         nginx)
             case $pos in
-                1) sub="default-server" ;;
-                2) case "$w1" in default-server) sub="status on off" ;; esac ;;
+                1) sub="default-server upgrade" ;;
+                2) case "$w1" in
+                       default-server) sub="status on off" ;;
+                       upgrade)        sub="--yes" ;;
+                   esac ;;
             esac ;;
 
         api)
@@ -252,7 +261,7 @@ _cipi_complete() {
         gui|panel) [[ $pos -eq 1 ]] && sub="ssl update refresh-theme upgrade status fix-permissions repair reset-user remove" ;;
         git)
             case $pos in
-                1) sub="status github-token gitlab-token gitlab-url remove-github remove-gitlab refresh" ;;
+                1) sub="status github-token gitlab-token gitlab-url origin-token bitbucket-token azure-token codecommit-token remove-github remove-gitlab remove-origin remove-bitbucket remove-azure remove-codecommit refresh" ;;
                 2) case "$w1" in
                        refresh) sub="$(_cipi_apps) --rotate-keys --rotate-secret --force" ;;
                    esac ;;

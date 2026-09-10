@@ -228,7 +228,7 @@ BASH
     ensure_app_logs_permissions "$app_user"
     success "Directories"
 
-    # 3. SSH deploy key (for GitHub) + authorized_keys (for Deployer localhost SSH)
+    # 3. SSH deploy key + authorized_keys (for Deployer localhost SSH)
     # ~/.ssh must be 700: umask 002 makes mkdir create 775, and sshd StrictModes
     # then rejects pubkey auth ("bad ownership or modes") → password prompt on deploy.
     step "Deploy key..."
@@ -238,14 +238,14 @@ BASH
     echo "$deploy_key" >> "${home}/.ssh/authorized_keys"
     chown "${app_user}:${app_user}" "${home}/.ssh/authorized_keys"
     chmod 600 "${home}/.ssh/authorized_keys"
-    ssh-keyscan -H localhost 127.0.0.1 github.com gitlab.com 2>/dev/null >> "${home}/.ssh/known_hosts"
+    source "${CIPI_LIB}/git.sh"
+    git_seed_app_known_hosts "${home}/.ssh/known_hosts" "$repository"
     chown "${app_user}:${app_user}" "${home}/.ssh/known_hosts"
     chmod 600 "${home}/.ssh/known_hosts"
     chmod 700 "${home}/.ssh"
     success "Deploy key"
 
     # 3b. Git provider integration (auto-add deploy key; webhook only for Laravel)
-    source "${CIPI_LIB}/git.sh"
     if [[ "$app_type" == "laravel" ]]; then
         git_setup_repo "$app_user" "$repository" "$url_host" "$webhook_token" "$deploy_key"
     else
@@ -482,7 +482,7 @@ SUDO
             else
                 echo -e "  ${BOLD}Deploy Key${NC}  (add to your Git provider)"
                 echo -e "  ${CYAN}${deploy_key}${NC}"
-                [[ -z "${GIT_PROVIDER:-}" ]] && echo -e "  ${DIM}Tip: cipi git github-token <PAT> to auto-configure next time${NC}"
+                [[ -z "${GIT_PROVIDER:-}" ]] && echo -e "  ${DIM}Tip: cipi git status — save a provider token to auto-configure next time${NC}"
             fi
             echo ""
             echo -e "  ${BOLD}Next:${NC} cipi deploy ${app_user}"
@@ -506,7 +506,7 @@ SUDO
             echo -e "  ${BOLD}Token${NC}       ${CYAN}${webhook_token}${NC}"
             if [[ -z "${GIT_PROVIDER:-}" ]]; then
                 echo ""
-                echo -e "  ${DIM}Tip: cipi git github-token <PAT> to auto-configure next time${NC}"
+                echo -e "  ${DIM}Tip: cipi git status — save a provider token to auto-configure next time${NC}"
             fi
         fi
         echo ""
@@ -1892,6 +1892,18 @@ EOF
 # block used to carry was a coin flip on every idle client. Reverb prunes the
 # connections that stop answering its pings, so it — not nginx — is what reaps
 # dead clients here.
+
+# Keep cipi.yml / cipi.yaml off the public web. Custom apps serve htdocs/ (or
+# a subdirectory) as the document root, so a committed file would otherwise be
+# downloadable. Laravel's public/ already hides the repo root; this is belt
+# and braces for a copy in public/ or a custom docroot that points at the tree.
+# ~* so Cipi.YML is covered too; the path match is anywhere, not only /.
+_nginx_cipi_yml_deny_block() {
+    cat <<'EOF'
+    location ~* /cipi\.ya?ml$ { deny all; }
+EOF
+}
+
 _nginx_reverb_location_block() {
     local app="$1"
     local port
@@ -2110,8 +2122,9 @@ EOF
     local octane_server octane_port
     octane_server=$(app_get "$app" octane)
     octane_port=$(app_get "$app" octane_port)
-    local reverb_block=""
+    local reverb_block="" cipi_yml_deny=""
     reverb_block=$(_nginx_reverb_location_block "$app")
+    cipi_yml_deny=$(_nginx_cipi_yml_deny_block)
 
     if [[ "$vhost_type" == "custom" ]]; then
         cat > "/etc/nginx/sites-available/${app}" <<EOF
@@ -2137,7 +2150,7 @@ ${auth_block}        fastcgi_pass unix:/run/php/${app}.sock;
         fastcgi_hide_header X-Powered-By;
         fastcgi_read_timeout 300;
     }
-    location ~ /\.(?!well-known) { deny all; }
+${cipi_yml_deny}    location ~ /\.(?!well-known) { deny all; }
     location = /favicon.ico { access_log off; log_not_found off; }
     location = /robots.txt  { access_log off; log_not_found off; }
     error_page 404 /404.html;
@@ -2181,7 +2194,7 @@ ${auth_block}        set \$suffix "";
         proxy_pass http://127.0.0.1:${octane_port}\$suffix;
         proxy_read_timeout 300;
     }
-    location ~ /\.(?!well-known) { deny all; }
+${cipi_yml_deny}    location ~ /\.(?!well-known) { deny all; }
     location = /favicon.ico { access_log off; log_not_found off; }
     location = /robots.txt  { access_log off; log_not_found off; }
     error_page 404 /index.php;
@@ -2211,7 +2224,7 @@ ${auth_block}        fastcgi_pass unix:/run/php/${app}.sock;
         fastcgi_hide_header X-Powered-By;
         fastcgi_read_timeout 300;
     }
-    location ~ /\.(?!well-known) { deny all; }
+${cipi_yml_deny}    location ~ /\.(?!well-known) { deny all; }
     location = /favicon.ico { access_log off; log_not_found off; }
     location = /robots.txt  { access_log off; log_not_found off; }
     error_page 404 /index.php;
@@ -3595,7 +3608,7 @@ app_clone() {
     success "Cloned '${src}' → '${name}'. Deploy when ready: cipi deploy ${name}"
 }
 
-# Recreate GitHub/GitLab webhook (optionally rotate CIPI_WEBHOOK_TOKEN).
+# Recreate the provider webhook (optionally rotate CIPI_WEBHOOK_TOKEN).
 # Usage: cipi app webhook recreate <app> [--rotate-secret]
 app_webhook_recreate() {
     local app="${1:-}"; shift || true

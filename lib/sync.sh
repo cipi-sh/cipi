@@ -548,7 +548,10 @@ BASH
     else
         sudo -u "$app" ssh-keygen -t ed25519 -C "${app}@cipi" -f "${home}/.ssh/id_ed25519" -N "" -q
         cat "${home}/.ssh/id_ed25519.pub" >> "${home}/.ssh/authorized_keys"
-        ssh-keyscan -H localhost 127.0.0.1 github.com gitlab.com 2>/dev/null >> "${home}/.ssh/known_hosts"
+        source "${CIPI_LIB}/git.sh"
+        local _sync_repo=""
+        _sync_repo=$(jq -r --arg a "$app" '.[$a].repository // empty' "${dir}/config/apps.json" 2>/dev/null || true)
+        git_seed_app_known_hosts "${home}/.ssh/known_hosts" "$_sync_repo"
         chmod 600 "${home}/.ssh/authorized_keys" "${home}/.ssh/known_hosts"
         warn "SSH keys (generated new — update deploy key on git provider)"
     fi

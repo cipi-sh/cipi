@@ -40,6 +40,10 @@ php_install|PHP|PHP version installed
 php_switch|PHP|System PHP switched
 php_remove|PHP|PHP version removed
 php_upgrade|PHP|PHP packages upgraded
+nginx_upgrade|Services|Nginx packages upgraded
+mariadb_upgrade|Database|MariaDB packages upgraded
+pgsql_upgrade|Database|PostgreSQL packages upgraded
+valkey_upgrade|Services|Valkey packages upgraded
 package_install|Packages|Optional package installed
 package_remove|Packages|Optional package removed
 db_create|Database|Database created
@@ -71,6 +75,7 @@ cron_fail|Cron|Cron job failed
 ini_set|PHP|PHP setting changed
 yml_apply|cipi.yml|cipi.yml applied
 yml_fail|cipi.yml|cipi.yml invalid or could not be applied
+yml_post_fail|cipi.yml|Post-deploy step failed
 self_update|Updates|Cipi updated itself
 reset_root_password|Reset|Root SSH password reset
 reset_db_password|Reset|MariaDB root password reset

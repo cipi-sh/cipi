@@ -301,6 +301,11 @@ _nginx_default_server_report() {
 nginx_command() {
     local sub="${1:-status}"; shift||true
     case "$sub" in
+        upgrade)
+            # shellcheck source=/dev/null
+            source "${CIPI_LIB}/stack-upgrade.sh"
+            _stack_upgrade nginx "$@"
+            ;;
         default-server)
             local action="${1:-status}"
             case "$action" in
@@ -332,6 +337,6 @@ nginx_command() {
             esac
             ;;
         status) _nginx_default_server_report ;;
-        *) error "Use: cipi nginx default-server on|off|status"; exit 1 ;;
+        *) error "Use: cipi nginx default-server on|off|status | upgrade [--yes]"; exit 1 ;;
     esac
 }

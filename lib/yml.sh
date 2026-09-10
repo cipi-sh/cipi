@@ -15,8 +15,9 @@
 #     deleting apps and users stays a root-only, out-of-band operation.
 #   * Databases and backup profiles it declares must live in the app's own
 #     namespace, so one repository can never touch another app's data.
-#   * Nothing in the schema carries a shell command, a path or a file to
-#     include — there is deliberately no escape hatch to run code.
+#   * Nothing in the schema carries a free-form shell command — except
+#     `deploy.post`, which runs a fixed, allowlisted set of runners (artisan,
+#     npm, composer, …) with strictly validated arguments after each deploy.
 #   * The parser implements a small YAML subset and refuses anchors, aliases,
 #     tags, merge keys, block scalars and flow mappings outright.
 #   * Applying is opt-in per app (`cipi yml auto <app> on`) and otherwise
@@ -30,17 +31,21 @@ yml_command() {
         plan|diff)      _yml_plan_cmd "$@" ;;
         apply)          _yml_apply_cmd "$@" ;;
         auto)           _yml_auto_cmd "$@" ;;
+        post-deploy|postdeploy) _yml_post_deploy_cmd "$@" ;;
         generate|dump)  _yml_generate "$@" ;;
         example|sample) _yml_example "$@" ;;
-        *) error "Use: validate plan apply auto generate example"; exit 1 ;;
+        *) error "Use: validate plan apply auto post-deploy generate example"; exit 1 ;;
     esac
 }
 
-# Where the file is looked for, in order: the live release, then shared/.
+# Where the file is looked for, in order: the live release, a custom app's
+# htdocs/ (that tree *is* the document root), then shared/.
 _yml_find_file() {
     local app="$1" f
     for f in "/home/${app}/current/cipi.yml" \
              "/home/${app}/current/cipi.yaml" \
+             "/home/${app}/htdocs/cipi.yml" \
+             "/home/${app}/htdocs/cipi.yaml" \
              "/home/${app}/shared/cipi.yml"; do
         [[ -f "$f" ]] && { echo "$f"; return 0; }
     done
@@ -118,6 +123,14 @@ GLOB_RE = re.compile(r"^[a-zA-Z0-9_.*?\[\]-]{1,64}$")
 # shell or a downstream curl invocation.
 URL_RE = re.compile(r"^https?://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]{0,200})?$")
 TABLE_GLOB_RE = re.compile(r"^[a-zA-Z0-9_.*?\[\]-]{1,128}$")
+POST_RUNNERS = frozenset({"artisan", "npm", "npx", "yarn", "pnpm", "composer", "php", "node"})
+ARTISAN_CMD_RE = re.compile(r"^[a-zA-Z0-9:_-]+$")
+POST_ARG_RE = re.compile(r"^[a-zA-Z0-9_@./:=+-]{1,256}$")
+REL_SCRIPT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,200}$")
+MAX_POST_STEPS = 20
+MAX_POST_ARGS = 32
+NPM_FORBIDDEN = frozenset({"explore", "init", "login", "adduser", "edit"})
+COMPOSER_FORBIDDEN = frozenset({"shell", "browse", "fund"})
 
 
 class YamlError(Exception):
@@ -428,7 +441,7 @@ class Validator:
             self.err("cipi.yml", "the file must be a mapping at the top level")
             return None
 
-        allowed = {"version", "app", "databases", "workers", "backup", "schedule", "health"}
+        allowed = {"version", "app", "databases", "workers", "backup", "schedule", "health", "deploy"}
         self.unknown_keys(doc, allowed, "cipi.yml")
 
         version = doc.get("version")
@@ -452,7 +465,179 @@ class Validator:
                 out["schedule"] = b
         if "health" in doc:
             out["health"] = self.v_health(doc["health"])
+        if "deploy" in doc:
+            out["deploy"] = self.v_deploy(doc["deploy"])
         return out
+
+    def v_deploy(self, node):
+        m = self.expect_map(node, "deploy")
+        if m is None:
+            return {}
+        self.unknown_keys(m, {"post", "post_on_failure"}, "deploy")
+        out = {"post_on_failure": "warn", "post": []}
+
+        if "post_on_failure" in m:
+            s = self.as_str(m["post_on_failure"], "deploy.post_on_failure")
+            if s is not None:
+                if s not in ("warn", "abort"):
+                    self.err("deploy.post_on_failure", "must be 'warn' or 'abort'")
+                else:
+                    out["post_on_failure"] = s
+
+        if "post" not in m:
+            return out
+        lst = self.expect_list(m["post"], "deploy.post")
+        if lst is None:
+            return out
+        if len(lst) > MAX_POST_STEPS:
+            self.err("deploy.post", "at most %d steps" % MAX_POST_STEPS)
+            return out
+        for i, item in enumerate(lst):
+            step = self.v_deploy_post_step(item, "deploy.post[%d]" % i)
+            if step is not None:
+                out["post"].append(step)
+        return out
+
+    def valid_post_arg(self, arg, path):
+        if not isinstance(arg, str):
+            self.err(path, "expected a string")
+            return False
+        if not POST_ARG_RE.match(arg):
+            self.err(path, "contains disallowed characters — use letters, digits, -_.:/@=+ only")
+            return False
+        if ".." in arg:
+            self.err(path, "path traversal (..) is not allowed")
+            return False
+        return True
+
+    def v_deploy_post_step(self, item, path):
+        if isinstance(item, str):
+            return self.v_deploy_post_string(item.strip(), path)
+        if isinstance(item, dict):
+            if "run" in item:
+                return self.v_deploy_post_structured(item, path)
+            if len(item) == 1:
+                runner = next(iter(item))
+                if runner in POST_RUNNERS:
+                    val = item[runner]
+                    if isinstance(val, str):
+                        return self.v_deploy_post_string("%s %s" % (runner, val.strip()), path)
+                    if isinstance(val, list):
+                        parts = [runner]
+                        for j, a in enumerate(val):
+                            if not self.valid_post_arg(str(a), "%s[%d]" % (path, j)):
+                                return None
+                            parts.append(str(a))
+                        return self.v_deploy_post_string(" ".join(parts), path)
+            self.err(path, "expected a string, a one-key map (artisan: …), or an object with 'run:'")
+            return None
+        self.err(path, "expected a string or a mapping")
+        return None
+
+    def v_deploy_post_string(self, s, path):
+        if not s:
+            self.err(path, "empty step")
+            return None
+        parts = s.split()
+        if not parts:
+            self.err(path, "empty step")
+            return None
+        runner = parts[0]
+        if runner not in POST_RUNNERS:
+            self.err(path, "unknown runner %r — allowed: %s" % (
+                runner, ", ".join(sorted(POST_RUNNERS))))
+            return None
+        argv = parts[1:]
+        return self.v_deploy_post_argv(runner, argv, path)
+
+    def v_deploy_post_structured(self, item, path):
+        runner = self.as_str(item.get("run"), path + ".run")
+        if runner is None:
+            return None
+        if runner not in POST_RUNNERS:
+            self.err(path + ".run", "unknown runner %r — allowed: %s" % (
+                runner, ", ".join(sorted(POST_RUNNERS))))
+            return None
+        argv = []
+        if runner == "artisan":
+            cmd = self.as_str(item.get("command"), path + ".command")
+            if cmd is None:
+                self.err(path, "'command' is required when run is artisan")
+                return None
+            if not ARTISAN_CMD_RE.match(cmd):
+                self.err(path + ".command", "invalid artisan command name")
+                return None
+            if cmd.lower() == "tinker":
+                self.err(path + ".command", "artisan tinker is not allowed")
+                return None
+            argv.append(cmd)
+        if "args" in item:
+            alst = self.expect_list(item["args"], path + ".args")
+            if alst is None:
+                return None
+            if len(alst) > MAX_POST_ARGS:
+                self.err(path + ".args", "at most %d arguments" % MAX_POST_ARGS)
+                return None
+            for j, a in enumerate(alst):
+                if not self.valid_post_arg(str(a), path + ".args[%d]" % j):
+                    return None
+                argv.append(str(a))
+        elif runner != "artisan":
+            self.err(path, "'args' is required when run is not artisan")
+            return None
+        if item.get("force") is True and runner == "artisan":
+            if "--force" not in argv:
+                argv.append("--force")
+        for k in item:
+            if k not in ("run", "command", "args", "force"):
+                self.err(path + "." + k, "unknown key")
+        return self.v_deploy_post_argv(runner, argv, path)
+
+    def v_deploy_post_argv(self, runner, argv, path):
+        if len(argv) > MAX_POST_ARGS:
+            self.err(path, "at most %d arguments" % MAX_POST_ARGS)
+            return None
+        if runner == "artisan":
+            if not argv:
+                self.err(path, "artisan requires a command (e.g. 'artisan cache:clear')")
+                return None
+            if not ARTISAN_CMD_RE.match(argv[0]):
+                self.err(path, "invalid artisan command %r" % argv[0])
+                return None
+            if argv[0].lower() == "tinker":
+                self.err(path, "artisan tinker is not allowed")
+                return None
+            for j, a in enumerate(argv[1:], 1):
+                if not self.valid_post_arg(a, path + "[%d]" % j):
+                    return None
+        elif runner in ("npm", "npx", "yarn", "pnpm"):
+            if not argv:
+                self.err(path, "%s requires at least one argument (e.g. 'npm run build')" % runner)
+                return None
+            if argv[0] in NPM_FORBIDDEN:
+                self.err(path, "%s %s is not allowed" % (runner, argv[0]))
+                return None
+            for j, a in enumerate(argv):
+                if not self.valid_post_arg(a, path + "[%d]" % j):
+                    return None
+        elif runner == "composer":
+            if not argv:
+                self.err(path, "composer requires at least one argument")
+                return None
+            if argv[0] in COMPOSER_FORBIDDEN:
+                self.err(path, "composer %s is not allowed" % argv[0])
+                return None
+            for j, a in enumerate(argv):
+                if not self.valid_post_arg(a, path + "[%d]" % j):
+                    return None
+        elif runner in ("php", "node"):
+            if len(argv) != 1:
+                self.err(path, "%s requires exactly one script path" % runner)
+                return None
+            if not REL_SCRIPT_RE.match(argv[0]) or argv[0].startswith("/"):
+                self.err(path, "script must be a relative path under the release (e.g. scripts/warm.mjs)")
+                return None
+        return {"run": runner, "argv": argv}
 
     def v_health(self, node):
         m = self.expect_map(node, "health")
@@ -904,7 +1089,7 @@ _yml_resolve() {
     if [[ -z "$_YML_FILE" ]]; then
         _YML_FILE=$(_yml_find_file "$app") || {
             error "No cipi.yml found for '${app}'."
-            echo "  Looked in: /home/${app}/current/cipi.yml, current/cipi.yaml, shared/cipi.yml"
+            echo "  Looked in: /home/${app}/current/cipi.yml, current/cipi.yaml, htdocs/cipi.yml, shared/cipi.yml"
             echo ""
             echo "  Start from what this server already has:"
             echo "    cipi yml generate ${app} > cipi.yml"
@@ -954,6 +1139,7 @@ _yml_build_plan() {
     local app="$_YML_APP"
     _YML_ACTIONS=()
     _YML_BLOCKERS=()
+    _YML_NOTES=()
 
     # ── PHP version
     local want_php cur_php
@@ -1129,6 +1315,20 @@ _yml_build_plan() {
         fi
     fi
 
+    # ── post-deploy steps (run after every deploy — not server state to reconcile)
+    if echo "$_YML_DATA" | jq -e '.deploy.post | length > 0' &>/dev/null; then
+        local n on_fail step_line run argc
+        n=$(echo "$_YML_DATA" | jq '.deploy.post | length')
+        on_fail=$(echo "$_YML_DATA" | jq -r '.deploy.post_on_failure // "warn"')
+        _YML_NOTES+=("${n} post-deploy step(s) will run after every successful deploy (post_on_failure: ${on_fail})")
+        while IFS= read -r step_line; do
+            [[ -n "$step_line" ]] || continue
+            run=$(echo "$step_line" | jq -r '.run')
+            argc=$(echo "$step_line" | jq -r '[.argv[]?] | join(" ")')
+            _YML_NOTES+=("  → ${run} ${argc}")
+        done < <(echo "$_YML_DATA" | jq -c '.deploy.post[]?')
+    fi
+
     # ── backup profiles
     if echo "$_YML_DATA" | jq -e 'has("backup")' &>/dev/null; then
         if ! _bk_configured; then
@@ -1160,6 +1360,12 @@ _yml_print_plan() {
         echo -e "  ${RED}${BOLD}Blocked${NC}"
         local b
         for b in "${_YML_BLOCKERS[@]}"; do echo -e "    ${RED}✗${NC} ${b}"; done
+        echo ""
+    fi
+    if [[ ${#_YML_NOTES[@]} -gt 0 ]]; then
+        echo -e "  ${BOLD}After deploy${NC}"
+        local n
+        for n in "${_YML_NOTES[@]}"; do echo -e "    ${DIM}•${NC} ${n}"; done
         echo ""
     fi
     if [[ ${#_YML_ACTIONS[@]} -eq 0 ]]; then
@@ -1539,6 +1745,146 @@ _yml_apply_backup_profile() {
     return 0
 }
 
+# ── Post-deploy steps (deploy.post) ──────────────────────────
+#
+# Runs allowlisted commands from cipi.yml after a release goes live. Unlike
+# `apply`, this is not server reconciliation — it executes every time the file
+# declares steps, on both `cipi deploy` and the webhook path.
+
+_yml_post_deploy_workdir() {
+    local app="$1" home="/home/${app}" wd="$home"
+    if [[ -d "${home}/current" ]]; then
+        wd="${home}/current"
+    elif [[ -d "${home}/htdocs" ]]; then
+        wd="${home}/htdocs"
+    fi
+    echo "$wd"
+}
+
+_yml_post_deploy_is_custom() {
+    local app="$1" home="/home/${app}"
+    [[ ! -f "${home}/current/artisan" && -d "${home}/htdocs" ]]
+}
+
+# Run one validated step. $1=as (root|self) $2=app $3=php_ver $4=run $5+=argv
+_yml_post_deploy_exec() {
+    local as="$1" app="$2" php_ver="$3" run="$4"; shift 4
+    local -a argv=("$@") wd cmd_q args_q
+    wd=$(_yml_post_deploy_workdir "$app")
+    local -a env=(CI=true DEBIAN_FRONTEND=noninteractive GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat PAGER=cat COMPOSER_NO_INTERACTION=1 NPM_CONFIG_YES=true)
+
+    case "$run" in
+        artisan)
+            if _yml_post_deploy_is_custom "$app"; then
+                warn "  skip artisan (custom app)"
+                return 0
+            fi
+            [[ -f "${wd}/artisan" ]] || { error "  artisan not found in ${wd}"; return 1; }
+            cmd_q=$(printf '%q' "/usr/bin/php${php_ver}")
+            args_q="artisan"
+            local a
+            for a in "${argv[@]}"; do args_q+=" $(printf '%q' "$a")"; done
+            ;;
+        npm|npx|yarn|pnpm|composer|php|node)
+            cmd_q=$(printf '%q' "$run")
+            args_q=""
+            for a in "${argv[@]}"; do args_q+=" $(printf '%q' "$a")"; done
+            ;;
+        *)
+            error "  unknown runner: ${run}"
+            return 1
+            ;;
+    esac
+
+    local inner="cd $(printf '%q' "$wd") && exec ${cmd_q}${args_q}"
+    if [[ "$as" == "self" ]]; then
+        env "${env[@]}" bash -c "$inner"
+    else
+        sudo -u "$app" env "${env[@]}" bash -c "$inner"
+    fi
+}
+
+# Echo a one-line summary on stdout; return the step runner's exit code.
+# $1=app $2=php_ver $3=log_file (optional) $4=quiet (true for --auto webhook)
+# $5=as (root|self — who invokes the runners; default root)
+_yml_post_deploy_run() {
+    local app="$1" php_ver="$2" lf="${3:-}" quiet="${4:-false}" as="${5:-root}"
+    local file result steps n on_fail i run line rc=0 failed=0 step_rc
+    local -a argv=()
+
+    file=$(_yml_find_file "$app") || { echo "none declared"; return 0; }
+
+    result=$(_yml_parse "$file" "$app") || { echo "invalid cipi.yml"; return 1; }
+    [[ "$(echo "$result" | jq -r '.ok')" == "true" ]] || { echo "invalid cipi.yml"; return 1; }
+
+    steps=$(echo "$result" | jq -c '.data.deploy.post // []')
+    n=$(echo "$steps" | jq 'length')
+    [[ "$n" -gt 0 ]] || { echo "none declared"; return 0; }
+
+    on_fail=$(echo "$result" | jq -r '.data.deploy.post_on_failure // "warn"')
+
+    _yml_post_deploy_log() {
+        [[ -n "$lf" ]] && printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$1" >> "$lf" 2>/dev/null || true
+        [[ "$quiet" != "true" ]] && printf '%s\n' "$1"
+    }
+
+    _yml_post_deploy_log "===== post-deploy steps (${n}, post_on_failure=${on_fail}) ====="
+
+    for ((i=0; i<n; i++)); do
+        run=$(echo "$steps" | jq -r ".[$i].run")
+        mapfile -t argv < <(echo "$steps" | jq -r ".[$i].argv[]?")
+        line="${run} ${argv[*]}"
+        [[ "$quiet" != "true" ]] && step "Post-deploy [$((i+1))/${n}]: ${line}"
+        _yml_post_deploy_log "post-deploy [$((i+1))/${n}]: ${line}"
+
+        step_rc=0
+        if ! _yml_post_deploy_exec "$as" "$app" "$php_ver" "$run" "${argv[@]}" >>"${lf:-/dev/null}" 2>&1; then
+            step_rc=$?
+            ((failed++)) || true
+            _yml_post_deploy_log "post-deploy FAILED (${step_rc}): ${line}"
+            [[ "$quiet" != "true" ]] && error "  failed (exit ${step_rc}): ${line}"
+            if [[ "$on_fail" == "abort" ]]; then
+                cipi_notify \
+                    "Cipi post-deploy failed: ${app} on $(hostname)" \
+                    "A post-deploy step declared in cipi.yml failed and post_on_failure is 'abort'.\n\nServer: $(hostname)\nApp: ${app}\nStep: ${line}\nExit: ${step_rc}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nDeploy log: ${lf:-/home/${app}/logs/deploy.log}" \
+                    yml_post_fail 2>/dev/null || true
+                echo "${failed} of ${n} failed (abort)"
+                return "$step_rc"
+            fi
+            rc=1
+        else
+            _yml_post_deploy_log "post-deploy OK: ${line}"
+        fi
+    done
+
+    if [[ $failed -eq 0 ]]; then
+        echo "${n} step(s) OK"
+        return 0
+    fi
+    cipi_notify \
+        "Cipi post-deploy failed: ${app} on $(hostname)" \
+        "One or more post-deploy steps declared in cipi.yml failed (post_on_failure: warn — deploy left live).\n\nServer: $(hostname)\nApp: ${app}\nFailed: ${failed} of ${n}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nDeploy log: ${lf:-/home/${app}/logs/deploy.log}" \
+        yml_post_fail 2>/dev/null || true
+    echo "${failed} of ${n} failed (warn)"
+    return "$rc"
+}
+
+_yml_post_deploy_cmd() {
+    local app="${1:-}"; shift||true
+    parse_args "$@"
+    local auto="${ARG_auto:-}" quiet="false"
+    [[ "$auto" == "true" ]] && quiet="true"
+    [[ -z "$app" ]] && { error "Usage: cipi yml post-deploy <app> [--auto]"; exit 1; }
+    app_exists "$app" || { error "App '${app}' not found"; exit 1; }
+    local php_ver; php_ver=$(app_get "$app" php)
+    [[ -n "$php_ver" ]] || { error "App '${app}' has no PHP version configured"; exit 1; }
+    local lf="/home/${app}/logs/deploy.log"
+    local summary rc=0
+    summary=$(_yml_post_deploy_run "$app" "$php_ver" "$lf" "$quiet") || rc=$?
+    [[ "$quiet" == "true" ]] || success "Post-deploy: ${summary}"
+    return "$rc"
+}
+
 # ── Automatic apply after deploy ─────────────────────────────
 
 _yml_auto_cmd() {
@@ -1848,6 +2194,15 @@ _yml_generate() {
             echo "#   expect: 200"
         fi
 
+        # ── post-deploy steps (only from an existing cipi.yml in the release)
+        echo ""
+        echo "# Post-deploy commands (run after every successful deploy)."
+        echo "# Uncomment and edit — or declare them here and commit:"
+        echo "# deploy:"
+        echo "#   post:"
+        echo "#     - artisan cache:clear"
+        echo "#     - npm run build"
+
         # ── backup profiles this app owns
         local owned="" p
         if _bk_configured; then
@@ -2008,6 +2363,17 @@ workers:
 
 # Laravel scheduler (* * * * * artisan schedule:run)
 schedule: true
+
+# Commands to run after every successful deploy, from the live release directory.
+# Each step uses an allowlisted runner — no shell, no pipes, no free-form scripts.
+# Runs on both 'cipi deploy' and the Git webhook; does not require 'cipi yml auto'.
+deploy:
+  post:
+    - artisan cache:clear
+    - artisan scout:import --force
+    - npm run build
+    - composer dump-autoload -o
+  # post_on_failure: abort   # default warn — log + email, leave the release live
 
 # HTTP healthcheck. Probed every 5 minutes and right after every deploy.
 # The URL must be one of this app's own domains.

@@ -4,6 +4,65 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.2.3] — 2026-09-10
+
+### Added — Git forges beyond GitHub and GitLab
+
+- **Origin, CodeCommit, Bitbucket, Azure DevOps.** `cipi git` detects [Cursor Origin](https://cursor.com/origin) (`origin.cursor.com`), [AWS CodeCommit](https://aws.amazon.com/codecommit/) (`git-codecommit.*.amazonaws.com`), [Bitbucket Cloud](https://bitbucket.org), and [Azure DevOps](https://azure.microsoft.com/products/devops) (`dev.azure.com` / `ssh.dev.azure.com` / `*.visualstudio.com`) the same way it already does GitHub and GitLab. Save credentials, create the app with an SSH clone URL, and Cipi registers the deploy key (and the webhook, when the forge has one). `cipi git refresh` covers every provider.
+- **Tokens.** `cipi git origin-token`, `bitbucket-token`, `azure-token`, `codecommit-token <access-key> <secret-key> <iam-user>`. Matching `remove-*` commands. Bearer for Origin and Bitbucket (or `email:token` Basic for Bitbucket). Azure PAT as Basic empty-user. CodeCommit uses IAM `UploadSSHPublicKey` via curl `--aws-sigv4` (IAM accepts RSA, not ed25519, so Cipi mints a 4096-bit `id_rsa` beside the usual deploy key) and writes `~/.ssh/config` so the SSH Key ID is the username (`Host git-codecommit.*.amazonaws.com`). IAM allows five SSH keys per user.
+- **Webhooks.** Bitbucket Cloud: `repo:push` + HMAC `secret` (same token `cipi/agent` already verifies). Azure DevOps: service hook `git.push` with `X-Gitlab-Token` so the existing GitLab header check accepts it. Origin Apps have a single Ed25519-signed webhook, not a per-repo HMAC URL — skipped, deploy with `cipi deploy`. CodeCommit has no HTTP webhook (SNS/EventBridge only) — same.
+- **Known hosts.** New apps keyscan `bitbucket.org`, `origin.cursor.com`, `ssh.dev.azure.com`, and the host of the repository URL, not only `github.com` / `gitlab.com`.
+- **CrowdSec.** Bitbucket Cloud webhook egress CIDRs from `ip-ranges.atlassian.com` (product `bitbucket`, direction `egress`), fail-open like GitHub's `api.github.com/meta`. Azure / Origin webhook IPs are not a small published list — `cipi crowdsec allow` if a delivery is banned.
+- **IDs in `apps.json`.** Bitbucket hook UUIDs and Azure / Origin / CodeCommit string IDs are stored as strings. Numeric GitHub/GitLab IDs stay numbers.
+
+### Added — manual stack upgrades (nginx, MariaDB, PostgreSQL, Valkey)
+
+- **These four stay off `unattended-upgrades` on purpose** — a MariaDB restart is not a 4am surprise. PHP already has `cipi php upgrade` (Sunday 03:30). There is now an operator-facing equivalent for the rest of the blacklisted stack, still **manual, still patch-level only**:
+  - **`cipi nginx upgrade [--yes]`** — `apt --only-upgrade` of installed `nginx*` from the nginx.org mainline repo Cipi already configured, `nginx -t`, then reload. `/etc/nginx/nginx.conf` is kept (`--force-confold`); this is not the HTTP/2-bomb rewrite.
+  - **`cipi db upgrade [mariadb|pgsql] [--yes]`** — same for MariaDB / PostgreSQL. No engine argument upgrades every installed engine. The prompt says there will be brief downtime.
+  - **`cipi service upgrade [nginx|mariadb|postgresql|valkey] [--yes]`** — the generic entry, and the home for Valkey. No name lists installed versions against the current apt candidate. **`all` is refused** (that is what the blacklist exists to prevent). `php` is pointed at `cipi php upgrade`.
+- **Shared helper `lib/stack-upgrade.sh`.** Scoped package patterns (`^nginx(-|$)`, `^mariadb-`, `^postgresql`, `^valkey`) so a loose match cannot drag PHP in. Re-asserts the nginx.org / MariaDB.org repos if they were wiped. Lock file `/run/cipi-stack-upgrade.lock`. Mail on success: `nginx_upgrade`, `mariadb_upgrade`, `pgsql_upgrade`, `valkey_upgrade`.
+- **Not on a cron, not on the panel.** `setup.sh` / `self-update` do not run these. `/etc/sudoers.d/cipi-api` does not grant them — same rule as `cipi package install`.
+
+### Fixed — `cipi.yml` was a public URL on custom apps
+
+- **A custom app's `cipi.yml` was downloadable.** Custom apps serve `htdocs/` (or a subdirectory) as the nginx document root, so a committed `cipi.yml` answered at `https://domain/cipi.yml`. Every app vhost now denies `/cipi.yml` and `/cipi.yaml` at any path — Laravel included, in case the file is copied into `public/`. Existing servers get the location on update, without regenerating the vhost (certbot's `:443` block is left alone). `cipi yml` also looks for the file in `htdocs/`, which is where a custom app's repository actually lives.
+
+### Added — `deploy.post` in `cipi.yml`
+
+- **`deploy.post` — post-deploy steps that travel with the code.** After every successful deploy, Cipi can run a declared list of allowlisted commands from the live release directory — on both **`cipi deploy`** and the **Git webhook**. Unlike aliases, workers and the rest of the file, this section does **not** require `cipi yml auto <app> on`: commit `deploy.post` in the repository and the steps run as soon as the release is live.
+- **Syntax.** Plain strings or structured maps; see `cipi yml example <app>` for a commented template:
+
+  ```yaml
+  deploy:
+    post:
+      - artisan cache:clear
+      - artisan scout:import --force
+      - npm run build
+      - composer dump-autoload -o
+      - php scripts/post-deploy.php
+      - node scripts/warm-cache.mjs
+    # post_on_failure: abort   # default warn
+  ```
+
+  Structured form (same allowlist, useful for explicit arguments):
+
+  ```yaml
+  deploy:
+    post:
+      - run: artisan
+        command: scout:import
+        args: [--force]
+      - run: npm
+        args: [run, build]
+      - artisan: view:cache
+  ```
+
+- **Allowlisted runners only** — no free shell. Supported: **`artisan`** (`cache:clear`, `migrate --force`, …), **`npm` / `npx` / `yarn` / `pnpm`** (`run build`, `ci`, …), **`composer`** (`dump-autoload -o`, …), **`php` / `node`** (one relative script path under the release, e.g. `scripts/warm.mjs`). Rejected: unknown runners, `bash`, pipes, `;`, `..` in paths, `artisan tinker`, and other interactive subcommands (same spirit as `cipi app run`).
+- **When it runs** — after Deployer finishes (migrate, symlink, worker restart, …), then optional **`cipi yml apply`** (only if auto-apply is on), then **`deploy.post`**, then the **post-deploy healthcheck**, then the success notification.
+- **`deploy.post_on_failure: warn|abort`.** Default **`warn`**: log + email (`yml_post_fail`), release stays live. **`abort`**: post-deploy exits non-zero and **`cipi deploy`** fails too — for CI when e.g. `npm run build` must pass.
+- **`cipi yml post-deploy <app>`** — run the declared steps now against `current/` (for testing). **`cipi yml plan`** lists them under **After deploy** (informational; they are not server state to reconcile).
+
 ## [5.2.2] — 2026-09-09
 
 Two opt-in additions: Meilisearch for Laravel Scout, and an allowlisted `cipi package` for the host binaries a project sometimes needs. Neither is in the default stack, neither is installed by `setup.sh` or `cipi self-update`, and nothing on an existing server changes until someone asks for it.

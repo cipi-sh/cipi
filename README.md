@@ -84,7 +84,7 @@ Every app gets a fully isolated environment. **Laravel** (default): zero-downtim
 | **Security**       | Fail2ban + UFW, optional CrowdSec (firewall bouncer) and nightly integrity/upload scan, per-app Linux user + PHP-FPM/Octane + SSH key |
 | **Healthchecks**   | HTTP probes every 5 minutes, plus a post-deploy check with optional automatic rollback of a broken release    |
 | **Backups**        | Backup profiles: what, how often, where, how long — S3/S3-compatible/local, client-side encryption           |
-| **Configuration**  | `cipi ini` for php.ini; optional per-project `cipi.yml` for aliases, databases, workers, Reverb and backups  |
+| **Configuration**  | `cipi ini` for php.ini; optional per-project `cipi.yml` for aliases, databases, workers, Reverb, backups and post-deploy steps  |
 
 ---
 
@@ -101,6 +101,17 @@ cipi crowdsec enable    # IP reputation → firewall bouncer (not a WAF)
                         # includes a TLS rescue URL: one GET allowlists your IP
 cipi scan enable        # nightly: release integrity + ClamAV on uploads
 ```
+
+Ubuntu security updates land daily via `unattended-upgrades`. PHP patch releases are applied every Sunday by `cipi php upgrade`. **Nginx, MariaDB, PostgreSQL and Valkey are left alone until you ask** — restarting a database at 04:00 is not a surprise Cipi will create:
+
+```bash
+cipi nginx upgrade                 # nginx.org mainline, config test, reload
+cipi db upgrade                    # MariaDB, and PostgreSQL if installed
+cipi db upgrade pgsql --yes
+cipi service upgrade valkey
+```
+
+Patch-level only (`apt --only-upgrade` of what is already installed). Cipi configs are kept. `--yes` skips the prompt.
 
 ### ⚡ Zero-Downtime Deploys
 
@@ -132,25 +143,38 @@ none, because it still looks configured.
 
 An app can carry a `cipi.yml` in its repository describing the state it expects:
 domain aliases, PHP version and settings, its extra databases, its queue workers,
-its healthcheck and its backup strategy. `cipi yml plan` shows exactly what would change and
-`cipi yml apply` applies it.
+its healthcheck, its backup strategy, and **post-deploy steps** (`deploy.post`).
+`cipi yml plan` shows exactly what would change and `cipi yml apply` applies it.
 
-Deploys **ignore the file** until you opt in with `cipi yml auto <app> on`. From
-then on every successful deploy reconciles — whether it came from `cipi deploy`
-or from the Git webhook — and a release without the file is simply a no-op.
+Server reconciliation (aliases, PHP, workers, databases, …) is **opt-in**:
+`cipi yml auto <app> on` makes every successful deploy run `cipi yml apply`
+(from `cipi deploy` or the Git webhook). A release without the file is a no-op.
 
-You do not have to write it by hand: `cipi yml generate <app>` prints the app's
-current configuration on that server as a ready-to-commit `cipi.yml`.
+**`deploy.post` is different** — it runs after every successful deploy as soon
+as the section is in the committed file, with no auto switch. Steps use
+allowlisted runners only (`artisan`, `npm`, `composer`, `php`, `node`, …); no
+shell, no pipes. After Deployer, optional `cipi yml apply`, then `deploy.post`,
+then the post-deploy healthcheck.
+
+```yaml
+deploy:
+  post:
+    - artisan cache:clear
+    - npm run build
+  # post_on_failure: abort   # default warn — log + email, release stays live
+```
 
 ```bash
-cipi yml generate myapp > cipi.yml   # then commit it
-cipi yml plan myapp                  # reports nothing to do
+cipi yml generate myapp > cipi.yml   # start from the server
+cipi yml example myapp > cipi.yml    # or a commented template
+cipi yml plan myapp                  # server diff + "After deploy" steps
+cipi yml post-deploy myapp           # run deploy.post now (test)
 ```
 
 It can only *configure* an app that already exists, its databases must be named
-`<app>` or `<app>_*`, its backup profiles `<app>` or `<app>-*`, its healthcheck
-URL one of the app's own domains, and nothing in the schema carries a shell command — so a commit can never reach beyond its
-own app. Run `cipi yml example` for a blank commented template.
+`<app>` or `<app>_*`, its backup profiles `<app>` or `<app>-*`, and its
+healthcheck URL one of the app's own domains — so a commit can never reach
+beyond its own app.
 
 ### 🚀 Laravel Octane (FrankenPHP)
 
@@ -214,7 +238,7 @@ Already in the base stack, so not in the list: the **Imagick PHP extension**, **
 
 ### 🔗 Webhook Auto-Deploy
 
-Native GitHub and GitLab integration — deploy keys and webhooks configured automatically. HMAC signature verification. Or plug in any custom Git provider. If a token expires and keys/webhooks drift, `cipi git refresh` re-registers them on every app (`--rotate-keys` / `--rotate-secret` to mint new material).
+Native GitHub, GitLab, [Bitbucket](https://bitbucket.org), [Azure DevOps](https://azure.microsoft.com/products/devops), [Cursor Origin](https://cursor.com/origin), and [AWS CodeCommit](https://aws.amazon.com/codecommit/) integration — deploy keys (and webhooks where the forge has them) configured automatically. HMAC signature verification. Or plug in any custom Git provider. If a token expires and keys/webhooks drift, `cipi git refresh` re-registers them on every app (`--rotate-keys` / `--rotate-secret` to mint new material).
 
 ### 📦 App Types
 

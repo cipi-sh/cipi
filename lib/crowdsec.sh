@@ -482,6 +482,44 @@ _crowdsec_write_github_whitelist() {
     fi
 }
 
+# Fail-open: never replace a good file with an empty fetch.
+# Atlassian egress CIDRs — webhooks leave Bitbucket Cloud from these ranges.
+_crowdsec_write_bitbucket_whitelist() {
+    mkdir -p "$CROWDSEC_PARSER_DIR"
+    local out="${CROWDSEC_PARSER_DIR}/cipi-bitbucket-whitelists.yaml"
+    local raw cidrs tmp
+    raw=$(_cipi_run_timed 15 curl -fsSL \
+        -H 'User-Agent: cipi' \
+        https://ip-ranges.atlassian.com/ 2>/dev/null) || raw=""
+    cidrs=$(echo "$raw" | jq -r '
+        .items[]?
+        | select((.product[]? == "bitbucket") and (.direction[]? == "egress"))
+        | .cidr // empty' 2>/dev/null || true)
+    if [[ -z "$cidrs" ]]; then
+        [[ -s "$out" ]] && return 0
+        return 1
+    fi
+    tmp="${out}.tmp"
+    {
+        echo "name: crowdsecurity/cipi-bitbucket-whitelists"
+        echo "description: \"Bitbucket Cloud webhook CIDRs from ip-ranges.atlassian.com (egress)\""
+        echo "filter: \"1 == 1\""
+        echo "whitelist:"
+        echo "  reason: \"bitbucket webhooks\""
+        echo "  cidr:"
+        echo "$cidrs" | while IFS= read -r c; do
+            [[ -n "$c" ]] && echo "    - \"${c}\""
+        done
+    } > "$tmp"
+    if grep -q '    - "' "$tmp"; then
+        mv "$tmp" "$out"
+    else
+        rm -f "$tmp"
+        [[ -s "$out" ]] && return 0
+        return 1
+    fi
+}
+
 # Every Cipi vhost overrides access_log to /home/<app>/logs/nginx-access.log
 # (lib/app.sh), so /var/log/nginx holds only the catch-all server block. Reading
 # just that made the whole nginx half of CrowdSec inert: no app traffic, no
@@ -511,6 +549,7 @@ _crowdsec_apply_allowlists() {
     _crowdsec_write_acme_whitelist || { error "Could not write ACME allowlist"; return 1; }
     _crowdsec_write_extra_whitelist || { error "Could not write extra allowlist"; return 1; }
     _crowdsec_write_github_whitelist || warn "GitHub webhook CIDRs unchanged (fetch failed — kept the previous list)"
+    _crowdsec_write_bitbucket_whitelist || warn "Bitbucket webhook CIDRs unchanged (fetch failed — kept the previous list)"
     _crowdsec_write_nginx_acquis || { error "Could not write nginx log acquisition config"; return 1; }
     _crowdsec_reload
     return 0
@@ -967,7 +1006,7 @@ _crowdsec_enable() {
     step "Starting rescue TLS listener (allowlist only, not a login)..."
     _crowdsec_rescue_start || exit 1
 
-    step "Allowlists (localhost, private nets, Let's Encrypt, GitHub/GitLab webhooks, this SSH)..."
+    step "Allowlists (localhost, private nets, Let's Encrypt, GitHub/GitLab/Bitbucket webhooks, this SSH)..."
     if ! _crowdsec_apply_allowlists; then
         warn "Allowlist write failed — bouncer and rescue are up; fix with: cipi crowdsec refresh"
     fi
@@ -984,7 +1023,7 @@ _crowdsec_enable() {
     rescue_curl=$(_crowdsec_rescue_curl 2>/dev/null || echo "")
     cipi_notify \
         "Cipi CrowdSec enabled on $(hostname)" \
-        "CrowdSec is reading sshd and nginx logs. Bans are enforced by the ${fwmode} firewall bouncer (registered via cscli bouncers add).\n\nFail2ban is unchanged. This is not a WAF.\n\nAllowlists: localhost, RFC1918, Let's Encrypt HTTP-01, GitHub/GitLab webhook ranges, this SSH session.\nAdd more with: cipi crowdsec allow <ip|cidr>\n\nRescue (not a login — one GET allowlists the calling IP, then the token dies):\n${rescue_curl}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "CrowdSec is reading sshd and nginx logs. Bans are enforced by the ${fwmode} firewall bouncer (registered via cscli bouncers add).\n\nFail2ban is unchanged. This is not a WAF.\n\nAllowlists: localhost, RFC1918, Let's Encrypt HTTP-01, GitHub/GitLab/Bitbucket webhook ranges, this SSH session.\nAdd more with: cipi crowdsec allow <ip|cidr>\n\nRescue (not a login — one GET allowlists the calling IP, then the token dies):\n${rescue_curl}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         crowdsec_enable
     success "CrowdSec enabled (engine + ${fwmode} bouncer)"
     info "cipi ban list|unban now includes CrowdSec decisions"

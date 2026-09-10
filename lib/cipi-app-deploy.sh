@@ -106,6 +106,13 @@ if [[ -f "/etc/sudoers.d/cipi-${APP}-yml" ]]; then
     }
 fi
 
+# Allowlisted post-deploy steps from cipi.yml (npm run, artisan, …).
+if [[ -x /usr/local/bin/cipi-app-post-deploy ]]; then
+    /usr/local/bin/cipi-app-post-deploy "$APP" "$PHP_VER" "$LOG" || {
+        printf '[%(%Y-%m-%d %H:%M:%S)T] post-deploy steps failed — see above\n' -1 >> "$LOG" 2>/dev/null || true
+    }
+fi
+
 # Did the release that just went live actually survive? An automatic deploy has
 # nobody watching it, so this is the only thing standing between a broken push
 # and finding out from a customer. It never changes the deploy's own result —
@@ -126,8 +133,15 @@ esac
 
 # Sent last, so "deploy succeeded" can say whether the app actually answers.
 # Announcing success while the site returns 500 would be worse than silence.
+POST_LINE="none declared"
+if grep -q '===== post-deploy steps' "$LOG" 2>/dev/null; then
+    POST_LINE=$(grep 'post-deploy summary:' "$LOG" 2>/dev/null | tail -1 | sed 's/.*post-deploy summary: //; s/ (exit=.*//')
+    [[ -z "$POST_LINE" ]] && POST_LINE="see deploy log"
+fi
+
 sudo /usr/local/bin/cipi-app-notify "$APP" deploy-ok 0 "$LOG" \
     "${DETAIL}
+Post-deploy: ${POST_LINE}
 Healthcheck: ${HEALTH_LINE}" 2>/dev/null || true
 
 # Integrity manifest for cipi scan: hash of this release (symlinks not followed).

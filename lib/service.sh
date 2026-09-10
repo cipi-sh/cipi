@@ -171,9 +171,14 @@ service_command() {
         restart)      service_restart "${1:-all}" ;;
         start)        service_start   "${1:-}" ;;
         stop)         service_stop    "${1:-}" ;;
+        upgrade)
+            # shellcheck source=/dev/null
+            source "${CIPI_LIB}/stack-upgrade.sh"
+            _stack_upgrade_service "$@"
+            ;;
         *)
             error "Unknown service subcommand: ${subcmd}"
-            echo -e "  Usage: ${CYAN}cipi service <list|restart|start|stop> [service] [--json]${NC}"
+            echo -e "  Usage: ${CYAN}cipi service <list|restart|start|stop|upgrade> [service] [--json]${NC}"
             exit 1
             ;;
     esac

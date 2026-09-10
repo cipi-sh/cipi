@@ -919,6 +919,8 @@ install_cipi() {
     # Automatic (webhook) deploy wrapper — runs as the app user from its crontab
     cp cipi-install/lib/cipi-app-deploy.sh /usr/local/bin/cipi-app-deploy
     chmod 755 /usr/local/bin/cipi-app-deploy
+    cp cipi-install/lib/cipi-app-post-deploy.sh /usr/local/bin/cipi-app-post-deploy
+    chmod 755 /usr/local/bin/cipi-app-post-deploy
 
     cp cipi-install/lib/cipi-read-app-logs.sh /usr/local/bin/cipi-read-app-logs
     chmod 755 /usr/local/bin/cipi-read-app-logs
@@ -947,7 +949,7 @@ EOF
     # Templates (if any)
     cp cipi-install/templates/* /opt/cipi/templates/ 2>/dev/null || true
 
-    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /usr/local/bin/cipi-auth-notify /usr/local/bin/cipi-app-notify /usr/local/bin/cipi-app-deploy /usr/local/bin/cipi-read-app-logs /usr/local/bin/cipi-health-check /usr/local/bin/cipi-scan-manifest /usr/local/bin/cipi-crowdsec-rescue /usr/local/bin/cipi-crowdsec-rescue-hole /opt/cipi
+    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /usr/local/bin/cipi-auth-notify /usr/local/bin/cipi-app-notify /usr/local/bin/cipi-app-deploy /usr/local/bin/cipi-app-post-deploy /usr/local/bin/cipi-read-app-logs /usr/local/bin/cipi-health-check /usr/local/bin/cipi-scan-manifest /usr/local/bin/cipi-crowdsec-rescue /usr/local/bin/cipi-crowdsec-rescue-hole /opt/cipi
 
     # Shell tab-completion — installed for every shell, no activation needed:
     # /etc/bash_completion.d/cipi, the zsh vendor file, and an /etc/profile.d
@@ -1023,8 +1025,11 @@ setup_cron() {
 
     mkdir -p /var/log/cipi
 
-    # Configure unattended-upgrades: security patches only,
-    # never auto-upgrade nginx / mariadb / valkey / php (managed by cipi)
+    # Configure unattended-upgrades: security patches only.
+    # nginx / mariadb / postgresql / valkey / php stay off the automatic path
+    # (a database restart is not a 4am surprise). PHP has a weekly cron
+    # (`cipi php upgrade`); the others wait for `cipi nginx upgrade`,
+    # `cipi db upgrade`, `cipi service upgrade valkey`.
     cat > /etc/apt/apt.conf.d/50cipi-unattended-upgrades <<'UUEOF'
 Unattended-Upgrade::Allowed-Origins {
     "${distro_id}:${distro_codename}-security";
@@ -1074,6 +1079,8 @@ AUEOF
 # SSL renewal (Sunday 4 AM)
 10 4 * * 0 /usr/local/bin/cipi-cron-notify ssl-renew certbot renew --nginx --non-interactive --post-hook "systemctl reload nginx" >> /var/log/cipi/certbot.log 2>&1
 # Security updates — unattended-upgrades handles this daily via APT::Periodic
+# Stack patches (nginx / MariaDB / PostgreSQL / Valkey): no cron — run
+#   cipi nginx upgrade / cipi db upgrade / cipi service upgrade valkey
 # Weekly apt cache cleanup (Sunday 5 AM)
 0 5 * * 0 apt-get clean && apt-get autoclean >> /var/log/cipi/updates.log 2>&1
 # Clear RAM cache (daily 5:50 AM)

@@ -13,13 +13,14 @@ db_command() {
         uninstall|remove-engine) _db_uninstall_engine "$@" ;;
         default)   _db_set_default "$@" ;;
         engines)   _db_engines ;;
+        upgrade)   source "${CIPI_LIB}/stack-upgrade.sh"; _stack_upgrade_db "$@" ;;
         create)    _db_create "$@" ;;
         list|ls)   _db_list "$@" ;;
         delete)    _db_delete "$@" ;;
         backup)    _db_backup "$@" ;;
         restore)   _db_restore "$@" ;;
         password)  _db_password "$@" ;;
-        *) error "Use: install uninstall default engines create list delete backup restore password"; exit 1 ;;
+        *) error "Use: install uninstall default engines create list delete backup restore password upgrade"; exit 1 ;;
     esac
 }
 

@@ -200,14 +200,18 @@ _deploy_run() {
         # so it can state whether the app actually answers — reporting "deploy
         # succeeded" while the site returns 500 would be worse than silence.
         _deploy_apply_yml "$app"
+        local post_line post_rc=0
+        post_line=$(_deploy_run_post_deploy "$app") || post_rc=$?
         local health_line; health_line=$(_deploy_health_check "$app")
         if [[ -x /usr/local/bin/cipi-scan-manifest ]]; then
             /usr/local/bin/cipi-scan-manifest "$app" >/dev/null 2>&1 || true
         fi
+        [[ $post_rc -ne 0 ]] && warn "Post-deploy steps failed — see the deploy log."
         cipi_notify \
             "Cipi deploy succeeded: ${app} release ${rel_after:-?} on $(hostname)" \
-            "Deploy completed successfully.\n\n$(_deploy_release_details "$app" "$rel_after" "$branch_disp" "$secs")Previous release: ${rel_before:-none}\nHealthcheck: ${health_line}\n" \
+            "Deploy completed successfully.\n\n$(_deploy_release_details "$app" "$rel_after" "$branch_disp" "$secs")Previous release: ${rel_before:-none}\nPost-deploy: ${post_line}\nHealthcheck: ${health_line}\n" \
             deploy_success
+        [[ $post_rc -ne 0 ]] && return "$post_rc"
     else
         deploy_log_close "$app" "FAILED" "$rel_after" "$secs" "$rc"
         error "Deploy failed (exit $rc)"
@@ -392,6 +396,25 @@ _deploy_auto_rollback() {
 #
 # A failure here never turns a successful deploy into a failed one — the code is
 # live either way — but it is logged and `cipi yml apply` reports it by email.
+_deploy_run_post_deploy() {
+    local app="$1"
+    # shellcheck source=/dev/null
+    declare -f _yml_post_deploy_run >/dev/null 2>&1 || source "${CIPI_LIB}/yml.sh"
+    local php_ver lf summary rc=0
+    php_ver=$(app_get "$app" php)
+    [[ -n "$php_ver" ]] || { echo "skipped (no php version)"; return 0; }
+    lf=$(deploy_log_file "$app")
+    echo ""
+    step "Post-deploy steps (cipi.yml)..."
+    set +e
+    summary=$(_yml_post_deploy_run "$app" "$php_ver" "$lf" false root)
+    rc=$?
+    set -e
+    chown "${app}:www-data" "$lf" 2>/dev/null || true
+    printf '%s' "$summary"
+    return "$rc"
+}
+
 _deploy_apply_yml() {
     local app="$1"
     [[ "$(app_get "$app" yml_auto)" == "true" ]] || return 0
@@ -577,11 +600,15 @@ _deploy_key() {
         echo -e "  ${GREEN}✓ Auto-configured on ${git_prov} (ID: ${git_dkid})${NC}"
     else
         echo "Add as Deploy Key in your Git provider:"
-        echo "  GitHub:  Repo → Settings → Deploy keys → Add deploy key"
-        echo "  GitLab:  Repo → Settings → Repository → Deploy keys"
-        echo "  Gitea:   Repo → Settings → Deploy keys → Add key"
-        echo "  Forgejo: Repo → Settings → Deploy keys → Add key"
-        echo "  Custom:  append to ~/.ssh/authorized_keys on the git server"
+        echo "  GitHub:      Repo → Settings → Deploy keys → Add deploy key"
+        echo "  GitLab:      Repo → Settings → Repository → Deploy keys"
+        echo "  Origin:      origin ssh-key add ~/.ssh/id_ed25519.pub  (account SSH key)"
+        echo "  Bitbucket:   Repo → Repository settings → Access keys"
+        echo "  Azure:       User settings → SSH public keys"
+        echo "  CodeCommit:  IAM → user → Security credentials → Upload SSH public key"
+        echo "  Gitea:       Repo → Settings → Deploy keys → Add key"
+        echo "  Forgejo:     Repo → Settings → Deploy keys → Add key"
+        echo "  Custom:      append to ~/.ssh/authorized_keys on the git server"
     fi
     echo ""
     echo "  Trust the host fingerprint with:"
@@ -694,6 +721,16 @@ _deploy_webhook() {
         echo "  GitLab: Repo → Settings → Webhooks"
         echo "    URL: https://$(domain_url_host "$d")/cipi/webhook"
         echo "    Secret token: ${t}"
+        echo ""
+        echo "  Bitbucket: Repo → Repository settings → Webhooks"
+        echo "    URL: https://$(domain_url_host "$d")/cipi/webhook"
+        echo "    Secret: ${t}   Events: Repository push"
+        echo ""
+        echo "  Azure DevOps: Project → Service hooks → Web Hooks"
+        echo "    URL: https://$(domain_url_host "$d")/cipi/webhook"
+        echo "    Header: X-Gitlab-Token: ${t}   Event: Code pushed"
+        echo ""
+        echo "  Origin / CodeCommit: no per-repo HTTP webhook — run: cipi deploy ${app}"
     fi
     echo ""
     echo "  Requires: composer require cipi/agent"

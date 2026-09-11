@@ -4,6 +4,58 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.3.0] — 2026-09-11
+
+### Added — Cloudflare Zero Trust (`cipi zt`)
+
+Opt-in, same contract as CrowdSec: **off until you ask**. `setup.sh` / `cipi self-update` never install `cloudflared` and never call `cipi zt enable`. Fail2ban and UFW stay; this feature teaches them about Cloudflare rather than replacing them.
+
+- **`cipi zt token set --token= --account=`** — API token saved root-only at `/etc/cipi/zt.token`. Needs Account.Cloudflare Tunnel (Edit), Account.Access: Apps and Policies (Edit), Zone.DNS (Edit). Origin CA also needs Zone.SSL and Certificates (Edit). This is **not** `/etc/cipi/cloudflare.ini` (certbot DNS-01, Zone.DNS only).
+- **`cipi zt enable`** — official `cloudflared` package, locally-managed tunnel, systemd unit, nginx `real_ip` from `https://api.cloudflare.com/client/v4/ips` (`CF-Connecting-IP`), fail2ban `ignoreip` backup of those ranges, CrowdSec allowlist of the same ranges when CrowdSec is already on, cron `cipi zt refresh`. **Does not close 22/80/443.**
+- **`cipi zt hostname add <app|--gui>`** — CNAME to `{tunnel-id}.cfargotunnel.com`, ingress `http://127.0.0.1:80`. Public (CDN/WAF, no Access). `cipi app create` does not add this on its own; `status` lists apps not on the tunnel.
+- **`cipi zt access enable <app|--gui>`** — Cloudflare Access in front of that hostname. Any authenticated user (tighten the IdP in the dashboard). If the app has a Git webhook, a Bypass application is created for `/cipi/webhook` so GitHub/GitLab/Bitbucket are not 403'd.
+- **`cipi zt ssh enable --hostname=`** — ingress `ssh://127.0.0.1:22` plus an Access SSH app. Prints the `~/.ssh/config` `ProxyCommand cloudflared access ssh` block. **Port 22 stays open.** Deployer still SSHs to localhost.
+- **`cipi zt lock http [--yes]`** — refuses while any app still renews Let's Encrypt over HTTP-01 (Let's Encrypt does not come from Cloudflare IPs). Then: if every HTTP hostname is on the tunnel, close 80/443 entirely (origin dark); otherwise allow 80/443 only from Cloudflare ranges. `--force` skips the HTTP-01 check.
+- **`cipi zt lock ssh [--yes]`** — closes port 22 only if `cloudflared` is active **and** the tunnel already has SSH ingress. Otherwise it would lock you out. Rescue: `cipi zt ssh unlock`. CrowdSec rescue, if enabled, stays reachable.
+- **`cipi zt origin-cert <app>`** — Cloudflare Origin CA (optional, 15 years). Replaces `ssl_certificate` paths when a `:443` block already exists. Marks the app so `cipi ssl install` HTTP-01 will not overwrite it. Not a default replacement for Let's Encrypt: Full (Strict) still needs *an* origin cert; the tunnel talks HTTP to `:80` and does not need one.
+- **`cipi zt status` / `disable` / `refresh` / `unlock http`**. `disable` restores UFW 22/80/443, removes cloudflared and the tunnel, leaves Let's Encrypt alone.
+- Panel sudoers: **`cipi zt status` only**. enable/lock stay with the operator on the CLI.
+- **`cipi ssl install` HTTP-01** refuses while `lock http` is on, and while the app has Origin CA. Apps on the tunnel get certbot `--no-redirect` so origin HTTP→HTTPS does not break `cloudflared`. `cipi ssl force` refuses on a tunneled app for the same reason.
+- CrowdSec's reverse-proxy check still refuses without `real_ip`; the error now points at `cipi zt enable`. After enable, `_crowdsec_nginx_has_real_ip` sees `/etc/nginx/conf.d/cipi-cloudflare-realip.conf`.
+
+Public sites stay public (no SASE login). Staging, the GUI, and SSH take Access. Visitors of an e-commerce shop go through Cloudflare's CDN/WAF via the same tunnel, not Cloudflare One.
+
+### Added — System monitor (`cipi monitor`)
+
+Dashboards are only useful when someone looks at them; what actually matters is a message when something breaks. `cipi health` watches app URLs — **`cipi monitor` watches the server itself**, from cron, every 5 minutes (`/etc/cron.d/cipi-monitor` + `/usr/local/bin/cipi-monitor`). No metrics storage, no graphs, no agents: state files under `/var/log/cipi/monitor/` and a notification when it matters.
+
+- **Seven checks, all on by default, each toggleable.** `disk` (per-filesystem, warn ≥80% / crit ≥90%), `ssl` (Let's Encrypt expiry ≤14 days), `services` (every installed Cipi service via systemd — nginx, MariaDB, PHP-FPM, Valkey, supervisor, fail2ban, and the conditional ones), `workers` (every configured `*-worker-*` / `*-horizon` supervisor program must be RUNNING), `http_5xx` (5xx in the bytes appended to each app's nginx access log since the previous run — ≥20 **and** ≥5% of requests; per-log byte offsets survive logrotate, first run only baselines), `fs` (`/etc/cipi` or `/var/log/cipi` gone read-only), `load` (1-minute load > 4× cores for 2 consecutive runs — a single spike is noise).
+- **Edge-triggered alerts.** ok→fail fires once, warn↔crit escalations fire once, fail→ok sends a recovery (`monitor_ok` trigger), and a persisting failure re-alerts every `reminder_minutes` (default 240, `cipi monitor set reminder --minutes=`). The 5-minute cron never spams.
+- **CLI.** `cipi monitor [--json]` runs everything now and exits 1 on warn/crit (scriptable). `cipi monitor list` shows checks, thresholds, current state and last alert. `cipi monitor enable|disable <check>`, `cipi monitor set disk --warn= --crit=`, `set ssl --days=`, `set http_5xx --count= --ratio=`, `set load --factor= --runs=`. `cipi monitor test` sends a sample alert through every delivery path.
+- **Triggers.** Each check maps to a notification trigger (`monitor_disk`, `monitor_ssl`, `monitor_services`, `monitor_workers`, `monitor_http_5xx`, `monitor_fs`, `monitor_load`, `monitor_ok`) — mute any of them with `cipi notifications disable <trigger>` like everything else.
+
+### Added — Alert channels: Slack, Discord, Telegram, ntfy, webhooks
+
+Email was the only way out of `cipi_notify()`. It now **fans out to chat channels too**, so every existing trigger — deploys, backups, scans, SSH logins, healthchecks, and the new monitor alerts — reaches Slack/Discord/Telegram/ntfy/a custom webhook with zero changes at the call sites.
+
+- **`cipi notifications channel add <slack|discord|ntfy|telegram|webhook> <id> --url=`** — channels live encrypted in `/etc/cipi/alerts.json`. `list` masks the secret part of webhook URLs and bot tokens; `remove`, `enable`, `disable`, `test <id|all>` round out the management.
+- **Telegram** uses the Bot API directly: `channel add telegram <id> --token=<bot-token> --chat-id=<id>` (token from @BotFather; send `/start` to the bot and read `getUpdates` for the chat id). Plain-text messages, truncated at Telegram's 4096-char cap.
+- **ntfy** gets `Title`/`Priority`/`Tags` headers; urgent triggers (security events, failures, monitor crits) bump a default-priority channel to `high` automatically. **Slack/Discord** get a formatted text payload (Discord truncated at its 2000-char cap). **webhook** receives structured JSON `{server, trigger, subject, body, ts}` for anything else.
+- **Best-effort, never blocking.** Delivery has a 5-second timeout per channel and failures are only logged to `events.log` — a slow webhook can never stall a deploy or a cron run.
+- Nothing changes until you add a channel: no channel configured = email-only, exactly as before. The 5.3.0 migration installs the monitor cron and default configs but configures no channels and touches no triggers.
+
+### Fixed — `false` read back as `true` (jq `// true`)
+
+jq's `//` operator treats `false` the same as "absent", so every `// true` default silently re-enabled an explicitly disabled flag. Three of them were live:
+
+- **`cipi notifications disable <trigger>` kept firing.** The trigger was written as `false` to `notifications.json` but read back as enabled, so a muted trigger kept sending email. `cipi notifications list` also showed the wrong state.
+- **`cipi smtp configure --tls=off` was ignored.** `tls: false` was stored correctly, then read back as `true` when generating `/etc/msmtprc` — msmtp always got `tls on`, which breaks a plain relay. `cipi smtp status` and `--json` reported the wrong value for the same reason.
+- **`health: {enabled: false}` in `cipi.yml` did nothing.** The block was read as enabled, so the healthcheck was never removed and the project file then demanded a `health.url`.
+
+All three now use `!= false` (or `has()`), so an explicit `false` stays false and an absent key still defaults to on. `tests/verify-5.3.0.sh` fails if the `// true` idiom comes back on a boolean flag.
+
+---
+
 ## [5.2.3] — 2026-09-10
 
 ### Added — Git forges beyond GitHub and GitLab

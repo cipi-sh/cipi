@@ -3,6 +3,22 @@
 # Cipi — SSL (Let's Encrypt)
 #############################################
 
+_ssl_zt_lock_http() {
+    vault_read zt.json 2>/dev/null | jq -e '.lock_http == true' >/dev/null 2>&1
+}
+
+_ssl_app_on_tunnel() {
+    vault_read zt.json 2>/dev/null | jq -e --arg a "$1" '.hostnames[$a] != null' >/dev/null 2>&1
+}
+
+_ssl_certbot_redirect_flag() {
+    if _ssl_app_on_tunnel "$1"; then
+        echo "--no-redirect"
+    else
+        echo "--redirect"
+    fi
+}
+
 ssl_command() {
     local sub="${1:-}"; shift||true
     case "$sub" in
@@ -87,6 +103,21 @@ _ssl_install() {
     local dns_provider="${ARG_dns:-}"
     local wildcard="${ARG_wildcard:-}"
 
+    if [[ -z "$dns_provider" ]]; then
+        if [[ "$(app_get "$app" ssl_origin_ca)" == "true" ]]; then
+            error "App '${app}' uses a Cloudflare Origin CA certificate (cipi zt origin-cert)."
+            echo -e "  ${DIM}HTTP-01 would overwrite it. Keep Origin CA, or: cipi ssl install ${app} --dns=cloudflare${NC}"
+            exit 1
+        fi
+        if _ssl_zt_lock_http; then
+            error "HTTP-01 cannot work while cipi zt lock http is on (Let's Encrypt does not come from Cloudflare IPs)."
+            echo -e "  ${DIM}cipi ssl install ${app} --dns=cloudflare${NC}"
+            echo -e "  ${DIM}cipi zt origin-cert ${app}${NC}"
+            echo -e "  ${DIM}cipi zt unlock http${NC}  (only if you really want HTTP-01 again)"
+            exit 1
+        fi
+    fi
+
     if [[ -n "$dns_provider" ]]; then
         _ssl_install_dns01 "$app" "$d" "$dns_provider" "$wildcard"
         return $?
@@ -129,7 +160,7 @@ _ssl_install() {
         --non-interactive \
         --agree-tos \
         --register-unsafely-without-email \
-        --redirect 2>&1; then
+        $(_ssl_certbot_redirect_flag "$app") 2>&1; then
 
         # Force nginx test + reload after certbot modifies the vhost
         if nginx -t 2>&1; then
@@ -214,7 +245,7 @@ _ssl_install_dns01() {
         exit 1
     fi
 
-    if ! certbot install --nginx --cert-name "${cert}" --non-interactive --redirect 2>&1; then
+    if ! certbot install --nginx --cert-name "${cert}" --non-interactive $(_ssl_certbot_redirect_flag "$app") 2>&1; then
         error "Certificate issued but nginx install failed. Check: nginx -t"
         error "The certificate is saved under /etc/letsencrypt/live/${cert} — reapply with: cipi ssl force ${app}"
         exit 1
@@ -265,6 +296,12 @@ _ssl_force() {
     fi
     if ! command -v certbot &>/dev/null; then
         error "certbot not found"; exit 1
+    fi
+
+    if _ssl_app_on_tunnel "$app"; then
+        error "App '${app}' is on the Cloudflare tunnel — origin HTTP→HTTPS redirect would break it."
+        echo "  Cloudflare already terminates HTTPS at the edge. The tunnel talks HTTP to :80."
+        exit 1
     fi
 
     step "Forcing HTTP → HTTPS redirect for ${d}..."

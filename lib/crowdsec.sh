@@ -147,7 +147,7 @@ _crowdsec_check_real_ip() {
         error "Nginx appears to be behind a reverse proxy without real_ip."
         echo "  Without set_real_ip_from + real_ip_header (e.g. CF-Connecting-IP),"
         echo "  CrowdSec sees only the proxy. One scanner → the proxy is banned → the site is dark."
-        echo "  Fix nginx, or pass --force if you really mean it."
+        echo "  Fix nginx, run: cipi zt enable  (writes Cloudflare real_ip), or pass --force."
         return 1
     fi
     return 0

@@ -97,9 +97,14 @@ selfupdate_command() {
     [[ -f "${tmp}/lib/cipi-app-deploy.sh" ]] && cp "${tmp}/lib/cipi-app-deploy.sh" /usr/local/bin/cipi-app-deploy && chmod 755 /usr/local/bin/cipi-app-deploy
     [[ -f "${tmp}/lib/cipi-app-post-deploy.sh" ]] && cp "${tmp}/lib/cipi-app-post-deploy.sh" /usr/local/bin/cipi-app-post-deploy && chmod 755 /usr/local/bin/cipi-app-post-deploy
     [[ -f "${tmp}/lib/cipi-health-check.sh" ]] && cp "${tmp}/lib/cipi-health-check.sh" /usr/local/bin/cipi-health-check && chmod 700 /usr/local/bin/cipi-health-check
+    # Refresh unconditionally: _mon_ensure_cron only installs the helper when it
+    # is missing, so without this the 5.3.0 copy would never be updated again.
+    [[ -f "${tmp}/lib/cipi-monitor.sh" ]] && cp "${tmp}/lib/cipi-monitor.sh" /usr/local/bin/cipi-monitor && chmod 755 /usr/local/bin/cipi-monitor
     [[ -f "${tmp}/lib/cipi-scan-manifest.sh" ]] && cp "${tmp}/lib/cipi-scan-manifest.sh" /usr/local/bin/cipi-scan-manifest && chmod 755 /usr/local/bin/cipi-scan-manifest
     [[ -f "${tmp}/lib/cipi-crowdsec-rescue.py" ]] && cp "${tmp}/lib/cipi-crowdsec-rescue.py" /usr/local/bin/cipi-crowdsec-rescue && chmod 700 /usr/local/bin/cipi-crowdsec-rescue
     [[ -f "${tmp}/lib/cipi-crowdsec-rescue-hole.sh" ]] && cp "${tmp}/lib/cipi-crowdsec-rescue-hole.sh" /usr/local/bin/cipi-crowdsec-rescue-hole && chmod 700 /usr/local/bin/cipi-crowdsec-rescue-hole
+    # cloudflared / `cipi zt enable` is opt-in. lib/zt.sh is copied with the
+    # other libs above; this update must not install or start it.
     if systemctl is-active --quiet cipi-crowdsec-rescue 2>/dev/null; then
         systemctl restart cipi-crowdsec-rescue 2>/dev/null || true
     fi

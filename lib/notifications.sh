@@ -33,6 +33,14 @@ deploy_rollback|Deploy|Deploy rollback
 deploy_snapshot_fail|Deploy|Pre-deploy DB snapshot failed
 health_fail|Health|HTTP healthcheck failed (periodic, after 3 failures)
 deploy_health_fail|Health|Post-deploy healthcheck failed
+monitor_disk|Monitor|Disk usage over threshold
+monitor_ssl|Monitor|SSL certificate expiring
+monitor_services|Monitor|System service not running
+monitor_workers|Monitor|Queue worker / Horizon not running
+monitor_http_5xx|Monitor|HTTP 5xx spike in access logs
+monitor_fs|Monitor|Filesystem read-only / config not writable
+monitor_load|Monitor|Load average over threshold
+monitor_ok|Monitor|Monitor check recovered
 ssl_install|SSL|SSL certificate installed
 ssl_force|SSL|HTTP → HTTPS redirect forced
 ssl_renew|SSL|SSL certificates renewed
@@ -65,6 +73,10 @@ su|Security|su to root by cipi
 crowdsec_enable|Security|CrowdSec enabled
 crowdsec_disable|Security|CrowdSec disabled
 crowdsec_rescue|Security|CrowdSec rescue token used or rotated
+zt_enable|Security|Cloudflare Zero Trust enabled
+zt_disable|Security|Cloudflare Zero Trust disabled
+zt_lock_http|Security|HTTP ports locked (Cloudflare)
+zt_lock_ssh|Security|SSH port closed (Cloudflare Tunnel)
 scan_enable|Security|Nightly malware scan enabled
 scan_hit|Security|Malware scan found infected files
 scan_incomplete|Security|Malware scan did not finish
@@ -123,7 +135,9 @@ _notify_trigger_enabled() {
         return 0
     fi
     local val
-    val=$(vault_read notifications.json 2>/dev/null | jq -r --arg t "$trigger" '.triggers[$t] // true' 2>/dev/null) || val="true"
+    # NB: jq's `// true` treats false as empty, so a disabled trigger would
+    # read as enabled — `!= false` is the correct "default true".
+    val=$(vault_read notifications.json 2>/dev/null | jq -r --arg t "$trigger" '.triggers[$t] != false' 2>/dev/null) || val="true"
     [[ "$val" == "true" ]]
 }
 
@@ -147,6 +161,7 @@ _notify_list() {
     echo -e "\n${BOLD}Notification triggers${NC}${smtp_hint}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo -e "${DIM}  Email is sent only when SMTP is enabled and the trigger is on.${NC}"
+    echo -e "${DIM}  Chat channels (Slack/Discord/ntfy/webhook) follow the same triggers.${NC}"
     echo -e "${DIM}  Events are always logged to /var/log/cipi/events.log.${NC}\n"
 
     local cur_cat="" line id cat label on
@@ -154,7 +169,7 @@ _notify_list() {
         [[ -z "$line" ]] && continue
         id="${line%%|*}"; line="${line#*|}"
         cat="${line%%|*}"; label="${line#*|}"
-        on=$(echo "$cfg" | jq -r --arg t "$id" '.triggers[$t] // true')
+        on=$(echo "$cfg" | jq -r --arg t "$id" '.triggers[$t] != false')
         if [[ "$cat" != "$cur_cat" ]]; then
             cur_cat="$cat"
             echo -e "  ${BOLD}${cat}${NC}"
@@ -191,6 +206,10 @@ notifications_command() {
     local sub="${1:-list}"; shift || true
     case "$sub" in
         list|ls|"") _notify_list ;;
+        channel|channels)
+            declare -f alerts_channel_command &>/dev/null || source "${CIPI_LIB}/alerts.sh"
+            alerts_channel_command "$@"
+            ;;
         enable)
             local trigger="${1:-}"
             [[ -z "$trigger" ]] && { error "Usage: cipi notifications enable <trigger>"; exit 1; }
@@ -207,7 +226,7 @@ notifications_command() {
         disable-all|all-off) _notify_disable_all ;;
         reset) _notify_reset ;;
         *)
-            error "Use: list enable disable enable-all disable-all reset"
+            error "Use: list enable disable enable-all disable-all reset channel"
             exit 1
             ;;
     esac

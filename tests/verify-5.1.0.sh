@@ -639,7 +639,8 @@ for f in files:
 # 2. a non-predicate helper whose last statement is a conditional AND-list
 #    returns non-zero on the ordinary path and aborts its caller.
 PREDICATES = {'app_exists', '_smtp_is_enabled', '_deploy_cfg_bool', 'nginx_default_server_enabled',
-              '_bk_configured', '_bk_has_s3', 'php_is_installed', '_bk_profile_exists'}
+              '_bk_configured', '_bk_has_s3', 'php_is_installed', '_bk_profile_exists',
+              '_zt_ssh_ingress_present'}
 for f in files:
     lines = open(f, encoding='utf-8').read().split('\n')
     for i, l in enumerate(lines):

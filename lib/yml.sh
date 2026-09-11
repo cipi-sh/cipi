@@ -1282,7 +1282,9 @@ _yml_build_plan() {
     # ── healthcheck
     if echo "$_YML_DATA" | jq -e 'has("health")' &>/dev/null; then
         local h_enabled h_url h_expect h_grace h_pd h_rb
-        h_enabled=$(echo "$_YML_DATA" | jq -r '.health.enabled // true')
+        # `// true` would read an explicit `enabled: false` as true (jq treats
+        # false as empty) — has() is the correct "default true", as below.
+        h_enabled=$(echo "$_YML_DATA" | jq -r 'if .health | has("enabled") then (.health.enabled|tostring) else "true" end')
         if [[ "$h_enabled" == "false" ]]; then
             [[ -n "$(app_get "$app" health_url)" ]] \
                 && _YML_ACTIONS+=("health-unset||remove the healthcheck")

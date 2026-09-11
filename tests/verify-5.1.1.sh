@@ -31,7 +31,12 @@ for f in "${LIB}"/*.sh; do
     while read -r fn; do
         [[ -n "$fn" ]] || continue
         grep -qx "$fn" <<< "$defined" || missing="${missing} ${fn}"
-    done < <(grep -oE '^[A-Za-z_][A-Za-z0-9_]*\(\)' "$f" | sed 's/()//' | sort -u)
+    done < <(awk '
+        match($0, /<<\047[A-Za-z_][A-Za-z0-9_]*\047/) { d=substr($0, RSTART+3, RLENGTH-4); inh=1; next }
+        inh && $0 == d { inh=0; next }
+        inh { next }
+        { print }
+    ' "$f" | grep -oE '^[A-Za-z_][A-Za-z0-9_]*\(\)' | sed 's/()//' | sort -u)
     if [[ -z "$missing" ]]; then
         pass "${base}: every declared function is defined after sourcing"
     else

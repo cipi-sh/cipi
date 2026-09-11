@@ -81,7 +81,7 @@ Every app gets a fully isolated environment. **Laravel** (default): zero-downtim
 | **Queue workers**  | Supervisor with per-app pools — `queue:work` or **Horizon**; optional **Reverb** for WebSockets (wss:// + credentials + fd limits) |
 | **Deployments**    | Deployer — Laravel: atomic symlink, 5 releases, rollback, optional Node build; Custom: clone into htdocs     |
 | **SSL**            | Let's Encrypt via Certbot — HTTP-01 by default; optional **DNS-01 (Cloudflare)** + wildcards                 |
-| **Security**       | Fail2ban + UFW, optional CrowdSec (firewall bouncer) and nightly integrity/upload scan, per-app Linux user + PHP-FPM/Octane + SSH key |
+| **Security**       | Fail2ban + UFW, optional CrowdSec (firewall bouncer), optional **Cloudflare Zero Trust** (`cipi zt`: tunnel, Access, origin dark), and nightly integrity/upload scan, per-app Linux user + PHP-FPM/Octane + SSH key |
 | **Healthchecks**   | HTTP probes every 5 minutes, plus a post-deploy check with optional automatic rollback of a broken release    |
 | **Backups**        | Backup profiles: what, how often, where, how long — S3/S3-compatible/local, client-side encryption           |
 | **Configuration**  | `cipi ini` for php.ini; optional per-project `cipi.yml` for aliases, databases, workers, Reverb, backups and post-deploy steps  |
@@ -99,6 +99,8 @@ Optional, off until you turn them on — `setup.sh` / `self-update` never instal
 ```bash
 cipi crowdsec enable    # IP reputation → firewall bouncer (not a WAF)
                         # includes a TLS rescue URL: one GET allowlists your IP
+cipi zt enable          # Cloudflare Zero Trust: tunnel + real_ip, ports stay open
+                        # then hostname / Access / lock http / lock ssh as you choose
 cipi scan enable        # nightly: release integrity + ClamAV on uploads
 ```
 
@@ -256,6 +258,24 @@ Point Cipi at an HTTP endpoint; it probes every 5 minutes and alerts after conse
 
 ```bash
 cipi health set myapp --url=https://example.com/up --expect=200
+```
+
+### 📟 System Monitor & Chat Alerts
+
+`cipi health` watches your apps; **`cipi monitor`** watches the server itself. Every 5 minutes it checks disk usage, SSL certificate expiry, system services (nginx, MariaDB, PHP-FPM, …), queue workers and Horizon, HTTP 5xx spikes in the access logs, read-only filesystems, and load average. Alerts fire on state changes only — one message when something breaks, one when it recovers, and a quiet reminder every 4 hours while it stays broken. No dashboards, no metrics storage: just a message when it matters.
+
+```bash
+cipi monitor                      # run all checks now
+cipi monitor set disk --warn=80 --crit=90
+```
+
+Alerts reach you where you actually look. Email works out of the box (`cipi smtp configure`); chat channels take one command and apply to **every** Cipi notification — deploys, backups, scans, logins, monitor alerts:
+
+```bash
+cipi notifications channel add slack ops --url=https://hooks.slack.com/services/…
+cipi notifications channel add discord ops --url=https://discord.com/api/webhooks/…
+cipi notifications channel add telegram ops --token=<bot-token> --chat-id=<id>
+cipi notifications channel add ntfy phone --url=https://ntfy.sh/my-topic --priority=high
 ```
 
 ### 🤖 AI Agent Ready (MCP)

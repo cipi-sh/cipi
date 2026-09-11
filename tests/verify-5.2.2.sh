@@ -56,7 +56,9 @@ grep -q 'key|keys)' "$SEARCH" \
     && pass "search_command handles key" || fail "search_command has no key"
 
 echo "-- completion"
-grep -q 'health db search ssl' "${LIB}/completion.sh" \
+# Match the verb inside the list, not a fixed neighbour string: later releases
+# insert verbs between them (5.3.0 added `monitor` right before `db`).
+sed -n 's/.*local commands="\([^"]*\)".*/\1/p' "${LIB}/completion.sh" | head -1 | grep -qw 'search' \
     && pass "completion advertises the search verb" || fail "completion omits search"
 if sed -n '/^        search)/,/^            esac ;;/p' "${LIB}/completion.sh" | grep -q '_cipi_apps'; then
     pass "cipi search enable completes app names"

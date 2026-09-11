@@ -75,7 +75,7 @@ _smtp_write_rc() {
     user=$(echo "$_sj" | jq -r '.user // ""')
     pass=$(echo "$_sj" | jq -r '.password // ""')
     from=$(echo "$_sj" | jq -r '.from // ""')
-    local tls_raw; tls_raw=$(echo "$_sj" | jq -r '.tls // true')
+    local tls_raw; tls_raw=$(echo "$_sj" | jq -r '.tls != false')
     [[ "$tls_raw" == "true" ]] && tls="on" || tls="off"
 
     if [[ "$tls" != "on" ]]; then
@@ -174,8 +174,8 @@ _smtp_configure() {
         pass=$(echo "$_sj" | jq -r '.password // ""')
         from=$(echo "$_sj" | jq -r '.from // ""')
         to=$(echo "$_sj" | jq -r '.to // ""')
-        [[ "$(echo "$_sj" | jq -r '.tls // true')" == "true" ]] && tls="on" || tls="off"
-        [[ "$(echo "$_sj" | jq -r '.enabled // true')" == "true" ]] && enabled="on" || enabled="off"
+        [[ "$(echo "$_sj" | jq -r '.tls != false')" == "true" ]] && tls="on" || tls="off"
+        [[ "$(echo "$_sj" | jq -r '.enabled != false')" == "true" ]] && enabled="on" || enabled="off"
     fi
 
     # Non-interactive when any required flag is present (API / scripts).
@@ -350,7 +350,7 @@ _smtp_status() {
             user: (.user // null),
             from: (.from // null),
             to: (.to // null),
-            tls: (.tls // true)
+            tls: (.tls != false)
         } | del(.password)'
         return 0
     fi
@@ -370,7 +370,7 @@ _smtp_status() {
     to=$(echo "$_sj" | jq -r '.to // ""')
     host=$(echo "$_sj" | jq -r '.host // ""')
     port=$(echo "$_sj" | jq -r '.port // ""')
-    tls=$(echo "$_sj" | jq -r '.tls // true')
+    tls=$(echo "$_sj" | jq -r '.tls != false')
 
     if [[ "$enabled" == "true" ]]; then
         echo -e "  Status:    ${GREEN}enabled${NC}"
@@ -416,6 +416,12 @@ cipi_notify() {
     fi
     body="${body}\n\n---\nPerformed by: ${client_ip}\nSSH Key: ${key_name}"
     _smtp_send "$subject" "$body" 2>/dev/null || true
+    # Chat/webhook channels (Slack, Discord, ntfy, custom). Best-effort and
+    # never blocking: a slow webhook must not slow down the command that
+    # raised the notification.
+    if declare -f _alerts_deliver &>/dev/null; then
+        _alerts_deliver "$subject" "$body" "$trigger" || true
+    fi
 }
 
 smtp_command() {

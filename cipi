@@ -65,8 +65,8 @@ _help_topic_header() {
 
 _help_topics_list() {
     cat <<'EOF'
-app  domains  www  deploy  worker  schedule  health  db  search  service  ssl
-php  package  auth  basicauth  ssh  firewall  ban  crowdsec  scan  backup  sync
+app  domains  www  deploy  worker  schedule  health  monitor  db  search  service  ssl
+php  package  auth  basicauth  ssh  firewall  ban  crowdsec  zt  scan  backup  sync
 git  ini  yml  nginx  api  gui  smtp  notifications  reset  server  completion
 EOF
 }
@@ -99,12 +99,14 @@ show_help() {
     _help_cmd "cipi worker ..."            "Queue workers / Horizon"
     _help_cmd "cipi schedule ..."          "Laravel scheduler on/off"
     _help_cmd "cipi health ..."            "HTTP healthchecks, incl. post-deploy"
+    _help_cmd "cipi monitor ..."           "Server checks: disk, ssl, services, workers, 5xx"
     _help_cmd "cipi db ..."                "Databases"
     _help_cmd "cipi search ..."            "Meilisearch for Scout (opt-in)  ${DIM}install|enable${NC}"
     echo ""
     echo -e "  ${BOLD}Security & access${NC}"
     _help_cmd "cipi ssl / ssh / firewall / ban"  "Certs, keys, firewall, bans"
     _help_cmd "cipi crowdsec ..."          "IP reputation (opt-in)  ${DIM}enable|disable|status|rescue${NC}"
+    _help_cmd "cipi zt ..."                "Cloudflare Zero Trust (opt-in)  ${DIM}enable|hostname|access|lock${NC}"
     _help_cmd "cipi scan ..."              "Nightly malware scan (opt-in)  ${DIM}enable|disable|<app>${NC}"
     _help_cmd "cipi auth / basicauth ..."  "Composer auth.json & HTTP basic auth"
     _help_cmd "cipi reset ..."             "Reset root / DB / Valkey passwords"
@@ -165,7 +167,7 @@ show_help_topic() {
             _help_cmd "cipi service start <service>"        "Start a service"
             _help_cmd "cipi service stop <service>"         "Stop a service"
             _help_cmd "cipi service upgrade [name]"         "Patch nginx / MariaDB / PostgreSQL / Valkey  ${DIM}[--yes]${NC}"
-            _help_note "services: nginx mariadb postgresql supervisor fail2ban crowdsec php<ver>-fpm"
+            _help_note "services: nginx mariadb postgresql supervisor fail2ban crowdsec cloudflared php<ver>-fpm"
             _help_note "upgrade is patch-level only and asks first (these are not unattended)."
             _help_note "No name lists installed versions. PHP: cipi php upgrade (weekly cron)."
             echo ""
@@ -310,6 +312,26 @@ show_help_topic() {
             _help_note "It moves the release symlink back and re-checks, then sends one email"
             _help_note "saying what broke and whether the rollback fixed it. Database migrations"
             _help_note "are NOT undone — which is why this is off by default."
+            echo ""
+            ;;
+
+        monitor)
+            _help_topic_header "System monitor"
+            echo ""
+            _help_cmd "cipi monitor"                   "Run all checks now  ${DIM}[--json]${NC}"
+            _help_cmd "cipi monitor list"              "Checks, thresholds, current state"
+            _help_cmd "cipi monitor enable|disable <check>" "Toggle a check"
+            _help_cmd "cipi monitor set <check> --key=value"  "Thresholds  ${DIM}(disk: warn crit · ssl: days · http_5xx: count ratio · load: factor runs)${NC}"
+            _help_cmd "cipi monitor set reminder --minutes=N" "Re-alert interval while failing (default 240)"
+            _help_cmd "cipi monitor test"              "Send a test alert to email + channels"
+            echo ""
+            _help_note "Checks: disk usage, SSL expiry, system services, queue workers,"
+            _help_note "HTTP 5xx spikes, read-only filesystem, load average."
+            _help_note "Cron runs them every 5 minutes (/etc/cron.d/cipi-monitor). Alerts go"
+            _help_note "out on state change only — ok→fail fires once, fail→ok sends a"
+            _help_note "recovery, a persisting failure re-alerts every reminder interval."
+            _help_note "Delivery: email (cipi smtp configure) and chat channels"
+            _help_note "(cipi notifications channel add slack|discord|ntfy|webhook …)."
             echo ""
             ;;
 
@@ -500,6 +522,40 @@ show_help_topic() {
             echo ""
             ;;
 
+        zt|zerotrust|zero-trust|cloudflare|tunnel)
+            _help_topic_header "Cloudflare Zero Trust"
+            echo ""
+            _help_cmd "cipi zt token set --token= --account=" "Cloudflare API token (not DNS-01)"
+            _help_cmd "cipi zt token show"            "Whether a token is saved (not the secret)"
+            _help_cmd "cipi zt enable"                "cloudflared + tunnel + nginx real_ip"
+            _help_cmd "cipi zt disable"               "Remove tunnel; restore UFW 22/80/443"
+            _help_cmd "cipi zt status"                "Tunnel, hostnames, Access, locks"
+            _help_cmd "cipi zt refresh"               "Reload Cloudflare IP ranges"
+            _help_cmd "cipi zt hostname add <app>"    "Public site through the tunnel"
+            _help_cmd "cipi zt hostname add --gui"    "Panel hostname through the tunnel"
+            _help_cmd "cipi zt hostname remove <app>" "Drop a hostname from the tunnel"
+            _help_cmd "cipi zt access enable <app>"   "IdP in front of the app"
+            _help_cmd "cipi zt access enable --gui"   "IdP in front of the panel"
+            _help_cmd "cipi zt access disable <app>"  "Drop Access; hostname stays public"
+            _help_cmd "cipi zt ssh enable --hostname=" "SSH over the tunnel (port 22 stays open)"
+            _help_cmd "cipi zt ssh disable"           "Remove SSH from the tunnel"
+            _help_cmd "cipi zt lock http [--yes]"     "80/443: CF IPs only, or closed"
+            _help_cmd "cipi zt lock ssh [--yes]"      "Close port 22 (tunnel must be healthy)"
+            _help_cmd "cipi zt ssh unlock"            "Reopen port 22"
+            _help_cmd "cipi zt unlock http"           "Reopen 80/443 to the world"
+            _help_cmd "cipi zt origin-cert <app>"     "Cloudflare Origin CA (optional)"
+            echo ""
+            _help_note "Off by default. enable does not run on self-update."
+            _help_note "Does not close 22/80/443 until lock. lock ssh refuses unless cloudflared is up"
+            _help_note "and SSH ingress exists. Public hostnames have no Access; staging/GUI do."
+            _help_note "Access on an app with a Git webhook adds a Bypass for /cipi/webhook."
+            _help_note "real_ip uses CF-Connecting-IP so Fail2ban and CrowdSec see the client,"
+            _help_note "not the Cloudflare edge. DNS-01 stays cipi ssl dns; this token is separate."
+            _help_note "Let's Encrypt HTTP-01 cannot renew after lock http — DNS-01 or origin-cert."
+            _help_note "Reverb/WebSockets go through the tunnel HTTP upgrade. Deployer is localhost SSH."
+            echo ""
+            ;;
+
         crowdsec)
             _help_topic_header "CrowdSec"
             echo ""
@@ -657,11 +713,14 @@ show_help_topic() {
         notifications|notify|triggers)
             _help_topic_header "Notifications"
             echo ""
-            _help_cmd "cipi notifications list"        "List email triggers"
+            _help_cmd "cipi notifications list"        "List triggers"
             _help_cmd "cipi notifications enable|disable <t>" "Toggle a trigger"
             _help_cmd "cipi notifications enable-all|disable-all|reset" "Bulk toggle / reset"
-            _help_note "All triggers on by default; choose what to send when SMTP is set"
-            _help_note "See also: cipi help smtp"
+            _help_cmd "cipi notifications channel add <type> <id> --url=" "Slack, Discord, ntfy, Telegram, webhook"
+            _help_cmd "  telegram: --token=<bot-token> --chat-id=<id>" "Bot token from @BotFather"
+            _help_cmd "cipi notifications channel list|test|remove" "Manage channels"
+            _help_note "All triggers on by default; email needs SMTP, chat needs a channel"
+            _help_note "See also: cipi help smtp, cipi help monitor"
             echo ""
             ;;
 
@@ -705,6 +764,7 @@ show_help_all() {
     show_help_topic worker
     show_help_topic schedule
     show_help_topic health
+    show_help_topic monitor
     show_help_topic db
     show_help_topic search
     show_help_topic api
@@ -718,6 +778,7 @@ show_help_all() {
     show_help_topic firewall
     show_help_topic ban
     show_help_topic crowdsec
+    show_help_topic zt
     show_help_topic scan
     show_help_topic backup
     show_help_topic ini
@@ -762,6 +823,7 @@ show_status() {
     # The rescue listener is the way back in after a ban; a silent one is worse
     # than no listener at all, so it belongs on the status page.
     systemd_unit_exists cipi-crowdsec-rescue && status_svcs+=(cipi-crowdsec-rescue)
+    systemd_unit_exists cloudflared && status_svcs+=(cloudflared)
     for svc in "${status_svcs[@]}"; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
             printf "  %-26s ${GREEN}● running${NC}\n" "$svc"
@@ -805,6 +867,7 @@ main() {
         worker)     _maybe_cmd_help worker "$@";     require_root; source "${CIPI_LIB}/worker.sh";      worker_command "$@" ;;
         schedule)   _maybe_cmd_help schedule "$@";   require_root; source "${CIPI_LIB}/app.sh";         schedule_command "$@" ;;
         health)     _maybe_cmd_help health "$@";     require_root; source "${CIPI_LIB}/health.sh";      health_command "$@" ;;
+        monitor)    _maybe_cmd_help monitor "$@";    require_root; source "${CIPI_LIB}/monitor.sh";     monitor_command "$@" ;;
         db)         _maybe_cmd_help db "$@";         require_root; source "${CIPI_LIB}/db.sh";          db_command "$@" ;;
         search)     _maybe_cmd_help search "$@";     require_root; source "${CIPI_LIB}/search.sh";      search_command "$@" ;;
         ssl)        _maybe_cmd_help ssl "$@";        require_root; source "${CIPI_LIB}/ssl.sh";         ssl_command "$@" ;;
@@ -813,6 +876,7 @@ main() {
         firewall)   _maybe_cmd_help firewall "$@";   require_root; source "${CIPI_LIB}/firewall.sh";    firewall_command "$@" ;;
         ban)        _maybe_cmd_help ban "$@";        require_root; source "${CIPI_LIB}/ban.sh";         ban_command "$@" ;;
         crowdsec)   _maybe_cmd_help crowdsec "$@";   require_root; source "${CIPI_LIB}/crowdsec.sh";    crowdsec_command "$@" ;;
+        zt|zerotrust) _maybe_cmd_help zt "$@";       require_root; source "${CIPI_LIB}/zt.sh";        zt_command "$@" ;;
         scan)       _maybe_cmd_help scan "$@";       require_root; source "${CIPI_LIB}/scan.sh";        scan_command "$@" ;;
         backup)     _maybe_cmd_help backup "$@";     require_root; source "${CIPI_LIB}/backup.sh";      backup_command "$@" ;;
         ini)        _maybe_cmd_help ini "$@";        require_root; source "${CIPI_LIB}/ini.sh";         ini_command "$@" ;;

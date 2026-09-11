@@ -960,4 +960,5 @@ fi
 
 # Email notifications (optional) — cipi_notify "Subject" "Body" [trigger_id]
 [[ -f "${CIPI_LIB}/notifications.sh" ]] && source "${CIPI_LIB}/notifications.sh"
+[[ -f "${CIPI_LIB}/alerts.sh" ]] && source "${CIPI_LIB}/alerts.sh"
 [[ -f "${CIPI_LIB}/smtp.sh" ]] && source "${CIPI_LIB}/smtp.sh"

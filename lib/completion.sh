@@ -43,8 +43,8 @@ _cipi_complete() {
         words=("${COMP_WORDS[@]}"); cword=$COMP_CWORD
     fi
 
-    local commands="status version self-update service app alias domains www auth basicauth deploy worker schedule health db search ssl php package firewall ban crowdsec scan backup ini yml nginx api gui git sync ssh smtp notifications reset completion help"
-    local topics="app domains www deploy worker schedule health db search service ssl php package auth basicauth ssh firewall ban crowdsec scan backup sync git ini yml nginx api gui smtp notifications reset server completion all"
+    local commands="status version self-update service app alias domains www auth basicauth deploy worker schedule health monitor db search ssl php package firewall ban crowdsec zt scan backup ini yml nginx api gui git sync ssh smtp notifications reset completion help"
+    local topics="app domains www deploy worker schedule health monitor db search service ssl php package auth basicauth ssh firewall ban crowdsec zt scan backup sync git ini yml nginx api gui smtp notifications reset server completion all"
 
     # skip a leading path/wrapper (e.g. `sudo cipi`, `/usr/local/bin/cipi`)
     local start=1 j
@@ -67,6 +67,7 @@ _cipi_complete() {
 
     local pos=$(( cword - vi ))      # 1 = first arg after the verb
     local w1="${words[vi+1]:-}"      # first arg after the verb
+    local w2="${words[vi+2]:-}"      # second arg after the verb
 
     _cipi_apps() {
         local f=/etc/cipi/apps-public.json
@@ -91,7 +92,7 @@ _cipi_complete() {
                 1) sub="list restart start stop upgrade" ;;
                 2) case "$w1" in
                        upgrade) sub="nginx mariadb postgresql valkey --yes" ;;
-                       *)       sub="nginx mariadb postgresql valkey-server supervisor fail2ban meilisearch crowdsec php all" ;;
+                       *)       sub="nginx mariadb postgresql valkey-server supervisor fail2ban meilisearch crowdsec cloudflared php all" ;;
                    esac ;;
             esac ;;
 
@@ -219,6 +220,19 @@ _cipi_complete() {
                 2) case "$w1" in rescue) sub="token rotate" ;; esac ;;
             esac ;;
 
+        zt|zerotrust)
+            case $pos in
+                1) sub="token enable disable status refresh hostname access ssh lock unlock origin-cert" ;;
+                2) case "$w1" in
+                       token)    sub="set show" ;;
+                       hostname) sub="add remove list" ;;
+                       access)   sub="enable disable" ;;
+                       ssh)      sub="enable disable unlock" ;;
+                       lock)     sub="http ssh" ;;
+                       unlock)   sub="http ssh" ;;
+                   esac ;;
+            esac ;;
+
         scan)
             [[ $pos -eq 1 ]] && sub="enable disable status manifest report $(_cipi_apps)" ;;
 
@@ -273,7 +287,32 @@ _cipi_complete() {
         ssh)       [[ $pos -eq 1 ]] && sub="list add remove" ;;
 
         smtp|mail|email)          [[ $pos -eq 1 ]] && sub="configure status test disable enable delete" ;;
-        notifications|notify|triggers) [[ $pos -eq 1 ]] && sub="list enable disable enable-all disable-all reset" ;;
+        notifications|notify|triggers)
+            case $pos in
+                1) sub="list enable disable enable-all disable-all reset channel" ;;
+                2) case "$w1" in
+                       channel) sub="add list remove test enable disable" ;;
+                   esac ;;
+                3) case "$w2" in
+                       add) sub="slack discord ntfy telegram webhook" ;;
+                       remove|test|enable|disable) sub="" ;;
+                   esac ;;
+            esac ;;
+        monitor)
+            case $pos in
+                1) sub="run list enable disable set test --json" ;;
+                2) case "$w1" in
+                       enable|disable) sub="disk ssl services workers http_5xx fs load" ;;
+                       set)            sub="disk ssl http_5xx load reminder" ;;
+                   esac ;;
+                3) case "$w2" in
+                       disk)     sub="--warn= --crit=" ;;
+                       ssl)      sub="--days=" ;;
+                       http_5xx) sub="--count= --ratio=" ;;
+                       load)     sub="--factor= --runs=" ;;
+                       reminder) sub="--minutes=" ;;
+                   esac ;;
+            esac ;;
         reset|passwords)          [[ $pos -eq 1 ]] && sub="root-password db-password valkey-password" ;;
     esac
 

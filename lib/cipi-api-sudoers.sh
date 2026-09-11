@@ -82,6 +82,10 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi service list *, \
                                /usr/local/bin/cipi service restart *, \
                                /usr/local/bin/cipi status, \
+                               /usr/local/bin/cipi zt status, \
+                               /usr/local/bin/cipi zt status *, \
+                               /usr/local/bin/cipi monitor list, \
+                               /usr/local/bin/cipi monitor list *, \
                                /usr/local/bin/cipi app webhook recreate *, \
                                /usr/local/bin/cipi app fix-permissions, \
                                /usr/local/bin/cipi app fix-permissions *, \

@@ -194,7 +194,9 @@ grep -qE '^[^#]*minfds[[:space:]]*=' "${LIB}/common.sh" "${ROOT}/setup.sh" \
     || pass "supervisord minfds is deliberately not set"
 
 # ── 7. cipi.yml: workers.reverb ────────────────────────────────
-awk 'NR>=58 && /^CIPIYAMLPY$/{exit} NR>=58' "${LIB}/yml.sh" > "${TMP}/validator.py"
+# Find the heredoc by its delimiter, not by a line number: the old `NR>=58`
+# offset drifted as yml.sh grew and silently extracted shell into the .py.
+awk "/<<'CIPIYAMLPY'/{f=1;next} /^CIPIYAMLPY\$/{exit} f" "${LIB}/yml.sh" > "${TMP}/validator.py"
 
 yml_check() { # $1=yaml body, $2=jq filter, $3=expected, $4=label
     printf '%s\n' "$1" > "${TMP}/t.yml"

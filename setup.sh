@@ -946,10 +946,23 @@ EOF
         chmod 644 /etc/cron.d/cipi-health
     fi
 
+    # System monitor (disk, SSL expiry, services, workers, 5xx, fs, load).
+    # On by default like the healthchecks; `cipi monitor disable <check>` opts out.
+    cp cipi-install/lib/cipi-monitor.sh /usr/local/bin/cipi-monitor
+    chmod 755 /usr/local/bin/cipi-monitor
+    mkdir -p /var/log/cipi/monitor
+    if [ ! -f /etc/cron.d/cipi-monitor ]; then
+        cat > /etc/cron.d/cipi-monitor <<'EOF'
+# Cipi system monitor (every 5 minutes)
+*/5 * * * * root /usr/local/bin/cipi-monitor >/dev/null 2>&1
+EOF
+        chmod 644 /etc/cron.d/cipi-monitor
+    fi
+
     # Templates (if any)
     cp cipi-install/templates/* /opt/cipi/templates/ 2>/dev/null || true
 
-    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /usr/local/bin/cipi-auth-notify /usr/local/bin/cipi-app-notify /usr/local/bin/cipi-app-deploy /usr/local/bin/cipi-app-post-deploy /usr/local/bin/cipi-read-app-logs /usr/local/bin/cipi-health-check /usr/local/bin/cipi-scan-manifest /usr/local/bin/cipi-crowdsec-rescue /usr/local/bin/cipi-crowdsec-rescue-hole /opt/cipi
+    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /usr/local/bin/cipi-auth-notify /usr/local/bin/cipi-app-notify /usr/local/bin/cipi-app-deploy /usr/local/bin/cipi-app-post-deploy /usr/local/bin/cipi-read-app-logs /usr/local/bin/cipi-health-check /usr/local/bin/cipi-monitor /usr/local/bin/cipi-scan-manifest /usr/local/bin/cipi-crowdsec-rescue /usr/local/bin/cipi-crowdsec-rescue-hole /opt/cipi
 
     # Shell tab-completion — installed for every shell, no activation needed:
     # /etc/bash_completion.d/cipi, the zsh vendor file, and an /etc/profile.d

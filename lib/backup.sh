@@ -21,6 +21,10 @@
 #############################################
 
 [[ -z "${BACKUP_KEY_FILE:-}" ]] && readonly BACKUP_KEY_FILE="${CIPI_CONFIG}/.backup_key"
+
+# The AWS CLI installs into /usr/local/bin, which root's crontab PATH
+# (/usr/bin:/bin) does not include — and every scheduled run comes from cron.
+case ":${PATH}:" in *:/usr/local/bin:*) ;; *) export PATH="/usr/local/bin:${PATH}" ;; esac
 [[ -z "${BACKUP_DEFAULT_LOCAL:-}" ]] && readonly BACKUP_DEFAULT_LOCAL="/var/backups/cipi"
 
 backup_command() {
@@ -666,7 +670,10 @@ _bk_app_paths() {
     local app="$1"
     local home
     home=$(_bk_app_home "$app")
-    if [[ "$(app_get "$app" custom)" == "true" ]]; then
+    if [[ "$(app_get "$app" runtime)" == "node" ]]; then
+        # Code comes back from git; shared/ holds .env.
+        [[ -d "${home}/shared" ]] && echo "shared"
+    elif [[ "$(app_get "$app" custom)" == "true" ]]; then
         [[ -d "${home}/htdocs" ]] && echo "htdocs"
     else
         [[ -d "${home}/shared" ]] && echo "shared"
@@ -914,14 +921,14 @@ _bk_run_profile() {
             "Backup profile '${p}' finished with errors.\n\nServer: $(hostname)\nProfile: ${p}\nRun: ${ts}\nFailed: ${errors}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nLog: ${CIPI_LOG}/backup.log" \
             backup_fail
         log_action "BACKUP ERROR: profile=${p} run=${ts} ${errors}"
-        _bk_prune_profile "$p" false
+        _bk_retention_after_run "$p"
         return 1
     fi
 
     _bk_state_set "$p" "ok" "${#apps[@]} app(s), ${#dbs[@]} database(s)" "$started"
     success "Backup '${p}' complete — ${#apps[@]} app(s), ${#dbs[@]} database(s)"
     log_action "BACKUP OK: profile=${p} run=${ts} apps=${#apps[@]} dbs=${#dbs[@]}"
-    _bk_prune_profile "$p" false
+    _bk_retention_after_run "$p"
     return 0
 }
 
@@ -946,17 +953,23 @@ _bk_prune() {
         return $?
     fi
 
+    _BK_PRUNE_ERRORS=""
     if [[ -n "$profile" ]]; then
         _bk_profile_exists "$profile" || { error "No such profile: ${profile}"; exit 1; }
         _bk_prune_profile "$profile" "$dry"
-        return 0
+    else
+        local p
+        while IFS= read -r p; do
+            [[ -n "$p" ]] || continue
+            _bk_prune_profile "$p" "$dry"
+        done < <(_bk_profile_names)
     fi
-
-    local p
-    while IFS= read -r p; do
-        [[ -n "$p" ]] || continue
-        _bk_prune_profile "$p" "$dry"
-    done < <(_bk_profile_names)
+    _bk_prune_orphans "$dry"
+    if [[ -n "$_BK_PRUNE_ERRORS" ]]; then
+        error "Retention incomplete: ${_BK_PRUNE_ERRORS}"
+        return 1
+    fi
+    return 0
 }
 
 # Decide which run timestamps of a profile must go, then delete them from
@@ -977,8 +990,17 @@ _bk_prune_profile() {
         cutoff=$(date -d "${total_days} days ago" +%s 2>/dev/null || date -v "-${total_days}d" +%s)
     fi
 
-    # Union of run timestamps across destinations, newest first.
-    local runs; runs=$(_bk_list_runs "$p" | sort -r | awk '!seen[$0]++')
+    # Union of run timestamps across destinations, newest first. A destination
+    # that cannot be listed would make this prune nothing, silently, forever:
+    # say so (the caller turns it into an alert).
+    local errf runs
+    errf=$(mktemp)
+    runs=$(_bk_list_runs "$p" 2>"$errf" | sort -r | awk '!seen[$0]++')
+    if [[ -s "$errf" ]]; then
+        _BK_PRUNE_ERRORS="${_BK_PRUNE_ERRORS:-}${_BK_PRUNE_ERRORS:+; }${p}: $(paste -sd' ' "$errf")"
+        warn "  Retention for '${p}' is incomplete — $(paste -sd' ' "$errf")"
+    fi
+    rm -f "$errf"
     [[ -z "$runs" ]] && return 0
 
     local idx=0 ts run_epoch drop
@@ -1014,11 +1036,30 @@ _bk_list_runs() {
     local p="$1"
     local ldir; ldir="$(_bk_local_root)/${p}"
     [[ -d "$ldir" ]] && ls -1 "$ldir" 2>/dev/null | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}$' || true
-    if _bk_has_s3 && command -v aws &>/dev/null; then
-        _aws_s3 ls "s3://$(_bk_s3_bucket)/cipi/${p}/" 2>/dev/null \
-            | awk '{print $NF}' | sed 's#/$##' \
+    if _bk_has_s3; then
+        _bk_s3_ls_dirs "s3://$(_bk_s3_bucket)/cipi/${p}/" \
             | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}$' || true
     fi
+}
+
+# Sub-"directories" of an S3 prefix, one per line. An empty or missing prefix
+# is not an error (aws exits 1 with nothing on stderr); anything else — no CLI,
+# denied ListBucket, a wrong endpoint — is reported on stderr.
+_bk_s3_ls_dirs() {
+    local uri="$1" out errf rc=0
+    if ! command -v aws &>/dev/null; then
+        echo "AWS CLI not found — S3 archives cannot be listed" >&2
+        return 1
+    fi
+    errf=$(mktemp)
+    out=$(_aws_s3 ls "$uri" 2>"$errf") || rc=$?
+    if [[ $rc -ne 0 && -s "$errf" ]]; then
+        echo "cannot list ${uri}: $(grep -v '^[[:space:]]*$' "$errf" | tail -1)" >&2
+        rm -f "$errf"
+        return 1
+    fi
+    rm -f "$errf"
+    printf '%s\n' "$out" | awk '$1 == "PRE" {print $2}' | sed 's#/$##'
 }
 
 _bk_delete_run() {
@@ -1031,13 +1072,134 @@ _bk_delete_run() {
     if _bk_has_s3 && command -v aws &>/dev/null; then
         local bucket; bucket=$(_bk_s3_bucket)
         if _aws_s3 ls "s3://${bucket}/cipi/${p}/${ts}/" &>/dev/null; then
-            if _aws_s3 rm "s3://${bucket}/cipi/${p}/${ts}/" --recursive &>/dev/null; then
+            local rm_err
+            if rm_err=$(_aws_s3 rm "s3://${bucket}/cipi/${p}/${ts}/" --recursive 2>&1 >/dev/null); then
                 step "  Deleted S3:    ${p}/${ts}"
             else
-                error "  S3 delete failed: ${p}/${ts}"
+                error "  S3 delete failed: ${p}/${ts} — $(tail -1 <<< "$rm_err")"
+                _BK_PRUNE_ERRORS="${_BK_PRUNE_ERRORS:-}${_BK_PRUNE_ERRORS:+; }${p}/${ts}: delete failed"
             fi
         fi
     fi
+}
+
+# ── Orphaned archives ────────────────────────────────────────
+#
+# Archives no profile prunes any more, which used to pile up forever:
+#   * the pre-5.1 layout, s3://<bucket>/cipi/<app>/<date…>/ — 5.1.0 turned the
+#     nightly job into the `default` profile and dropped the old
+#     `cipi backup prune --weeks=N` line that was their only cleanup;
+#   * <local_dir>/<name>/ and s3://<bucket>/cipi/<name>/ of a profile that was
+#     removed (removing a profile keeps its archives);
+#   * database dumps in /var/log/cipi/backups/ — pre-deploy snapshots
+#     (cipi deploy --snapshot) still land there.
+# They are kept as long as the longest age-based retention of any profile, so
+# nothing goes sooner than a current profile would keep it. With only count
+# retention (keep: N) there is no age to go by, and they are left alone.
+
+_bk_orphan_retention_days() {
+    _bk_profiles_json | jq -r '[.[] | ((.retention.days // 0) + (.retention.weeks // 0) * 7)] | max // 0' 2>/dev/null || echo 0
+}
+
+_bk_date_epoch() {
+    date -d "$1" +%s 2>/dev/null || date -j -f "%Y-%m-%d" "$1" +%s 2>/dev/null || echo 0
+}
+
+# $1 = dry (true|false)
+_bk_prune_orphans() {
+    local dry="${1:-false}" days cutoff profiles name ts dp ep f
+    days=$(_bk_orphan_retention_days)
+    [[ "$days" =~ ^[0-9]+$ && "$days" -gt 0 ]] || return 0
+    cutoff=$(date -d "${days} days ago" +%s 2>/dev/null || date -v "-${days}d" +%s)
+    profiles=$(_bk_profile_names)
+
+    _orphan_old() { # $1 = folder name → 0 when it is a dated run older than the cutoff
+        [[ "$1" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}) ]] || return 1
+        ep=$(_bk_date_epoch "${BASH_REMATCH[1]}")
+        [[ "$ep" -gt 0 && "$ep" -lt "$cutoff" ]]
+    }
+
+    # local: removed profiles
+    local lroot; lroot=$(_bk_local_root)
+    if [[ -d "$lroot" ]]; then
+        for dp in "$lroot"/*/; do
+            [[ -d "$dp" ]] || continue
+            name=$(basename "$dp")
+            grep -Fxq "$name" <<< "$profiles" && continue
+            for f in "$dp"*/; do
+                [[ -d "$f" ]] || continue
+                ts=$(basename "$f")
+                _orphan_old "$ts" || continue
+                if [[ "$dry" == true ]]; then echo -e "  ${DIM}would delete${NC} local ${name}/${ts} (orphaned)"; continue; fi
+                rm -rf "$f" && step "  Deleted local: ${name}/${ts} (orphaned)"
+            done
+            [[ "$dry" == true ]] || rmdir "$dp" 2>/dev/null || true
+        done
+    fi
+
+    # local: loose dumps (pre-5.1 layout, pre-deploy snapshots)
+    for f in "${CIPI_LOG}/backups/"*.sql.gz; do
+        [[ -f "$f" ]] || continue
+        # <engine>_<app>_predeploy_YYYYMMDD_HHMMSS.sql.gz — the date is the
+        # suffix; an app name may contain digits of its own.
+        [[ "$(basename "$f")" =~ ([0-9]{4})([0-9]{2})([0-9]{2})_[0-9]{6}\.sql\.gz$ ]] \
+            || [[ "$(basename "$f")" =~ ([0-9]{4})([0-9]{2})([0-9]{2}) ]] || continue
+        _orphan_old "${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}" || continue
+        if [[ "$dry" == true ]]; then echo -e "  ${DIM}would delete${NC} $(basename "$f")"; continue; fi
+        rm -f "$f" && step "  Deleted local: $(basename "$f")"
+    done
+
+    # S3: prefixes under cipi/ that are not a profile
+    _bk_has_s3 || return 0
+    local bucket errf names runs
+    bucket=$(_bk_s3_bucket)
+    errf=$(mktemp)
+    names=$(_bk_s3_ls_dirs "s3://${bucket}/cipi/" 2>"$errf") || true
+    if [[ -s "$errf" ]]; then
+        _BK_PRUNE_ERRORS="${_BK_PRUNE_ERRORS:-}${_BK_PRUNE_ERRORS:+; }orphans: $(paste -sd' ' "$errf")"
+        warn "  Old archives could not be checked — $(paste -sd' ' "$errf")"
+        rm -f "$errf"; return 0
+    fi
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        grep -Fxq "$name" <<< "$profiles" && continue
+        runs=$(_bk_s3_ls_dirs "s3://${bucket}/cipi/${name}/" 2>"$errf") || true
+        if [[ -s "$errf" ]]; then
+            _BK_PRUNE_ERRORS="${_BK_PRUNE_ERRORS:-}${_BK_PRUNE_ERRORS:+; }cipi/${name}: $(paste -sd' ' "$errf")"
+            : > "$errf"; continue
+        fi
+        while IFS= read -r ts; do
+            [[ -n "$ts" ]] || continue
+            _orphan_old "$ts" || continue
+            if [[ "$dry" == true ]]; then echo -e "  ${DIM}would delete${NC} s3 cipi/${name}/${ts} (orphaned)"; continue; fi
+            local rm_err
+            if rm_err=$(_aws_s3 rm "s3://${bucket}/cipi/${name}/${ts}/" --recursive 2>&1 >/dev/null); then
+                step "  Deleted S3:    cipi/${name}/${ts} (orphaned)"
+            else
+                _BK_PRUNE_ERRORS="${_BK_PRUNE_ERRORS:-}${_BK_PRUNE_ERRORS:+; }cipi/${name}/${ts}: delete failed"
+                error "  S3 delete failed: cipi/${name}/${ts} — $(tail -1 <<< "$rm_err")"
+            fi
+        done <<< "$runs"
+    done <<< "$names"
+    rm -f "$errf"
+    unset -f _orphan_old
+    return 0
+}
+
+# After a scheduled run: retention for the profile, orphans, and one alert when
+# either could not do its job — a bucket that is never pruned only shows up on
+# the invoice.
+_bk_retention_after_run() {
+    local p="$1"
+    _BK_PRUNE_ERRORS=""
+    _bk_prune_profile "$p" false || true
+    _bk_prune_orphans false || true
+    [[ -z "$_BK_PRUNE_ERRORS" ]] && return 0
+    log_action "BACKUP PRUNE ERROR: profile=${p} ${_BK_PRUNE_ERRORS}"
+    cipi_notify \
+        "Cipi backup retention failed: profile ${p} on $(hostname)" \
+        "Old backups could not be deleted, so they keep accumulating.\n\nServer: $(hostname)\nProfile: ${p}\nProblem: ${_BK_PRUNE_ERRORS}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nPreview what should go: cipi backup prune --dry-run" \
+        backup_fail
 }
 
 # Pre-5.1 layout: s3://<bucket>/cipi/<app>/<ts>/ plus predeploy dumps in

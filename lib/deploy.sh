@@ -90,8 +90,44 @@ deploy_command() {
     elif [[ "${ARG_webhook:-}" == "true" ]];         then _deploy_webhook "$app"
     elif [[ "${ARG_unlock:-}" == "true" ]];          then _deploy_unlock "$app"
     elif [[ -n "${ARG_trust_host:-}" ]];             then _deploy_trust_host "$app" "${ARG_trust_host}"
+    elif [[ "${ARG_audit:-}" == "true" ]];           then _deploy_audit_show "$app"
     else _deploy_run "$app"
     fi
+}
+
+# cipi deploy <app> --audit [--days=90] [--json] — this app's records from the
+# deploy audit ledger (lib/cipi-deploy-audit.sh).
+_deploy_audit_show() {
+    local app="$1" ledger="${CIPI_LOG}/deploys.jsonl" days="${ARG_days:-90}" since
+    [[ "$days" =~ ^[0-9]{1,4}$ ]] || { error "--days must be a number"; exit 1; }
+    if [[ ! -f "$ledger" ]]; then
+        warn "No deploy audit ledger yet (${ledger}) — it is written from the first deploy after cipi self-update"
+        return 0
+    fi
+    since=$(date -u -d "-${days} days" '+%Y-%m-%dT%H:%M:%SZ')
+    if [[ "${ARG_json:-}" == "true" ]]; then
+        jq -c --arg a "$app" --arg s "$since" 'select(.app == $a and .ts >= $s)' "$ledger" | jq -s .
+        return 0
+    fi
+    echo -e "\n${BOLD}Deploy audit — ${app}${NC} ${DIM}(last ${days} days, ${ledger})${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    local rows
+    rows=$(jq -r --arg a "$app" --arg s "$since" 'select(.app == $a and .ts >= $s) | [
+        .ts, .event, (.release // "-"), ((.commit // "")[0:10] | if . == "" then "-" else . end),
+        (.origin + (if (.trigger // "") != "" then "/" + .trigger else "" end)),
+        (if (.operator // "") != "" then .operator else "-" end),
+        (if (.ip // "") != "" then .ip else "-" end),
+        ([.claimed // {} | to_entries[] | "\(.key)=\(.value)"] | join(" "))
+    ] | @tsv' "$ledger" 2>/dev/null)
+    if [[ -z "$rows" ]]; then
+        echo -e "  ${DIM}No records${NC}\n"; return 0
+    fi
+    printf "  ${BOLD}%-20s %-9s %-7s %-10s %-20s %-10s %-15s %s${NC}\n" "TIME (UTC)" "EVENT" "RELEASE" "COMMIT" "ORIGIN" "OPERATOR" "IP" "CLAIMED"
+    local ts ev rel sha org op ip cl
+    while IFS=$'\t' read -r ts ev rel sha org op ip cl; do
+        printf "  %-20s %-9s %-7s %-10s %-20s %-10s %-15s ${DIM}%s${NC}\n" "${ts/T/ }" "$ev" "$rel" "$sha" "$org" "$op" "$ip" "$cl"
+    done <<< "$rows"
+    echo ""
 }
 
 # Pre-deploy DB snapshot (root/vault only). Opt-in via apps.json or --snapshot.
@@ -183,7 +219,9 @@ _deploy_run() {
     local rc=0 had_e=0
     [[ $- == *e* ]] && had_e=1
     set +e
-    sudo -u "$app" bash -c "cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep deploy -f ${df} 2>&1" \
+    # CIPI_DEPLOY_TRIGGER sits in the environment of this root sudo process,
+    # where cipi-deploy-audit reads it back to tell a CLI deploy from the rest.
+    CIPI_DEPLOY_TRIGGER=cli sudo -u "$app" bash -c "cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep deploy -f ${df} 2>&1" \
         | deploy_log_tee "$lf"
     rc=${PIPESTATUS[0]}
     [[ $had_e -eq 1 ]] && set -e
@@ -340,7 +378,7 @@ _deploy_auto_rollback() {
     local rrc=0 had_e=0
     [[ $- == *e* ]] && had_e=1
     set +e
-    sudo -u "$app" bash -c "cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep rollback -f ${home}/.deployer/deploy.php 2>&1" \
+    CIPI_DEPLOY_TRIGGER=auto-rollback sudo -u "$app" bash -c "cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep rollback -f ${home}/.deployer/deploy.php 2>&1" \
         | deploy_log_tee "$lf"
     rrc=${PIPESTATUS[0]}
     [[ $had_e -eq 1 ]] && set -e
@@ -522,7 +560,7 @@ _deploy_rollback() {
     local rc=0 had_e=0
     [[ $- == *e* ]] && had_e=1
     set +e
-    sudo -u "$app" bash -c "cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep rollback -f ${home}/.deployer/deploy.php 2>&1" \
+    CIPI_DEPLOY_TRIGGER=rollback sudo -u "$app" bash -c "cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep rollback -f ${home}/.deployer/deploy.php 2>&1" \
         | deploy_log_tee "$lf"
     rc=${PIPESTATUS[0]}
     [[ $had_e -eq 1 ]] && set -e
@@ -733,6 +771,10 @@ _deploy_webhook() {
         echo "  Origin / CodeCommit: no per-repo HTTP webhook — run: cipi deploy ${app}"
     fi
     echo ""
-    echo "  Requires: composer require cipi/agent"
+    if [[ "$(app_get "$app" runtime)" == "node" ]]; then
+        echo "  Verified by Cipi itself (no cipi/agent needed for Node apps)."
+    else
+        echo "  Requires: composer require cipi/agent"
+    fi
     echo ""
 }

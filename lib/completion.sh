@@ -43,8 +43,8 @@ _cipi_complete() {
         words=("${COMP_WORDS[@]}"); cword=$COMP_CWORD
     fi
 
-    local commands="status version self-update service app alias domains www redirect proxy auth basicauth deploy worker schedule health monitor db search ssl php package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh smtp notifications reset completion help"
-    local topics="app domains www redirect proxy deploy worker schedule health monitor db search service ssl php package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui smtp notifications reset server completion all"
+    local commands="status version self-update service app node alias domains www redirect proxy auth basicauth deploy worker schedule health monitor db search ssl php package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh smtp notifications reset completion help"
+    local topics="app node domains www redirect proxy deploy worker schedule health monitor db search service ssl php package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui smtp notifications reset server completion all"
 
     # skip a leading path/wrapper (e.g. `sudo cipi`, `/usr/local/bin/cipi`)
     local start=1 j
@@ -100,7 +100,7 @@ _cipi_complete() {
             case $pos in
                 1) sub="create list show edit convert clone reverb limits delete suspend unsuspend env logs tinker artisan run deploy-config reset-password reset-db-password fix-permissions" ;;
                 2) case "$w1" in
-                       create) sub="--custom --octane --engine=" ;;
+                       create) sub="--custom --octane --engine= --node= --framework= --node-version= --build= --start= --output= --health-path=" ;;
                        reverb) sub="enable disable status" ;;
                        run)    sub="--commands" ;;
                        list)   ;;
@@ -159,7 +159,7 @@ _cipi_complete() {
 
         deploy)
             if [[ $pos -eq 1 ]]; then sub="$(_cipi_apps)"
-            else sub="--snapshot --rollback --releases --log --key --webhook --unlock --trust-host= --rollback-on-unhealthy"; fi ;;
+            else sub="--snapshot --rollback --releases --log --key --webhook --unlock --trust-host= --rollback-on-unhealthy --audit --days= --json"; fi ;;
 
         worker)
             case $pos in
@@ -187,6 +187,16 @@ _cipi_complete() {
                        install|uninstall|default|upgrade) sub="mariadb pgsql" ;;
                    esac ;;
                 3) case "$w1" in upgrade) sub="--yes" ;; esac ;;
+            esac ;;
+
+        node)
+            case $pos in
+                1) sub="install default list upgrade remove status restart logs" ;;
+                2) case "$w1" in
+                       install|upgrade|remove) sub="22 24" ;;
+                       default)                sub="22 24 system" ;;
+                       status|restart|logs)    sub="$(_cipi_apps)" ;;
+                   esac ;;
             esac ;;
 
         search)

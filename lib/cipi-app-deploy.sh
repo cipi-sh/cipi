@@ -9,6 +9,9 @@
 # Raw Deployer output alone had no dates and no release markers, so a deploy
 # that failed overnight could not be reconstructed afterwards.
 #
+# Every run is also recorded in the root-owned deploy audit ledger by the
+# Deployer recipe itself (cipi-deploy-audit), like any other deploy.
+#
 # Usage: cipi-app-deploy <app> <php_version> [trigger]
 #############################################
 set -uo pipefail
@@ -29,6 +32,39 @@ fi
 HOME_DIR="/home/${APP}"
 DEPLOY_FILE="${HOME_DIR}/.deployer/deploy.php"
 LOG="${HOME_DIR}/logs/deploy.log"
+
+# The cron moves ~/.deploy-trigger here before calling us. Whoever wrote it
+# (the Git webhook endpoint of cipi/agent, its MCP deploy tool, …) may say who
+# asked for the deploy, as JSON or as KEY=VALUE lines:
+#   {"source":"mcp","actor":"jane@example.com","ip":"203.0.113.9","ref":"main","request_id":"…"}
+# These are claims from the app's own code, not facts: they are exported for
+# cipi-deploy-audit, which records them under "claimed", next to what root
+# established on its own. An empty or unreadable file is just a plain trigger.
+TRIGGER_META="${HOME_DIR}/.deploy-trigger.run"
+if [[ -f "$TRIGGER_META" && ! -L "$TRIGGER_META" ]]; then
+    meta=$(head -c 4096 "$TRIGGER_META" 2>/dev/null || true)
+    rm -f "$TRIGGER_META" 2>/dev/null || true
+    _meta_get() {
+        local k="$1" v=""
+        if [[ "$meta" =~ ^[[:space:]]*\{ ]] && command -v jq >/dev/null 2>&1; then
+            v=$(jq -r --arg k "$k" '.[$k] // empty | tostring' <<< "$meta" 2>/dev/null || true)
+        else
+            v=$(sed -n "s/^[[:space:]]*${k}[[:space:]]*=[[:space:]]*//p" <<< "$meta" | head -1)
+        fi
+        printf '%s' "$v" | tr -cd 'A-Za-z0-9._@:/+=, -' | cut -c1-128
+    }
+    m_source=$(_meta_get source)
+    [[ -n "$m_source" ]] && export CIPI_DEPLOY_SOURCE="$m_source"
+    m_val=$(_meta_get actor);      [[ -n "$m_val" ]] && export CIPI_DEPLOY_ACTOR="$m_val"
+    m_val=$(_meta_get ip);         [[ -n "$m_val" ]] && export CIPI_DEPLOY_IP="$m_val"
+    m_val=$(_meta_get ref);        [[ -n "$m_val" ]] && export CIPI_DEPLOY_REF="$m_val"
+    m_val=$(_meta_get request_id); [[ -n "$m_val" ]] && export CIPI_DEPLOY_REQUEST_ID="$m_val"
+    # A recognizable source names the trigger in the deploy log (trigger=mcp).
+    m_source=$(printf '%s' "$m_source" | tr '[:upper:]' '[:lower:]')
+    [[ "$m_source" =~ ^[a-z-]{1,20}$ ]] && TRIGGER="$m_source"
+    unset -f _meta_get
+fi
+export CIPI_DEPLOY_TRIGGER="$TRIGGER"
 
 [[ -f "$DEPLOY_FILE" ]] || { echo "cipi-app-deploy: ${DEPLOY_FILE} not found" >&2; exit 2; }
 mkdir -p "${HOME_DIR}/logs" 2>/dev/null || true

@@ -184,6 +184,25 @@ deployer_major_version() {
     echo "${v%%.*}"
 }
 
+# Append the deploy-audit hooks (lib/deployer/audit-*.php) to an app's
+# deploy.php unless they are already there. Returns 0 when present or added.
+# $1=app $2=custom (true|false; default: read from apps.json)
+deployer_audit_ensure_hook() {
+    local app="$1" custom="${2:-}" df tpl
+    df="/home/${app}/.deployer/deploy.php"
+    [[ -f "$df" ]] || return 1
+    grep -q 'cipi:deploy-audit' "$df" 2>/dev/null && return 0
+    [[ -n "$custom" ]] || custom=$(app_get "$app" custom 2>/dev/null || echo false)
+    tpl="${CIPI_LIB}/deployer/audit-releases.php"
+    [[ "$custom" == "true" ]] && tpl="${CIPI_LIB}/deployer/audit-custom.php"
+    [[ -f "$tpl" ]] || return 1
+    # A deploy.php closed with "?>" would print the hook instead of running it.
+    grep -qE '^[[:space:]]*\?>[[:space:]]*$' "$df" && return 1
+    sed "s|__CIPI_APP_USER__|${app}|g" "$tpl" >> "$df" || return 1
+    chown "${app}:${app}" "$df" 2>/dev/null || true
+    return 0
+}
+
 app_exists() {
     [[ -f "${CIPI_CONFIG}/apps.json" ]] && vault_read apps.json | jq -e --arg a "$1" '.[$a]' &>/dev/null
 }
@@ -217,7 +236,8 @@ _update_apps_public() {
             basic_auth, www_redirect, redirect, redirects, proxies, force_https, custom, docroot, engine,
             octane, octane_port, reverb, reverb_port, horizon, schedule, node_build,
             cloned_from, predeploy_snapshot, limits, ini, health_url, health_expect,
-            ssl_dns_provider, backup_profiles, search
+            ssl_dns_provider, backup_profiles, search,
+            runtime, node_mode, node_version, node_framework, node_output, node_start, node_health, node_ports
         })
     ' > "${CIPI_CONFIG}/apps-public.json" 2>/dev/null || return 0
     _cipi_safe_chmod 640 "${CIPI_CONFIG}/apps-public.json"
@@ -413,9 +433,16 @@ _sync_node_build_script() {
         rm -f "${home}/.deployer/node-build.sh"
         return 0
     fi
+    # An app with its own Node major (Node apps, Laravel apps pinned with
+    # --node-version) builds with it; otherwise /usr/local/bin — where
+    # `cipi node default` links the server default — comes before /usr/bin.
+    local node_ver path_line='export PATH="/usr/local/bin:$PATH"'
+    node_ver=$(app_get "$app" node_version)
+    [[ "$node_ver" =~ ^[0-9]{2}$ ]] && path_line="export PATH=\"/opt/cipi/node/${node_ver}/bin:/usr/local/bin:\$PATH\""
     cat > "${home}/.deployer/node-build.sh" <<EOF
 #!/bin/bash
 set -euo pipefail
+${path_line}
 cd "\${1:-\$(pwd)}"
 ${cmd}
 EOF

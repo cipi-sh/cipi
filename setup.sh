@@ -816,7 +816,9 @@ install_deployer() {
 install_nodejs() {
     step_msg "Installing Node.js..."
 
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - &>/dev/null
+    # Node 22 LTS (20 reached end of life in April 2026). Per-app and server-wide
+    # majors from nodejs.org are managed later with `cipi node`.
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - &>/dev/null
     _cipi_apt_install -y -qq nodejs
 
     echo -e "${GREEN}✓ Node.js $(node -v 2>/dev/null)${NC}"
@@ -885,6 +887,7 @@ install_cipi() {
     cp cipi-install/lib/*.sh /opt/cipi/lib/
     chmod 700 /opt/cipi/lib/*.sh
     cp cipi-install/lib/gui-reset-admin.php /opt/cipi/lib/ 2>/dev/null || true
+    cp cipi-install/lib/cipi-webhook.php /opt/cipi/lib/ 2>/dev/null || true
     chmod 644 /opt/cipi/lib/gui-reset-admin.php 2>/dev/null || true
 
     # Deployer templates (per app type: laravel, custom)
@@ -921,6 +924,18 @@ install_cipi() {
     chmod 755 /usr/local/bin/cipi-app-deploy
     cp cipi-install/lib/cipi-app-post-deploy.sh /usr/local/bin/cipi-app-post-deploy
     chmod 755 /usr/local/bin/cipi-app-post-deploy
+    # Deploy audit ledger writer — called (root, via per-app sudoers) by every
+    # app's Deployer recipe, whatever started the deploy
+    cp cipi-install/lib/cipi-deploy-audit.sh /usr/local/bin/cipi-deploy-audit
+    chmod 700 /usr/local/bin/cipi-deploy-audit
+    # Node frontend apps: blue/green switch (root), process launcher (app user),
+    # webhook receiver for apps without cipi/agent
+    cp cipi-install/lib/cipi-node-switch.sh /usr/local/bin/cipi-node-switch
+    chmod 700 /usr/local/bin/cipi-node-switch
+    cp cipi-install/lib/cipi-node-run.sh /usr/local/bin/cipi-node-run
+    chmod 755 /usr/local/bin/cipi-node-run
+    install -d -m 755 /usr/local/share/cipi
+    install -m 644 cipi-install/lib/cipi-webhook.php /usr/local/share/cipi/webhook.php
 
     cp cipi-install/lib/cipi-read-app-logs.sh /usr/local/bin/cipi-read-app-logs
     chmod 755 /usr/local/bin/cipi-read-app-logs
@@ -933,6 +948,10 @@ install_cipi() {
     # Integrity baselines live outside /home/<app>, root-only: the app user must
     # not be able to rewrite the manifest it is checked against.
     install -d -m 700 -o root -g root /var/lib/cipi/manifests
+    # Deploy audit ledger starts now: `cipi compliance` expects every release
+    # published after this moment to have a ledger record.
+    date -u '+%Y-%m-%dT%H:%M:%SZ' > /var/lib/cipi/deploy-audit-since
+    chmod 600 /var/lib/cipi/deploy-audit-since
     cp cipi-install/lib/cipi-crowdsec-rescue.py /usr/local/bin/cipi-crowdsec-rescue
     chmod 700 /usr/local/bin/cipi-crowdsec-rescue
     cp cipi-install/lib/cipi-crowdsec-rescue-hole.sh /usr/local/bin/cipi-crowdsec-rescue-hole
@@ -962,7 +981,7 @@ EOF
     # Templates (if any)
     cp cipi-install/templates/* /opt/cipi/templates/ 2>/dev/null || true
 
-    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /usr/local/bin/cipi-auth-notify /usr/local/bin/cipi-app-notify /usr/local/bin/cipi-app-deploy /usr/local/bin/cipi-app-post-deploy /usr/local/bin/cipi-read-app-logs /usr/local/bin/cipi-health-check /usr/local/bin/cipi-monitor /usr/local/bin/cipi-scan-manifest /usr/local/bin/cipi-crowdsec-rescue /usr/local/bin/cipi-crowdsec-rescue-hole /opt/cipi
+    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /usr/local/bin/cipi-auth-notify /usr/local/bin/cipi-app-notify /usr/local/bin/cipi-app-deploy /usr/local/bin/cipi-app-post-deploy /usr/local/bin/cipi-deploy-audit /usr/local/bin/cipi-node-switch /usr/local/bin/cipi-node-run /usr/local/bin/cipi-read-app-logs /usr/local/bin/cipi-health-check /usr/local/bin/cipi-monitor /usr/local/bin/cipi-scan-manifest /usr/local/bin/cipi-crowdsec-rescue /usr/local/bin/cipi-crowdsec-rescue-hole /opt/cipi
 
     # Shell tab-completion — installed for every shell, no activation needed:
     # /etc/bash_completion.d/cipi, the zsh vendor file, and an /etc/profile.d

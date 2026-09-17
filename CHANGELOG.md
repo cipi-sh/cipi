@@ -4,6 +4,95 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.4.0] — 2026-09-17
+
+### Added — Deploy audit ledger (every deploy, whatever started it)
+
+Until now only `cipi deploy` and the webhook wrapper wrote deploy banners, into a log the app user owns. A deploy started any other way left no record: cipi/agent running `dep` inside the app, the panel, or `dep deploy` typed over SSH. The one thing all of these share is the app's Deployer recipe, so the record is written from there.
+
+- **`/usr/local/bin/cipi-deploy-audit`** (root, reached through one per-app sudoers rule) is called by the recipe after `deploy:symlink` (published), on `deploy:failed` (failed) and after `rollback`. Custom apps: after `deploy` and on its failure. The hook runs with `runLocally`, so the process chain of whoever ran `dep` stays visible. A missing helper or rule never fails a deploy.
+- **Root does not take the caller's word for anything.** From `/proc` it reads the release `current` points at, its commit (Deployer's `REVISION`, or `htdocs` HEAD for custom apps) and Deployer's own `releases_log` entry. From the process chain it reads the **origin**: `cipi-cli` (trigger `cli`, `rollback`, `auto-rollback`, `sync`), `panel` (`cipi deploy` started by www-data), `webhook`, `app-web` (PHP-FPM), `app-queue`, `ssh`, `cron` or `root-shell`. It also records the **operator** (audit login uid, set by PAM and not changeable by the user), the SSH client **IP** and the chain itself.
+- **Claims are kept apart.** What only the app can say goes under `claimed`, e.g. who pressed deploy in an MCP client. `cipi-app-deploy` now reads it from the trigger file: the cron moves `~/.deploy-trigger` to `~/.deploy-trigger.run` instead of deleting it, and the file may carry `source`, `actor`, `ip`, `ref` and `request_id` as JSON or `KEY=VALUE`. Code that runs `dep` in-process can set the same `CIPI_DEPLOY_*` environment variables. A known `source` also names the trigger in `deploy.log` (`trigger=mcp`).
+- **`/var/log/cipi/deploys.jsonl`**, root-only, one JSON line per event. Each line carries its sequence number and the SHA-256 of the line before it, and is also sent to syslog (`cipi-deploy`), so forwarding keeps a copy off the server. Repeated calls for a release already recorded are ignored.
+- **`cipi deploy <app> --audit [--days=90] [--json]`** — the app's records.
+- **`cipi compliance deploys`** now uses the ledger. It **fails** when the hash chain is broken. It **warns** when an app's `deploy.php` lacks the hook (edited by hand), when an app's sudoers lacks the rule, or when Deployer's `releases_log` has a release the ledger never saw. Only releases since auditing began count (`/var/lib/cipi/deploy-audit-since`). Evidence: `deploy-audit.jsonl`, `deploy-audit.tsv`, `deploy-audit-chain.txt`, `deploy-audit-hooks.txt`, `deploy-audit-unaudited.tsv`, plus the existing `deploys.tsv` from the banners. Without the ledger (not yet updated) the control warns instead of passing.
+- **Honest about gaps.** The chain proves that nothing before the newest record was changed or removed. Root can still rewrite the newest records or the whole file, and the report says so: the syslog copy forwarded off the server is the independent one. The ledger records deploys, not every file change: an app user can still edit `current/` over SFTP (covered by `cipi scan` integrity) or remove the hook from their own `deploy.php` (flagged by compliance and cross-checked against `releases_log`).
+
+### Added — Node frontend apps (`cipi app create --node`) and Node runtimes (`cipi node`)
+
+Until now a React/Vue SPA could only be a `--custom` app serving a build committed to git. It had no build step, and client-side routes returned 404 on reload. SSR frameworks had no way to run at all. Node apps are a new app type with the same lifecycle as Laravel ones: releases, rollback, webhook, SSL, basic auth, redirects/proxies, audit ledger.
+
+- **`cipi app create --node=spa|static|ssr [--framework=next|nuxt|sveltekit|astro|remix|vite]`** with `--node-version=22|24`, `--build=`, `--start=` (SSR), `--output=` (spa/static) and `--health-path=` (SSR). Presets fill in each framework's defaults; explicit flags win. Next.js starts with `next start -H 127.0.0.1`.
+  - **spa**: nginx serves `current/<output>`, unknown paths fall back to `/index.html`, `assets/ _astro/ _nuxt/ _app/immutable/ static/` are `immutable`, and `*.html` is `no-cache`.
+  - **static**: the same without the fallback (`$uri.html`, then a real 404 with `/404.html`).
+  - **ssr**: nginx proxies to an upstream (`/etc/nginx/conf.d/cipi-node-<app>.conf`) with WebSocket upgrade and `X-Forwarded-*` headers.
+- **Blue/green deploys** (`/usr/local/bin/cipi-node-switch`, root, one sudoers rule per app). The recipe calls it before `deploy:symlink`:
+  - the release starts on the idle Supervisor program (`<app>-node-blue` / `<app>-node-green`, each on its own localhost port in 3100–3999, in `/etc/supervisor/conf.d/<app>-node.conf` so `cipi-worker restart` cannot bounce both);
+  - it must answer below 500 on the health path within 60 s;
+  - then the upstream moves (`nginx -t`, reload) and the old slot stops after a short drain.
+  - A process that exits or never answers is stopped, the old slot keeps serving and the deploy fails before `current` moves. `dep rollback` switches back the same way.
+  - Only the release path comes from the caller, and it must be a release of that app. Ports, start command, Node version and health path come from `/var/lib/cipi/node/<app>.json`, which only root writes.
+- **`cipi-node-run`** (app user) reads `.env` as `KEY=VALUE` data and never sources it. `PORT`/`HOST` cannot be overridden, `HOST`, `HOSTNAME` and `NITRO_HOST` are forced to 127.0.0.1, and the start command is executed as argv with no shell. Start commands are limited to a Node runner (`node npm npx pnpm yarn bun`) plus plain arguments.
+- **Recipe** (`lib/deployer/node.php`): installs dependencies from the lockfile (`npm ci`, `pnpm install --frozen-lockfile`, `yarn install --immutable|--frozen-lockfile`, `bun install --frozen-lockfile`; `npm install` with a warning when there is no lockfile). It then builds with `NODE_ENV=production` and telemetry off, and for spa/static checks that `<output>/index.html` exists. `shared/.env` is a shared file, so frameworks read it at build time and SSR servers at runtime.
+- **Node runtimes** — `cipi node install|list|upgrade [--restart]|remove <major>`. Official nodejs.org builds (x64/arm64) are checked against `SHASUMS256.txt`, unpacked to `/opt/cipi/node/v<version>` and exposed as `/opt/cipi/node/<major>` through an atomic symlink, with corepack enabled for pnpm/yarn. Even (LTS) majors only; a major in use cannot be removed. The NodeSource Node 20 used by Laravel asset builds is untouched. `cipi yml` `deploy.post` npm/node steps use the app's major (from `~/.deployer/node.json`).
+- **Webhooks without cipi/agent** — `/cipi/webhook` goes to `/usr/local/share/cipi/webhook.php` through an on-demand PHP-FPM pool running as the app user (`open_basedir` = home + receiver, `exec`-family functions disabled, 2 MB body, POST only, never behind basic auth). It verifies GitHub and Bitbucket HMAC-SHA256 and GitLab/Azure tokens, deploys only pushes to the app's branch, and writes the pusher, delivery id and commit into the trigger file, which the audit ledger records under `claimed`. Git providers get the webhook registered automatically, and `cipi git refresh` covers Node apps.
+- **Server-wide Node for Laravel apps too** — `cipi node default <major>|system`:
+  - **`<major>`** installs the major if needed and links `node npm npx corepack pnpm pnpx yarn yarnpkg` from `/opt/cipi/node/<major>/bin` into `/usr/local/bin`, which comes before NodeSource's `/usr/bin` on the PATH of SSH sessions (Deployer), sudo (`secure_path`, `cipi app run`) and app `.bashrc`. Laravel `--node-build` asset builds, `cipi app run <app> npm …` and `cipi.yml` `deploy.post` all use it from their next run.
+  - The links point at the major, not at a patch, so `cipi node upgrade` updates every app on the default.
+  - **`system`** removes only Cipi's links and falls back to the NodeSource package, which is never removed.
+  - A file in `/usr/local/bin` that Cipi did not create (a global pnpm, a hand-installed node) is left alone and named in a warning.
+  - `cipi node list` marks the default. New Node apps start on it unless `--node-version` says otherwise. The default major cannot be removed. Changing it sends a `node_default` notification.
+- **Pin one Laravel app** — `cipi app edit <app> --node-version=24` keeps that app on its own major whatever the default is; `--node-version=default` follows the server again. Its `node-build.sh` exports that major's PATH, `cipi app run` and `deploy.post` use it too, and `cipi app show` says whether the app is pinned or on the server default. `cipi.yml` `deploy.post` from cron now has `/usr/local/bin` on PATH.
+- **Per-app commands**: `cipi node status|restart|logs <app>` (restart is blue/green, so no downtime). `cipi app edit <app>` accepts `--build= --start= --output= --health-path= --node-version= --node=spa|static|ssr`. `cipi app env` works for Node apps. `app show`/`app list` show the mode and slots, and `app delete` stops and removes both slots, the upstream and the state.
+- **Not yet**: `cipi sync` skips Node apps with a message, and `cipi app clone` refuses them, as it does custom apps. Databases are not created with the app: use `cipi.yml` `databases:` or `cipi db`.
+
+### Added — `cipi.yml`: www redirect, basic auth, redirects, proxies, search
+
+- **`app.www: to-root | from-root | none`.** The other name of the pair must be in `app.aliases` when both are declared, and a declared alias list that drops a name the current redirect needs is refused at plan time instead of failing halfway through the apply. Clearing runs before the aliases are reconciled; setting runs after.
+- **`app.basic_auth`** — `users:` as names or `{name, password_hash}`, or `basic_auth: false`. **No password in the repository:** a name-only user keeps the password already set on the server (`cipi basicauth enable <app> --user=NAME`); a user the server does not know blocks the plan. `password_hash` accepts only bcrypt (cost 10+) or SHA-512 crypt; apr1/MD5 is refused. Server users not listed are removed. `cipi yml generate` emits user names only, never hashes.
+- **`redirect`** (`to`, `code`, `keep_path`, `enabled`; `enabled: false` alone removes it), **`redirects[]`** (`from`, `to`, `code`, `keep_path`) and **`proxies[]`** (`prefix`, `upstream`, `strip_prefix`, `preserve_host`, `timeout`, `buffering`). A declared list replaces the current one. Every rule goes through the same validation as `cipi redirect` / `cipi proxy` (loops, collisions, reserved paths, Reverb, charset), checked against the whole declared set, so a redirect and a proxy on the same prefix collide in the plan. The routes apply as one change: one vhost regeneration, one `nginx -t`, reverted as a whole if nginx refuses it.
+- **Stricter than the CLI for proxies**, because anyone who can commit controls the file: no `--force`, so Cipi's own loopback ports (MariaDB, PostgreSQL, Valkey, SSH, Meilisearch, nginx, another app's Octane/Reverb) are always refused. Link-local and `0.0.0.0/8` upstreams, cloud metadata included, are refused too, and resolved hostnames are checked as well as literal IPs.
+- **`node:`** (Node apps): `framework`, `mode`, `version`, `build`, `start`, `output`, `health_path`, with the same presets and validation as `cipi app create --node`. **It is applied by the deploy itself, not by `cipi yml apply`.** Right after the checkout, the recipe's `node:config` runs `cipi yml node-sync <app> <release>` (root). That command reads the section from *that release*, updates apps.json, the build script, the blue/green state and `~/.deployer/node.json`, and the recipe re-reads them. The commit that changes the build or start command is therefore built and started with it.
+  - A mode or output change moves nginx only after `current` has moved (`node:finalize`), so nginx never serves a build that does not exist yet. Going from `ssr` to `spa`/`static` retires the slots; going to `ssr` allocates the ports before the switch.
+  - A Node major that is not installed fails the deploy before the build: installing runtimes stays with root (`cipi node install`).
+  - An invalid file leaves the server's settings in place, and the usual `yml_fail` alert follows from the post-deploy apply.
+  - Only with `cipi yml auto <app> on`, which is also what writes the sudo rule for `node-sync`: without it the recipe does not even try. `cipi yml plan` lists the changes the next deploy will make. `node:` on a Laravel app blocks the plan.
+- **`search: true | false`** — Meilisearch for Laravel Scout, the same as `cipi search enable|disable <app>`: a key scoped to `<app>-*` and the `SCOUT_*` / `MEILISEARCH_*` variables in `.env`. Installing the engine stays with root: the plan is blocked until `cipi search install` has run and Meilisearch is up. `false` never drops indexes, which only root can purge (`--purge-indexes`). Refused on custom apps.
+- **`deploy:` recipe options** — the same set as `cipi app deploy-config`, from the repository: `keep_releases` (1–20), the artisan hooks (`migrate`, `optimize`, `storage_link`, `queue_restart`, `horizon_terminate`), `extra_artisan` (validated, `tinker` refused) and `snapshot` (the pre-deploy database snapshot). Only declared keys are reconciled; a change regenerates `deploy.php` once. Refused on custom apps (no recipe); on Node apps only `keep_releases` and `snapshot` apply — the artisan hooks block the plan.
+- **`app.limits`** — `memory_limit`, `fpm_max_children`, `octane_workers`, `worker_procs`, the same as `cipi app limits` and reapplied through it (FPM pool, Octane and worker programs regenerated). The bounds are the CLI's, but a value outside them **blocks the plan instead of being clamped**: nobody is watching an unattended apply.
+- **`ssl.force_https: true`** — the HTTP → HTTPS redirect, the same as `cipi ssl force`. The plan is blocked until the certificate exists (`cipi ssl install` stays with root). It can only ever be turned **on** from the file: no cipi command disables the redirect, so `false` against an app already forced is refused rather than silently ignored.
+- **`env.required`** — names (never values) the app's `.env` must carry. A missing or empty variable blocks the plan, so code that expects `STRIPE_KEY` is never deployed against a server that does not have it. Purely a gate: nothing is written.
+- **`crons:`** — scheduled commands through the same allowlisted runners as `deploy.post` (`artisan`, `npm`, `composer`, `php`, `node`, …; no shell, no pipes, `%` impossible by charset), with `every: 30m` or five cron fields, the same grammar as backup profiles. The declared list replaces only the crontab lines the file manages (tagged `# cipi-yml`); the rest of the app user's crontab — the Laravel scheduler line included — is never touched. `artisan` entries on a non-Laravel app block the plan.
+- `cipi yml generate` and `cipi yml example` cover the new keys.
+- `lib/routes.sh`: validation moved into `_routes_build_app_redirect`, `_routes_build_redirect` and `_routes_build_proxy`, shared by the CLI and `cipi.yml`. CLI behaviour is unchanged.
+
+### Fixed
+
+- **Old backups were never deleted** (e.g. a `1w` profile still holding archives from August). Three causes, all fixed:
+  - **The pre-5.1 layout was orphaned.** 5.1.0 turned the nightly job into the `default` profile (`s3://<bucket>/cipi/default/<ts>/`) and removed the old `cipi backup prune --weeks=N` line. That line was the only thing pruning `s3://<bucket>/cipi/<app>/<ts>/`, so every archive written before the upgrade stayed forever. The same happened to the archives of a removed profile, and to the database dumps in `/var/log/cipi/backups/`, where `cipi deploy --snapshot` still writes pre-deploy snapshots.
+    - Every backup run, and `cipi backup prune`, now also prunes those orphans (local and S3). They are kept as long as the **longest** age-based retention of any profile, so nothing goes sooner than a current profile would keep it. With count-only retention (`keep: N`) there is no age to go by, and orphans are left alone. `--dry-run` lists them.
+  - **S3 errors were swallowed.** Retention listed S3 with `2>/dev/null`: a denied `ListBucket`, a wrong endpoint or a missing CLI made it prune nothing, every night, with no sign. An empty prefix is still not an error. Any other listing or delete failure is now logged, sends a "Cipi backup retention failed" alert (`backup_fail`) without failing the backup itself, and makes `cipi backup prune` exit 1 with the reason.
+  - **Cron PATH.** Root's crontab has no `/usr/local/bin`, where the AWS CLI installs; `lib/backup.sh` now adds it.
+- **"Cipi API updated" was sent every night** by the 04:30 soft update, even when Composer changed nothing. `cipi api update` now compares a fingerprint of the locked packages (name, version, dist/source reference) before and after. Only a real change is logged (`API UPDATED: cipi/api A → B`) and notified, with the old and new `cipi/api` versions. Otherwise it prints "already up to date".
+- `cipi yml example` printed `every:: command not found` (an escaped backtick in the template).
+- `cipi.yml` on a custom app: `workers.queues`, `workers.horizon: true` and `schedule: true` produced artisan workers the app cannot run, or stopped the apply halfway. They now block the plan, like `workers.reverb` and `search` already did.
+- `_basicauth_set_user` removed users with a regex, so a user named `a.b` also removed `axb`. It now matches the name exactly, and the temporary file is no longer created world-readable.
+
+### Migration
+
+`lib/migrations/5.4.0.sh`: installs `cipi-deploy-audit`, adds the sudoers rule per app (validated with `visudo`, restored if rejected), appends the audit hooks to each `deploy.php` without touching the rest of the file, switches the trigger cron from `rm` to `mv`, and writes the audit start marker.
+
+**Node 20 → 22.** Node 20 reached end of life in April 2026.
+- **Fresh installs:** `setup.sh` now installs Node 22 from NodeSource.
+- **Existing servers whose Node is still 20** (the NodeSource package, or a `cipi node default 20`): the migration switches them to Node 22 with `cipi node default 22`, which downloads and verifies the official build and links it into `/usr/local/bin` ahead of `/usr/bin`. The NodeSource package is not touched, so `cipi node default system` restores 20. Laravel asset builds, `cipi app run npm` and `deploy.post` use 22 from their next run.
+- **Servers already on another major**, or with no Node at all, are left as they are.
+- **Failed download:** the server stays on 20, the migration says how to retry (`cipi node default 22`) and the update carries on.
+- A `node_default` notification is sent.
+
+Nothing is deployed, reloaded or restarted.
+
+---
+
 ## [5.3.1] — 2026-09-17
 
 ### Added — Compliance evidence (`cipi compliance`)

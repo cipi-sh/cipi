@@ -509,6 +509,10 @@ _sync_create_app() {
     local app="$1" ad="$2" dir="$3" php_ver="$4" domain="$5" branch="$6" repository="$7" dbr="$8" run_deploy="$9"
     local home="/home/${app}"
 
+    if [[ "$(jq -r --arg a "$app" '.[$a].runtime // empty' "${dir}/config/apps.json" 2>/dev/null)" == "node" ]]; then
+        warn "'${app}' is a Node app — sync does not recreate those yet. Here: cipi app create --node=… then cipi deploy ${app}"
+        return 0
+    fi
     echo -e "\n${BOLD}Creating '${app}'...${NC}"
     echo "────────────────────────────────────────────────"
 
@@ -672,7 +676,7 @@ BASH
     fi
     cat <<CRON | crontab -u "$app" -
 ${schedule_block}# Cipi deploy trigger
-* * * * * test -f ${home}/.deploy-trigger && rm -f ${home}/.deploy-trigger && /usr/local/bin/cipi-app-deploy ${app} ${php_ver} webhook >/dev/null 2>&1
+* * * * * test -f ${home}/.deploy-trigger && mv -f ${home}/.deploy-trigger ${home}/.deploy-trigger.run && /usr/local/bin/cipi-app-deploy ${app} ${php_ver} webhook >/dev/null 2>&1
 CRON
     # Restore reverb/horizon/octane supervisor extras when conf was empty
     if [[ ! -f "${ad}/supervisor.conf" ]] || [[ ! -s "${ad}/supervisor.conf" ]]; then
@@ -703,6 +707,7 @@ CRON
         if ! grep -q "bin/composer" "${home}/.deployer/deploy.php" 2>/dev/null; then
             sed -i "/set('bin\/php'/a set('bin/composer', '/usr/bin/php${php_ver} /usr/local/bin/composer');" "${home}/.deployer/deploy.php"
         fi
+        deployer_audit_ensure_hook "$app" || true
         chown -R "${app}:${app}" "${home}/.deployer"
         success "Deployer (restored)"
     else
@@ -716,13 +721,14 @@ ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker restart ${app}
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker stop ${app}
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker status ${app}
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-scan-manifest ${app}
+${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-deploy-audit ${app} *
 SUDO
     chmod 440 "/etc/sudoers.d/cipi-${app}"
 
     # 17. Deploy
     if [[ "$run_deploy" == "true" ]]; then
         step "Deploying..."
-        if sudo -u "$app" bash -c "cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php" 2>&1; then
+        if CIPI_DEPLOY_TRIGGER=sync sudo -u "$app" bash -c "cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php" 2>&1; then
             success "Deploy completed"
         else
             warn "Deploy failed — run manually: cipi deploy ${app}"
@@ -742,6 +748,10 @@ _sync_update_app() {
     local app="$1" ad="$2" dir="$3" php_ver="$4" domain="$5" branch="$6" repository="$7" dbr="$8" run_deploy="$9"
     local home="/home/${app}"
 
+    if [[ "$(app_get "$app" runtime)" == "node" ]]; then
+        warn "'${app}' is a Node app — skipped (sync does not handle Node apps yet)"
+        return 0
+    fi
     echo -e "\n${BOLD}Updating '${app}'...${NC}"
     echo "────────────────────────────────────────────────"
 
@@ -867,7 +877,7 @@ _sync_update_app() {
     # 11. Deploy
     if [[ "$run_deploy" == "true" ]]; then
         step "Deploying..."
-        if sudo -u "$app" bash -c "cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php" 2>&1; then
+        if CIPI_DEPLOY_TRIGGER=sync sudo -u "$app" bash -c "cd ${home} && /usr/bin/php${php_ver} /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php" 2>&1; then
             success "Deploy completed"
         else
             warn "Deploy failed — run manually: cipi deploy ${app}"

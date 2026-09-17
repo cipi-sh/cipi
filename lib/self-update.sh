@@ -88,6 +88,7 @@ selfupdate_command() {
     cp "${tmp}/cipi" /usr/local/bin/cipi; chmod 700 /usr/local/bin/cipi
     cp "${tmp}"/lib/*.sh /opt/cipi/lib/; chmod 700 /opt/cipi/lib/*.sh
     cp "${tmp}/lib/gui-reset-admin.php" /opt/cipi/lib/ 2>/dev/null || true
+    cp "${tmp}/lib/cipi-webhook.php" /opt/cipi/lib/ 2>/dev/null || true
     chmod 644 /opt/cipi/lib/gui-reset-admin.php 2>/dev/null || true
     [[ -d "${tmp}/lib/deployer" ]] && cp -r "${tmp}/lib/deployer" /opt/cipi/lib/
     [[ -f "${tmp}/lib/cipi-worker.sh" ]] && cp "${tmp}/lib/cipi-worker.sh" /usr/local/bin/cipi-worker && chmod 700 /usr/local/bin/cipi-worker
@@ -96,6 +97,12 @@ selfupdate_command() {
     [[ -f "${tmp}/lib/cipi-app-notify.sh" ]] && cp "${tmp}/lib/cipi-app-notify.sh" /usr/local/bin/cipi-app-notify && chmod 700 /usr/local/bin/cipi-app-notify
     [[ -f "${tmp}/lib/cipi-app-deploy.sh" ]] && cp "${tmp}/lib/cipi-app-deploy.sh" /usr/local/bin/cipi-app-deploy && chmod 755 /usr/local/bin/cipi-app-deploy
     [[ -f "${tmp}/lib/cipi-app-post-deploy.sh" ]] && cp "${tmp}/lib/cipi-app-post-deploy.sh" /usr/local/bin/cipi-app-post-deploy && chmod 755 /usr/local/bin/cipi-app-post-deploy
+    [[ -f "${tmp}/lib/cipi-deploy-audit.sh" ]] && cp "${tmp}/lib/cipi-deploy-audit.sh" /usr/local/bin/cipi-deploy-audit && chmod 700 /usr/local/bin/cipi-deploy-audit
+    [[ -f "${tmp}/lib/cipi-node-switch.sh" ]] && cp "${tmp}/lib/cipi-node-switch.sh" /usr/local/bin/cipi-node-switch && chmod 700 /usr/local/bin/cipi-node-switch
+    [[ -f "${tmp}/lib/cipi-node-run.sh" ]] && cp "${tmp}/lib/cipi-node-run.sh" /usr/local/bin/cipi-node-run && chmod 755 /usr/local/bin/cipi-node-run
+    if [[ -f "${tmp}/lib/cipi-webhook.php" ]]; then
+        install -d -m 755 /usr/local/share/cipi && install -m 644 "${tmp}/lib/cipi-webhook.php" /usr/local/share/cipi/webhook.php
+    fi
     [[ -f "${tmp}/lib/cipi-health-check.sh" ]] && cp "${tmp}/lib/cipi-health-check.sh" /usr/local/bin/cipi-health-check && chmod 700 /usr/local/bin/cipi-health-check
     # Refresh unconditionally: _mon_ensure_cron only installs the helper when it
     # is missing, so without this the 5.3.0 copy would never be updated again.

@@ -1364,7 +1364,7 @@ git_refresh_app() {
 
     local webhook_url="https://$(domain_url_host "$domain")/cipi/webhook"
     local skip_webhook="true"
-    if [[ "$custom" != "true" && -n "$wt" ]]; then
+    if [[ ( "$custom" != "true" || "$(app_get "$app" runtime 2>/dev/null)" == "node" ) && -n "$wt" ]]; then
         skip_webhook="false"
     fi
 

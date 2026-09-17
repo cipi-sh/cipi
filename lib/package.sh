@@ -150,7 +150,7 @@ _pkg_list() {
     echo -e "  ${CYAN}cipi package install <name>${NC}   ${DIM}/  remove <name>${NC}"
     echo ""
     echo -e "  ${DIM}Already in the base stack: the Imagick PHP extension, Ghostscript and${NC}"
-    echo -e "  ${DIM}fonts-dejavu-core (pulled in as Recommends of php-imagick), Node 20.${NC}"
+    echo -e "  ${DIM}fonts-dejavu-core (pulled in as Recommends of php-imagick), Node 22 (cipi node).${NC}"
     echo ""
 }
 

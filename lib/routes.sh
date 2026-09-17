@@ -134,9 +134,11 @@ _routes_valid_source_path() {
 
 # Refuse paths the vhost already owns or that would break Cipi itself, and
 # paths another rule already occupies. $3 = kind (redirect|proxy); a rule of
-# the same kind on the same path is an update, not a collision.
+# the same kind on the same path is an update, not a collision. $4 = the rule
+# set to check against as {redirects, proxies} (default: what apps.json has),
+# so cipi.yml can validate a whole declared set before any of it is saved.
 _routes_check_path() {
-    local app="$1" path="$2" kind="$3"
+    local app="$1" path="$2" kind="$3" rules="${4:-}"
     if [[ "$path" == "/" ]]; then
         if [[ "$kind" == proxy ]]; then
             error "A proxy on / would replace the whole app — use a prefix such as /api/"
@@ -161,10 +163,11 @@ _routes_check_path() {
     fi
 
     local new_key existing
-    existing=$(vault_read apps.json | jq -r --arg a "$app" --arg k "$kind" --arg id "$path" '
-        ((.[$a].redirects // []) | map(select(($k == "redirect" and .from == $id) | not)) | .[] | "redirect\t\(.from)"),
-        ((.[$a].proxies   // []) | map(select(($k == "proxy"    and .prefix == $id) | not)) | .[] | "proxy\t\(.prefix)")
-    ' 2>/dev/null)
+    [[ -z "$rules" ]] && rules=$(_routes_current_rules "$app")
+    existing=$(jq -r --arg k "$kind" --arg id "$path" '
+        ((.redirects // []) | map(select(($k == "redirect" and .from == $id) | not)) | .[] | "redirect\t\(.from)"),
+        ((.proxies   // []) | map(select(($k == "proxy"    and .prefix == $id) | not)) | .[] | "proxy\t\(.prefix)")
+    ' <<< "$rules" 2>/dev/null)
     [[ -z "$existing" ]] && return 0
     local ekind epath ekey
     while IFS= read -r new_key; do
@@ -179,6 +182,139 @@ _routes_check_path() {
         done <<< "$existing"
     done < <(_routes_rule_keys "$kind" "$path")
     return 0
+}
+
+_routes_current_rules() {
+    vault_read apps.json | jq -c --arg a "$1" '{redirects: (.[$a].redirects // []), proxies: (.[$a].proxies // [])}'
+}
+
+# ── rule builders ─────────────────────────────────────────────
+#
+# Each one validates its input the same way for the CLI and for cipi.yml and
+# prints the normalized rule as JSON. On a refusal it prints the reason with
+# error() and returns 1 — never exits, so a caller can collect every problem.
+
+# $1=app $2=to $3=code $4=keep_path(true|false)
+_routes_build_app_redirect() {
+    local app="$1" to="$2" code="$3" keep="$4"
+    [[ -z "$to" ]] && { error "Missing target URL"; return 1; }
+    _routes_valid_url "$to" || { error "Invalid URL '${to}' — expected http(s)://host[/path]"; return 1; }
+    [[ "$code" =~ ^(301|302|307|308)$ ]] || { error "Redirect code must be 301, 302, 307 or 308"; return 1; }
+    if [[ "$keep" == true && "$to" == *[?#]* ]]; then
+        error "A target with ?query or #fragment cannot keep the request path — use --no-path (keep_path: false)"; return 1
+    fi
+    if _routes_host_is_app "$app" "$(_routes_url_host "$to")"; then
+        error "'$(_routes_url_host "$to")' is served by '${app}' itself — the redirect would loop"; return 1
+    fi
+    jq -nc --arg t "$to" --argjson c "$code" --argjson k "$keep" '{enabled: true, to: $t, code: $c, keep_path: $k}'
+}
+
+# $1=app $2=from $3=to $4=code $5=keep_path $6=rules (see _routes_check_path)
+_routes_build_redirect() {
+    local app="$1" from="$2" to="$3" code="$4" keep="$5" rules="${6:-}"
+    [[ "$from" != /* ]] && from="/${from}"
+    _routes_valid_source_path "$from" || return 1
+    if [[ "$to" == /* ]]; then
+        if ! [[ "$to" =~ $_ROUTES_RE_PATH_QUERY ]] || ! _routes_valid_path "${to%%\?*}"; then
+            error "Invalid target path '${to}'"; return 1
+        fi
+    else
+        _routes_valid_url "$to" || { error "Invalid target '${to}' — a /path or an http(s):// URL"; return 1; }
+    fi
+    [[ "$code" =~ ^(301|302|307|308)$ ]] || { error "Redirect code must be 301, 302, 307 or 308"; return 1; }
+
+    local prefix=false
+    [[ "$from" == */ ]] && prefix=true
+    _routes_check_path "$app" "$from" redirect "$rules" || return 1
+
+    # Same-host target: a relative path, or a URL on one of the app's names.
+    local to_path="" same_host=false
+    if [[ "$to" == /* ]]; then
+        same_host=true; to_path="${to%%\?*}"
+    elif _routes_host_is_app "$app" "$(_routes_url_host "$to")"; then
+        same_host=true; to_path=$(_routes_url_path "$to"); to_path="${to_path%%[?#]*}"; to_path="${to_path:-/}"
+    fi
+
+    if $prefix && [[ "$keep" == true ]]; then
+        [[ "$to" == *[?#]* ]] && { error "A prefix redirect that keeps the path cannot target ?query or #fragment — use --no-path (keep_path: false)"; return 1; }
+        [[ "$to" != */ ]] && to="${to}/"
+        [[ "$to_path" != "" && "$to_path" != */ ]] && to_path="${to_path}/"
+        if $same_host && [[ "$to_path" == "$from"* ]]; then
+            error "${to} is inside ${from} — the redirect would loop"; return 1
+        fi
+    elif $same_host; then
+        if [[ "$to_path" == "$from" ]] || { $prefix && [[ "$to_path" == "$from"* ]]; }; then
+            error "${to} matches ${from} again — the redirect would loop"; return 1
+        fi
+    fi
+    jq -nc --arg f "$from" --arg t "$to" --argjson c "$code" --argjson k "$keep" \
+        '{from: $f, to: $t, code: $c, keep_path: $k}'
+}
+
+# Is this IPv4 address link-local (169.254.0.0/16 — cloud metadata endpoints)?
+_routes_ip_link_local() { [[ "$1" =~ ^169\.254\. ]]; }
+
+# $1=app $2=prefix $3=upstream $4=strip $5=preserve_host $6=timeout $7=buffering
+# $8=mode: "cli" (loopback guard waived by --force), "force", or "yml" (a
+#    project file: no --force, and link-local upstreams are refused outright —
+#    anyone who can commit must not be able to publish 169.254.169.254)
+# $9=rules (see _routes_check_path)
+_routes_build_proxy() {
+    local app="$1" prefix="$2" upstream="$3" strip="$4" preserve="$5" timeout="$6" buffering="$7"
+    local mode="${8:-cli}" rules="${9:-}"
+    [[ "$prefix" != /* ]] && prefix="/${prefix}"
+    [[ "$prefix" != */ ]] && prefix="${prefix}/"
+    _routes_valid_source_path "$prefix" || return 1
+    _routes_valid_upstream "$upstream" || { error "Invalid upstream '${upstream}' — expected http(s)://host[:port][/path]"; return 1; }
+    _routes_check_path "$app" "$prefix" proxy "$rules" || return 1
+
+    [[ "$timeout" =~ ^[0-9]{1,4}$ ]] && timeout=$((10#$timeout))
+    if ! [[ "$timeout" =~ ^[0-9]+$ ]] || (( timeout < 1 || timeout > 3600 )); then
+        error "Proxy timeout must be 1-3600 seconds"; return 1
+    fi
+
+    local up_path; up_path=$(_routes_url_path "$upstream")
+    if [[ -n "$up_path" && "$strip" != true ]]; then
+        error "An upstream with a path (${up_path}) replaces ${prefix} — add --strip-prefix (strip_prefix: true), or drop the path to pass ${prefix} through"
+        return 1
+    fi
+
+    local host port what ip addrs=""
+    host=$(_routes_url_host "$upstream"); port=$(_routes_url_port "$upstream")
+    if [[ "$host" != localhost && ! "$host" =~ ^[0-9.]+$ ]]; then
+        # nginx resolves the upstream hostname once, at reload.
+        addrs=$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | sort -u)
+        if [[ -z "$addrs" ]] && ! getent hosts "$host" >/dev/null 2>&1; then
+            error "'${host}' does not resolve — nginx resolves upstream names at reload and would refuse it"; return 1
+        fi
+    fi
+    if _routes_host_is_app "$app" "$host"; then
+        error "'${host}' is this app — the proxy would loop"; return 1
+    fi
+
+    # From a project file the resolved addresses count too: a public name can
+    # point at 127.0.0.1 or 169.254.169.254 as easily as a literal IP can.
+    local check="$host"
+    [[ "$mode" == yml && -n "$addrs" ]] && check="${check}"$'\n'"${addrs}"
+    while IFS= read -r ip; do
+        [[ -z "$ip" ]] && continue
+        if [[ "$mode" == yml ]] && { _routes_ip_link_local "$ip" || [[ "$ip" =~ ^0\. ]]; }; then
+            error "${upstream} points at ${ip} (link-local / metadata range) — refused from a project file"; return 1
+        fi
+        if [[ "$ip" == localhost || "$ip" =~ ^127\. || "$ip" =~ ^0\. ]] && what=$(_routes_reserved_local_port "$app" "$port"); then
+            case "$mode" in
+                force) warn "Publishing ${what} (127.0.0.1:${port}) under ${prefix} (--force)" >&2 ;;
+                yml)   error "127.0.0.1:${port} is ${what} — a project file cannot publish it"; return 1 ;;
+                *)     error "127.0.0.1:${port} is ${what} — publishing it under ${prefix} is almost certainly a mistake"
+                       error "If you really mean it: add --force"
+                       return 1 ;;
+            esac
+        fi
+    done <<< "$check"
+
+    jq -nc --arg p "$prefix" --arg u "$upstream" --argjson s "$strip" --argjson h "$preserve" \
+        --argjson t "$timeout" --argjson b "$buffering" \
+        '{prefix: $p, upstream: $u, strip_prefix: $s, preserve_host: $h, timeout: $t, buffering: $b}'
 }
 
 # ── apply (with revert) ───────────────────────────────────────
@@ -249,23 +385,15 @@ redirect_set() {
     _routes_require_app "$app" "cipi redirect set <app> --to=https://example.com [--301|--302|--307|--308] [--no-path]"
     parse_args "$@"
 
-    local to="${ARG_to:-}" code keep=true
+    local to="${ARG_to:-}" code keep=true rule
     [[ -z "$to" ]] && { error "Missing --to=<url>"; exit 1; }
-    _routes_valid_url "$to" || { error "Invalid URL '${to}' — expected http(s)://host[/path]"; exit 1; }
     code=$(_routes_parse_code) || exit 1
     [[ "${ARG_no_path:-}" == "true" ]] && keep=false
-
-    if $keep && [[ "$to" == *[?#]* ]]; then
-        error "A target with ?query or #fragment cannot keep the request path — add --no-path"; exit 1
-    fi
-    if _routes_host_is_app "$app" "$(_routes_url_host "$to")"; then
-        error "'$(_routes_url_host "$to")' is served by '${app}' itself — the redirect would loop"; exit 1
-    fi
+    rule=$(_routes_build_app_redirect "$app" "$to" "$code" "$keep") || exit 1
     _routes_preflight || exit 1
 
     local before; before=$(_routes_app_json "$app")
-    app_set_json "$app" redirect "$(jq -nc --arg t "$to" --argjson c "$code" --argjson k "$keep" \
-        '{enabled: true, to: $t, code: $c, keep_path: $k}')"
+    app_set_json "$app" redirect "$rule"
     _routes_apply "$app" "$before" || exit 1
 
     _routes_notify redirect_change "$app" "REDIRECT SET: ${app} → ${to} (${code}$($keep && echo ', path kept'))"
@@ -328,49 +456,17 @@ redirect_add() {
     shift 3
     parse_args "$@"
 
-    [[ "$from" != /* ]] && from="/${from}"
-    _routes_valid_source_path "$from" || exit 1
-    if [[ "$to" == /* ]]; then
-        if ! [[ "$to" =~ $_ROUTES_RE_PATH_QUERY ]] || ! _routes_valid_path "${to%%\?*}"; then
-            error "Invalid target path '${to}'"; exit 1
-        fi
-    else
-        _routes_valid_url "$to" || { error "Invalid target '${to}' — a /path or an http(s):// URL"; exit 1; }
-    fi
-
-    local code keep=true prefix=false
+    local code keep=true prefix=false rule
     code=$(_routes_parse_code) || exit 1
     [[ "${ARG_no_path:-}" == "true" ]] && keep=false
+    rule=$(_routes_build_redirect "$app" "$from" "$to" "$code" "$keep") || exit 1
+    from=$(jq -r '.from' <<< "$rule"); to=$(jq -r '.to' <<< "$rule")
     [[ "$from" == */ ]] && prefix=true
-    _routes_check_path "$app" "$from" redirect || exit 1
-
-    # Same-host target: a relative path, or a URL on one of the app's names.
-    local to_path="" same_host=false
-    if [[ "$to" == /* ]]; then
-        same_host=true; to_path="${to%%\?*}"
-    elif _routes_host_is_app "$app" "$(_routes_url_host "$to")"; then
-        same_host=true; to_path=$(_routes_url_path "$to"); to_path="${to_path%%[?#]*}"; to_path="${to_path:-/}"
-    fi
-
-    if $prefix && $keep; then
-        [[ "$to" == *[?#]* ]] && { error "A prefix redirect that keeps the path cannot target ?query or #fragment — add --no-path"; exit 1; }
-        [[ "$to" != */ ]] && to="${to}/"
-        [[ "$to_path" != "" && "$to_path" != */ ]] && to_path="${to_path}/"
-        if $same_host && [[ "$to_path" == "$from"* ]]; then
-            error "${to} is inside ${from} — the redirect would loop"; exit 1
-        fi
-    elif $same_host; then
-        if [[ "$to_path" == "$from" ]] || { $prefix && [[ "$to_path" == "$from"* ]]; }; then
-            error "${to} matches ${from} again — the redirect would loop"; exit 1
-        fi
-    fi
     _routes_preflight || exit 1
 
     local before existed=false
     before=$(_routes_app_json "$app")
     vault_read apps.json | jq -e --arg a "$app" --arg f "$from" '(.[$a].redirects // []) | any(.from == $f)' >/dev/null 2>&1 && existed=true
-    local rule; rule=$(jq -nc --arg f "$from" --arg t "$to" --argjson c "$code" --argjson k "$keep" \
-        '{from: $f, to: $t, code: $c, keep_path: $k}')
     app_set_json "$app" redirects "$(vault_read apps.json | jq -c --arg a "$app" --argjson r "$rule" \
         '(.[$a].redirects // []) | map(select(.from != $r.from)) + [$r] | sort_by(.from)')"
     _routes_apply "$app" "$before" || exit 1
@@ -444,48 +540,16 @@ proxy_add() {
     shift 3
     parse_args "$@"
 
-    [[ "$prefix" != /* ]] && prefix="/${prefix}"
-    [[ "$prefix" != */ ]] && prefix="${prefix}/"
-    _routes_valid_source_path "$prefix" || exit 1
-    _routes_valid_upstream "$upstream" || { error "Invalid upstream '${upstream}' — expected http(s)://host[:port][/path]"; exit 1; }
-    _routes_check_path "$app" "$prefix" proxy || exit 1
-
-    local strip=false preserve=false buffering=true timeout="${ARG_timeout:-60}"
+    local strip=false preserve=false buffering=true mode=cli rule
     [[ "${ARG_strip_prefix:-}" == "true" ]] && strip=true
     [[ "${ARG_preserve_host:-}" == "true" ]] && preserve=true
     [[ "${ARG_no_buffering:-}" == "true" ]] && buffering=false
-    [[ "$timeout" =~ ^[0-9]{1,4}$ ]] && timeout=$((10#$timeout))
-    if ! [[ "$timeout" =~ ^[0-9]+$ ]] || (( timeout < 1 || timeout > 3600 )); then
-        error "--timeout must be 1-3600 seconds"; exit 1
-    fi
-
-    local up_path; up_path=$(_routes_url_path "$upstream")
-    if [[ -n "$up_path" ]] && ! $strip; then
-        error "An upstream with a path (${up_path}) replaces ${prefix} — add --strip-prefix, or drop the path to pass ${prefix} through"
-        exit 1
-    fi
-
-    local host port what
-    host=$(_routes_url_host "$upstream"); port=$(_routes_url_port "$upstream")
-    if [[ "$host" == localhost || "$host" == 0.0.0.0 || "$host" =~ ^127\. ]]; then
-        if what=$(_routes_reserved_local_port "$app" "$port"); then
-            if [[ "${ARG_force:-}" != "true" ]]; then
-                error "127.0.0.1:${port} is ${what} — publishing it under ${prefix} is almost certainly a mistake"
-                error "If you really mean it: add --force"
-                exit 1
-            fi
-            warn "Publishing ${what} (127.0.0.1:${port}) under ${prefix} (--force)"
-        fi
-    elif _routes_host_is_app "$app" "$host"; then
-        error "'${host}' is this app — the proxy would loop"; exit 1
-    fi
+    [[ "${ARG_force:-}" == "true" ]] && mode=force
+    rule=$(_routes_build_proxy "$app" "$prefix" "$upstream" "$strip" "$preserve" "${ARG_timeout:-60}" "$buffering" "$mode") || exit 1
+    prefix=$(jq -r '.prefix' <<< "$rule")
     _routes_preflight || exit 1
 
-    # nginx resolves the upstream hostname once, at reload. Say so before a
-    # reload fails on it, and warn (never block) when nothing answers yet.
-    if [[ ! "$host" =~ ^[0-9.]+$ && "$host" != localhost ]] && ! getent hosts "$host" >/dev/null 2>&1; then
-        error "'${host}' does not resolve — nginx resolves upstream names at reload and would refuse it"; exit 1
-    fi
+    # Warn (never block) when nothing answers yet.
     if command -v curl >/dev/null 2>&1 && ! curl -sk -o /dev/null --max-time 5 "$upstream" 2>/dev/null; then
         warn "${upstream} did not answer within 5s — the route is added anyway (502 until it does)"
     fi
@@ -493,9 +557,6 @@ proxy_add() {
     local before existed=false
     before=$(_routes_app_json "$app")
     vault_read apps.json | jq -e --arg a "$app" --arg p "$prefix" '(.[$a].proxies // []) | any(.prefix == $p)' >/dev/null 2>&1 && existed=true
-    local rule; rule=$(jq -nc --arg p "$prefix" --arg u "$upstream" --argjson s "$strip" --argjson h "$preserve" \
-        --argjson t "$timeout" --argjson b "$buffering" \
-        '{prefix: $p, upstream: $u, strip_prefix: $s, preserve_host: $h, timeout: $t, buffering: $b}')
     app_set_json "$app" proxies "$(vault_read apps.json | jq -c --arg a "$app" --argjson r "$rule" \
         '(.[$a].proxies // []) | map(select(.prefix != $r.prefix)) + [$r] | sort_by(.prefix)')"
     _routes_apply "$app" "$before" || exit 1

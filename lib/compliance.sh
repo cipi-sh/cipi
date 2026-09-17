@@ -636,56 +636,189 @@ _cmp_parse_deploy_log() {
         }' "$log" 2>/dev/null
 }
 
+# ── Deploy audit ledger (lib/cipi-deploy-audit.sh) ──────────────
+# /var/log/cipi/deploys.jsonl, one JSON record per published / failed /
+# rolled-back release, each carrying the SHA-256 of the line before it.
+
+[[ -z "${CMP_DEPLOY_LEDGER:-}" ]] && CMP_DEPLOY_LEDGER="${CIPI_LOG}/deploys.jsonl"
+[[ -z "${CMP_DEPLOY_SINCE_FILE:-}" ]] && CMP_DEPLOY_SINCE_FILE="/var/lib/cipi/deploy-audit-since"
+
+# "ok <records>" or "broken <line> <reason>" — the first break only.
+_cmp_ledger_verify() {
+    local ledger="$1" line n=0 prev="" seq last_seq=0 want
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        n=$((n + 1))
+        if ! jq -e . <<<"$line" >/dev/null 2>&1; then
+            echo "broken ${n} not valid JSON"; return 0
+        fi
+        want=$(jq -r '.prev // ""' <<<"$line")
+        if [[ "$want" != "$prev" ]]; then
+            echo "broken ${n} previous-record hash mismatch (a record before it was changed or removed)"; return 0
+        fi
+        seq=$(jq -r '.seq // 0' <<<"$line")
+        if [[ "$seq" != "$((last_seq + 1))" ]]; then
+            echo "broken ${n} sequence jumps from ${last_seq} to ${seq}"; return 0
+        fi
+        last_seq="$seq"
+        prev=$(printf '%s' "$line" | sha256sum | awk '{print $1}')
+    done < "$ledger"
+    echo "ok ${n}"
+}
+
+# TSV of ledger records at or after <since> (UTC ISO-8601):
+# ts app event release commit origin trigger operator ip claimed_source claimed_actor attempted_release
+_cmp_ledger_rows() {
+    local ledger="$1" since="$2"
+    jq -r --arg since "$since" 'select(.ts >= $since) | [
+        .ts, .app, .event, (.release // ""), (.commit // ""), (.origin // ""), (.trigger // ""),
+        (.operator // ""), (.ip // ""), (.claimed.source // ""), (.claimed.actor // ""),
+        (.deployer.release // "")
+    ] | map(if . == "" then "-" else . end) | @tsv' "$ledger" 2>/dev/null
+}
+
+# Releases Deployer created for <app> since <since> (UTC ISO) that the ledger
+# never saw — as published/rolled back, or as the attempted release of a
+# failed deploy. Prints "<release>\t<created_at>" per missing release.
+_cmp_unaudited_releases() {
+    local app="$1" since="$2" ledger="$3" rlog="/home/${1}/.dep/releases_log"
+    [[ -f "$rlog" ]] || return 0
+    local seen name created created_utc
+    seen=$(jq -r --arg a "$app" 'select(.app == $a) | .release, (.deployer.release // "")' "$ledger" 2>/dev/null | grep -v '^$' | sort -u)
+    while IFS=$'\t' read -r name created; do
+        [[ -z "$name" ]] && continue
+        created_utc=$(date -u -d "$created" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) || continue
+        [[ "$created_utc" < "$since" ]] && continue
+        grep -qx "$name" <<<"$seen" && continue
+        printf '%s\t%s\n' "$name" "$created_utc"
+    done < <(jq -r '[(.release_name // "" | tostring), (.created_at // "")] | @tsv' "$rlog" 2>/dev/null)
+}
+
 _cmp_check_deploys() {
-    local days="${CMP_DAYS:-90}" since
+    local days="${CMP_DAYS:-90}" since since_utc
     since=$(date -d "-${days} days" '+%Y-%m-%d %H:%M:%S')
-    local tsv="" log app rows
+    since_utc=$(date -u -d "-${days} days" '+%Y-%m-%dT%H:%M:%SZ')
+    local status=pass detail="" ledger="$CMP_DEPLOY_LEDGER"
+    _cmp_add detail "Period: last ${days} days (since ${since})"
+
+    # ── ledger: every deploy, whatever started it
+    local rows="" total=0 have_ledger=false
+    if [[ -f "$ledger" && -x /usr/local/bin/cipi-deploy-audit ]]; then
+        have_ledger=true
+        local verdict; verdict=$(_cmp_ledger_verify "$ledger")
+        echo "$verdict" > "$(_cmp_ev deploy-audit-chain.txt)" 2>/dev/null || true
+        if [[ "$verdict" == broken* ]]; then
+            status=fail
+            _cmp_add detail "Audit ledger chain BROKEN at record ${verdict#broken }"
+        else
+            _cmp_add detail "Audit ledger: ${verdict#ok } record(s), hash chain intact (${ledger}; also sent to syslog as cipi-deploy)"
+            _cmp_add detail "The chain proves nothing was changed or removed before the newest record. Root can still rewrite the newest records or the whole file — the syslog copy, forwarded off the server (see: logging), is the independent one."
+        fi
+        jq -c --arg since "$since_utc" 'select(.ts >= $since)' "$ledger" > "$(_cmp_ev deploy-audit.jsonl)" 2>/dev/null || true
+        rows=$(_cmp_ledger_rows "$ledger" "$since_utc")
+        {
+            printf 'TIME\tAPP\tEVENT\tRELEASE\tCOMMIT\tORIGIN\tTRIGGER\tOPERATOR\tIP\tCLAIMED_SOURCE\tCLAIMED_ACTOR\tATTEMPTED_RELEASE\n'
+            [[ -n "$rows" ]] && printf '%s\n' "$rows"
+        } > "$(_cmp_ev deploy-audit.tsv)" 2>/dev/null || true
+    else
+        status=warn
+        _cmp_add detail "Deploy audit ledger not installed (${ledger}) — deploys started outside cipi deploy / the webhook are not recorded. Run: cipi self-update"
+    fi
+
+    if [[ -n "$rows" ]]; then
+        total=$(grep -c . <<<"$rows")
+        local published failed rollbacks apps with_sha
+        published=$(awk -F'\t' '$3 == "published"' <<<"$rows" | wc -l)
+        failed=$(awk -F'\t' '$3 == "failed"' <<<"$rows" | wc -l)
+        rollbacks=$(awk -F'\t' '$3 == "rollback"' <<<"$rows" | wc -l)
+        apps=$(cut -f2 <<<"$rows" | sort -u | wc -l)
+        with_sha=$(awk -F'\t' '$3 != "failed" && $5 != "-"' <<<"$rows" | wc -l)
+        _cmp_add detail "Recorded: ${total} across ${apps} app(s) — ${published} published, ${failed} failed, ${rollbacks} rollback(s)"
+        _cmp_add detail "By origin: $(cut -f6 <<<"$rows" | sort | uniq -c | awk '{ printf "%s%s %s", (NR > 1 ? ", " : ""), $2, $1 }')"
+        _cmp_add detail "Commit SHA recorded for ${with_sha}/$((published + rollbacks)) published or rolled-back release(s)"
+        local ops; ops=$(awk -F'\t' '$8 != "-" { print $8 }' <<<"$rows" | sort -u | paste -sd, -)
+        [[ -n "$ops" ]] && _cmp_add detail "Login users behind deploys (audit login uid): ${ops}"
+    fi
+
+    # ── completeness: every app's recipe carries the hook, and Deployer made no
+    # release the ledger did not see
+    if [[ "$have_ledger" == true ]]; then
+        local audit_since="$since_utc" started="" df app missing_hook="" missing_rule="" unaudited="" u
+        [[ -s "$CMP_DEPLOY_SINCE_FILE" ]] && started=$(head -c 20 "$CMP_DEPLOY_SINCE_FILE" 2>/dev/null)
+        [[ -z "$started" ]] && started=$(head -n 1 "$ledger" 2>/dev/null | jq -r '.ts // empty' 2>/dev/null)
+        [[ -n "$started" && "$started" > "$audit_since" ]] && audit_since="$started"
+        shopt -s nullglob
+        for df in /home/*/.deployer/deploy.php; do
+            app=$(basename "$(dirname "$(dirname "$df")")")
+            grep -q 'cipi:deploy-audit' "$df" 2>/dev/null || missing_hook="${missing_hook}${missing_hook:+, }${app}"
+            grep -qs "cipi-deploy-audit ${app} " "/etc/sudoers.d/cipi-${app}" || missing_rule="${missing_rule}${missing_rule:+, }${app}"
+            if [[ -n "$started" ]]; then
+                u=$(_cmp_unaudited_releases "$app" "$audit_since" "$ledger")
+                [[ -n "$u" ]] && unaudited="${unaudited}$(sed "s/^/${app}\t/" <<<"$u")"$'\n'
+            fi
+        done
+        shopt -u nullglob
+        {
+            echo "Auditing since: ${started:-unknown}"
+            echo "deploy.php without the audit hook: ${missing_hook:-none}"
+            echo "sudoers without the audit rule: ${missing_rule:-none}"
+        } > "$(_cmp_ev deploy-audit-hooks.txt)" 2>/dev/null || true
+        if [[ -n "$missing_hook" || -n "$missing_rule" ]]; then
+            status=$(_cmp_worse "$status" warn)
+            [[ -n "$missing_hook" ]] && _cmp_add detail "deploy.php without the audit hook (edited by hand?): ${missing_hook}"
+            [[ -n "$missing_rule" ]] && _cmp_add detail "sudoers without the audit rule: ${missing_rule}"
+        fi
+        unaudited=$(grep -v '^$' <<<"$unaudited" || true)
+        {
+            printf 'APP\tRELEASE\tCREATED\n'
+            [[ -n "$unaudited" ]] && printf '%s\n' "$unaudited"
+        } > "$(_cmp_ev deploy-audit-unaudited.tsv)" 2>/dev/null || true
+        if [[ -n "$unaudited" ]]; then
+            status=$(_cmp_worse "$status" warn)
+            _cmp_add detail "$(grep -c . <<<"$unaudited") release(s) created by Deployer with no audit record: $(cut -f1,2 <<<"$unaudited" | tr '\t' '#' | paste -sd, - | cut -c1-300)"
+        elif [[ -n "$started" ]]; then
+            _cmp_add detail "Every release Deployer created since ${started} has an audit record"
+        fi
+    fi
+
+    # ── deploy.log banners (human-readable log; history from before the ledger)
+    local tsv="" log lrows
     shopt -s nullglob
     for log in /home/*/logs/deploy.log; do
-        rows=$(_cmp_parse_deploy_log "$log" "$since")
-        [[ -n "$rows" ]] && tsv="${tsv}${tsv:+$'\n'}${rows}"
+        lrows=$(_cmp_parse_deploy_log "$log" "$since")
+        [[ -n "$lrows" ]] && tsv="${tsv}${tsv:+$'\n'}${lrows}"
     done
     shopt -u nullglob
-
-    # Commit SHA: Deployer writes REVISION into each release; pruned releases lose it.
-    local out="" ts trig br from res rel rc sha
-    while IFS=$'\t' read -r ts app trig br from res rel rc; do
+    local out="" ts lapp trig br from res rel rc sha
+    while IFS=$'\t' read -r ts lapp trig br from res rel rc; do
         [[ -z "$ts" ]] && continue
         sha="-"
-        [[ -n "$rel" && "$rel" != "?" && -f "/home/${app}/releases/${rel}/REVISION" ]] \
-            && sha=$(head -c 40 "/home/${app}/releases/${rel}/REVISION" 2>/dev/null)
-        out="${out}${out:+$'\n'}${ts}"$'\t'"${app}"$'\t'"${trig}"$'\t'"${br}"$'\t'"${from}"$'\t'"${rel}"$'\t'"${sha}"$'\t'"${res}"$'\t'"${rc}"
+        [[ -n "$rel" && "$rel" != "?" && -f "/home/${lapp}/releases/${rel}/REVISION" ]] \
+            && sha=$(head -c 40 "/home/${lapp}/releases/${rel}/REVISION" 2>/dev/null)
+        out="${out}${out:+$'\n'}${ts}"$'\t'"${lapp}"$'\t'"${trig}"$'\t'"${br}"$'\t'"${from}"$'\t'"${rel}"$'\t'"${sha}"$'\t'"${res}"$'\t'"${rc}"
     done < <(sort <<<"$tsv")
-
     {
         printf 'TIME\tAPP\tTRIGGER\tBRANCH\tFROM_RELEASE\tRELEASE\tCOMMIT\tRESULT\tEXIT\n'
         [[ -n "$out" ]] && printf '%s\n' "$out"
     } > "$(_cmp_ev deploys.tsv)" 2>/dev/null || true
     grep -hE 'DEPLOY|ROLLBACK' "${CIPI_LOG}/cipi.log" 2>/dev/null \
         | awk -v since="$since" 'substr($0, 2, 19) >= since' > "$(_cmp_ev cipi-log-deploys.txt)" 2>/dev/null || true
+    local log_total=0
+    [[ -n "$out" ]] && log_total=$(grep -c . <<<"$out")
+    _cmp_add detail "deploy.log banners (cipi deploy + webhook only): ${log_total} run(s) in the period"
+    [[ "$have_ledger" == false && -n "$out" ]] && total="$log_total"
 
-    local total=0 ok=0 failed=0 rollbacks=0 apps=0 with_sha=0
-    if [[ -n "$out" ]]; then
-        total=$(grep -c . <<<"$out")
-        ok=$(awk -F'\t' '$8 == "OK"' <<<"$out" | wc -l)
-        failed=$(awk -F'\t' '$8 == "FAILED"' <<<"$out" | wc -l)
-        rollbacks=$(awk -F'\t' '$3 == "rollback"' <<<"$out" | wc -l)
-        apps=$(cut -f2 <<<"$out" | sort -u | wc -l)
-        with_sha=$(awk -F'\t' '$7 != "-" && $7 != ""' <<<"$out" | wc -l)
-    fi
-    local detail=""
-    _cmp_add detail "Period: last ${days} days (since ${since})"
-    _cmp_add detail "Deploys: ${total} across ${apps} app(s) — ${ok} OK, ${failed} failed, ${rollbacks} rollback(s)"
-    if [[ -n "$out" ]]; then
-        _cmp_add detail "By trigger: $(cut -f3 <<<"$out" | sort | uniq -c | awk '{ printf "%s%s %s", (NR > 1 ? ", " : ""), $2, $1 }')"
-        _cmp_add detail "Commit SHA recorded for ${with_sha}/${total} (releases already pruned have no REVISION file)"
-    fi
-    _cmp_add detail "Deploys are atomic (symlink switch) with rollback. The commit author is in Git; the operator who triggered a CLI deploy is in auth.log (SSH session)."
-    if (( total == 0 )); then
-        _cmp_result info "no deploys in the last ${days} days" "$detail"
-    else
-        _cmp_result pass "${total} deploy(s) logged in the last ${days} days (${failed} failed)" "$detail"
-    fi
+    _cmp_add detail "Deploys are atomic (symlink switch) with rollback. \"origin\", \"operator\" and \"ip\" are read by root from the process chain; \"claimed\" fields come from the app (e.g. cipi/agent) and are not verified."
+    local summary
+    case "$status" in
+        fail) summary="deploy audit ledger has been tampered with" ;;
+        warn) if [[ "$have_ledger" == false ]]; then summary="${total} deploy(s) in the log, but no audit ledger"
+              else summary="${total} deploy record(s) — audit coverage incomplete"; fi ;;
+        *)    if (( total == 0 )); then
+                  _cmp_result info "no deploys in the last ${days} days" "$detail"; return 0
+              fi
+              summary="${total} deploy record(s) in the last ${days} days, every release audited" ;;
+    esac
+    _cmp_result "$status" "$summary" "$detail"
 }
 
 _cmp_check_backups() {

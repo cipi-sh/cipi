@@ -31,6 +31,16 @@ app_create() {
         exit 1
     fi
 
+    # Node frontend app: --node=spa|static|ssr and/or --framework=… (lib/node.sh)
+    if [[ -n "${ARG_node+x}" || -n "${ARG_framework:-}" ]]; then
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/node.sh"
+        [[ "$app_type" == "custom" || -n "$octane_server" ]] && {
+            error "--node cannot be combined with --custom or --octane"; exit 1; }
+        _node_resolve_create_opts || exit 1
+        app_type="node"
+    fi
+
     # Interactive prompts for missing fields
     [[ -z "$app_user" ]]    && read_input "App username (lowercase, min 3 chars)" "" app_user
     [[ -z "$domain" ]]      && read_input "Primary domain" "" domain
@@ -42,12 +52,22 @@ app_create() {
         [[ -z "$repository" ]] && read_input "Git repository URL (SSH)" "" repository
     fi
     [[ "$app_type" == "laravel" && -z "$repository" ]] && { error "Git repository is required for Laravel apps"; exit 1; }
+    [[ "$app_type" == "node" && -z "$repository" ]] && { error "Git repository is required for Node apps"; exit 1; }
     if [[ "$app_type" == "custom" && -z "$repository" ]]; then
         branch=""
     elif [[ -z "${ARG_branch:-}" ]]; then
         read_input "Branch" "$branch" branch
     fi
-    [[ -z "${ARG_php:-}" ]] && read_input "PHP version" "$php_ver" php_ver
+    if [[ "$app_type" == "node" ]]; then
+        # PHP only runs Deployer and the webhook receiver here: take the newest
+        # one installed instead of asking.
+        if [[ -z "${ARG_php:-}" ]]; then
+            local _pv
+            for _pv in 8.5 8.4 8.3; do php_is_installed "$_pv" && { php_ver="$_pv"; break; }; done
+        fi
+    elif [[ -z "${ARG_php:-}" ]]; then
+        read_input "PHP version" "$php_ver" php_ver
+    fi
 
     # Database engine (Laravel only)
     if [[ "$app_type" == "laravel" ]]; then
@@ -99,6 +119,16 @@ app_create() {
         }
     fi
 
+    local node_ports=""
+    if [[ "$app_type" == "node" ]]; then
+        if [[ "$NODE_OPT_MODE" == "ssr" ]]; then
+            node_ports=$(_node_allocate_ports) || { error "No two free ports in ${NODE_PORT_MIN}–${NODE_PORT_MAX}"; exit 1; }
+        fi
+        if ! node_is_installed "$NODE_OPT_VERSION"; then
+            _node_install_major "$NODE_OPT_VERSION" || exit 1
+        fi
+    fi
+
     echo ""; info "Creating '${app_user}' (${app_type}${octane_server:+, octane=${octane_server}})..."; echo ""
 
     local user_pass db_pass webhook_token app_key home url_host
@@ -111,6 +141,9 @@ app_create() {
         db_pass=$(generate_password 40)
         webhook_token=$(generate_token)
         app_key=$(generate_app_key)
+    elif [[ "$app_type" == "node" ]]; then
+        webhook_token=$(generate_token)
+        app_key=""
     else
         webhook_token=""
         app_key=""
@@ -202,8 +235,26 @@ HTML
         fi
     elif [[ "$app_type" == "laravel" ]]; then
         mkdir -p "${home}"/{shared/storage/{app/public,framework/{cache/data,sessions,views},logs},logs,.ssh,.deployer}
+    elif [[ "$app_type" == "node" ]]; then
+        mkdir -p "${home}"/{shared,logs,.ssh,.deployer,.cipi}
+        # Read at build time (Vite/Next/Astro load .env from the release) and,
+        # for SSR, at runtime by cipi-node-run. PORT and HOST are Cipi's.
+        cat > "${home}/shared/.env" <<ENV
+# ${app_user} — linked into every release as .env
+# Build-time variables (VITE_*, NEXT_PUBLIC_*, NUXT_PUBLIC_*, PUBLIC_*) are
+# baked into the bundle: redeploy after changing them.
+# PORT and HOST are set by Cipi for the blue/green slot and cannot be overridden.
+NODE_ENV=production
+ENV
     fi
-    if [[ "$app_type" == "custom" ]]; then
+    if [[ "$app_type" == "node" ]]; then
+        cat > "${home}/.bashrc" <<BASH
+export PATH="${NODE_ROOT}/${NODE_OPT_VERSION}/bin:/usr/local/bin:\$PATH"
+alias ll='ls -al'
+alias deploy='/usr/bin/php${php_ver} /usr/local/bin/dep deploy -f ${home}/.deployer/deploy.php'
+PS1='\[\033[0;32m\]\u\[\033[0m\]@\h:\[\033[0;34m\]\w\[\033[0m\]\$ '
+BASH
+    elif [[ "$app_type" == "custom" ]]; then
         cat > "${home}/.bashrc" <<BASH
 export PATH="/usr/local/bin:\$PATH"
 alias ll='ls -al'
@@ -246,7 +297,7 @@ BASH
     success "Deploy key"
 
     # 3b. Git provider integration (auto-add deploy key; webhook only for Laravel)
-    if [[ "$app_type" == "laravel" ]]; then
+    if [[ "$app_type" == "laravel" || "$app_type" == "node" ]]; then
         git_setup_repo "$app_user" "$repository" "$url_host" "$webhook_token" "$deploy_key"
     else
         git_setup_repo "$app_user" "$repository" "$url_host" "" "$deploy_key" "skip_webhook"
@@ -304,6 +355,12 @@ ENV
     if [[ -n "$octane_server" ]]; then
         step "PHP-FPM pool..."
         success "Skipped (Octane)"
+    elif [[ "$app_type" == "node" ]]; then
+        step "Webhook receiver..."
+        _node_webhook_install_receiver || { error "Missing ${CIPI_LIB}/cipi-webhook.php"; exit 1; }
+        _node_webhook_pool "$app_user" "$php_ver"
+        reload_php_fpm "$php_ver"
+        success "PHP-FPM ${php_ver} (webhook only)"
     elif [[ "$app_type" == "laravel" || "$app_type" == "custom" ]]; then
         step "PHP-FPM pool..."
         _create_fpm_pool "$app_user" "$php_ver"
@@ -312,7 +369,23 @@ ENV
     fi
 
     # 7. Save config early (needed before nginx so Octane vhost reads octane_port)
-    if [[ "$app_type" == "custom" ]]; then
+    if [[ "$app_type" == "node" ]]; then
+        app_save "$app_user" "$(jq -n \
+            --arg user "$app_user" --arg domain "$domain" --arg repo "$repository" --arg branch "$branch" \
+            --arg php "$php_ver" --arg wt "$webhook_token" --arg mode "$NODE_OPT_MODE" \
+            --arg ver "$NODE_OPT_VERSION" --arg fw "$NODE_OPT_FRAMEWORK" --arg build "$NODE_OPT_BUILD" \
+            --arg start "$NODE_OPT_START" --arg output "$NODE_OPT_OUTPUT" --arg health "$NODE_OPT_HEALTH" \
+            --arg ports "$node_ports" --arg created "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '
+            {user: $user, domain: $domain, aliases: [], repository: $repo, branch: $branch, php: $php,
+             custom: true, runtime: "node", node_mode: $mode, node_version: $ver, node_build: $build,
+             webhook_token: $wt, created_at: $created}
+            + (if $fw != "" then {node_framework: $fw} else {} end)
+            + (if $mode == "ssr" then {node_start: $start, node_health: $health,
+                                        node_ports: ($ports | split(" ") | map(tonumber))}
+               else {node_output: $output} end)')"
+        _node_state_write "$app_user"
+        _node_webhook_config "$app_user"
+    elif [[ "$app_type" == "custom" ]]; then
         app_save "$app_user" "$(cat <<JSON
 {
     "user": "${app_user}",
@@ -366,7 +439,7 @@ JSON
     if [[ -n "${GIT_PROVIDER:-}" ]]; then
         git_save_app_data "$app_user" "$GIT_PROVIDER" "${GIT_DEPLOY_KEY_ID:-}" "${GIT_WEBHOOK_ID:-}"
     fi
-    log_action "APP CREATED: $app_user domain=$domain php=$php_ver engine=${db_engine:-none} octane=${octane_server:-none}"
+    log_action "APP CREATED: $app_user domain=$domain php=$php_ver engine=${db_engine:-none} octane=${octane_server:-none}${NODE_OPT_MODE:+ node=${NODE_OPT_MODE}/${NODE_OPT_VERSION}}"
 
     # Email notification
     local _notify_repo _notify_branch
@@ -388,6 +461,8 @@ JSON
     fi
     if [[ "$app_type" == "custom" ]]; then
         _create_nginx_vhost "$app_user" "$domain" "$php_ver" "" "custom" "$docroot"
+    elif [[ "$app_type" == "node" ]]; then
+        _create_nginx_vhost "$app_user" "$domain" "$php_ver" ""
     else
         _create_nginx_vhost "$app_user" "$domain" "$php_ver" ""
     fi
@@ -408,6 +483,9 @@ JSON
             reload_supervisor
             success "Worker (default queue)"
         fi
+    elif [[ "$app_type" == "node" && "$NODE_OPT_MODE" == "ssr" ]]; then
+        reload_supervisor
+        success "Blue/green slots on 127.0.0.1:${node_ports/ /, } — started by the first deploy"
     else
         reload_supervisor
         success "Skipped"
@@ -418,12 +496,18 @@ JSON
     if [[ "$app_type" == "custom" ]]; then
         crontab -u "$app_user" -r 2>/dev/null || true
         success "None"
+    elif [[ "$app_type" == "node" ]]; then
+        cat <<CRON | crontab -u "$app_user" -
+# Cipi deploy trigger (written by the webhook receiver)
+* * * * * test -f ${home}/.deploy-trigger && mv -f ${home}/.deploy-trigger ${home}/.deploy-trigger.run && /usr/local/bin/cipi-app-deploy ${app_user} ${php_ver} webhook >/dev/null 2>&1
+CRON
+        success "Deploy trigger"
     elif [[ "$app_type" == "laravel" ]]; then
         cat <<CRON | crontab -u "$app_user" -
 # Laravel Scheduler
 * * * * * /usr/bin/php${php_ver} ${home}/current/artisan schedule:run >> /dev/null 2>&1
 # Cipi deploy trigger (written by cipi/agent webhook)
-* * * * * test -f ${home}/.deploy-trigger && rm -f ${home}/.deploy-trigger && /usr/local/bin/cipi-app-deploy ${app_user} ${php_ver} webhook >/dev/null 2>&1
+* * * * * test -f ${home}/.deploy-trigger && mv -f ${home}/.deploy-trigger ${home}/.deploy-trigger.run && /usr/local/bin/cipi-app-deploy ${app_user} ${php_ver} webhook >/dev/null 2>&1
 CRON
         success "Scheduler + deploy trigger"
     fi
@@ -432,6 +516,9 @@ CRON
     step "Deployer..."
     if [[ -n "$octane_server" ]]; then
         _create_deployer_config_from_template "laravel-octane" "$app_user" "$repository" "$branch" "$php_ver"
+    elif [[ "$app_type" == "node" ]]; then
+        _create_deployer_config_from_template "node" "$app_user" "$repository" "$branch" "$php_ver"
+        _sync_node_build_script "$app_user"
     else
         _create_deployer_config_from_template "$app_type" "$app_user" "$repository" "$branch" "$php_ver"
     fi
@@ -446,7 +533,11 @@ ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker status ${app_user}
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-app-notify ${app_user} *
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi health postdeploy ${app_user} --auto
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-scan-manifest ${app_user}
+${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-deploy-audit ${app_user} *
 SUDO
+    if [[ "$app_type" == "node" ]]; then
+        echo "${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-node-switch ${app_user} *" >> "/etc/sudoers.d/cipi-${app_user}"
+    fi
     chmod 440 "/etc/sudoers.d/cipi-${app_user}"
     success "Permissions"
 
@@ -461,6 +552,14 @@ SUDO
     echo -e "  PHP:        ${CYAN}${php_ver}${NC}"
     if [[ -n "$octane_server" ]]; then
         echo -e "  Runtime:    ${CYAN}Octane (${octane_server}) :${octane_port}${NC}"
+    elif [[ "$app_type" == "node" ]]; then
+        echo -e "  Runtime:    ${CYAN}Node ${NODE_OPT_VERSION} — ${NODE_OPT_MODE}${NODE_OPT_FRAMEWORK:+ (${NODE_OPT_FRAMEWORK})}${NC}"
+        echo -e "  Build:      ${CYAN}${NODE_OPT_BUILD}${NC}"
+        if [[ "$NODE_OPT_MODE" == "ssr" ]]; then
+            echo -e "  Start:      ${CYAN}${NODE_OPT_START}${NC}  ${DIM}(PORT/HOST set by Cipi)${NC}"
+        else
+            echo -e "  Output:     ${CYAN}${NODE_OPT_OUTPUT}${NC}"
+        fi
     else
         echo -e "  Runtime:    ${CYAN}PHP-FPM${NC}"
     fi
@@ -494,6 +593,22 @@ SUDO
             echo -e "        cipi ssl install ${app_user}"
             echo -e "  ${DIM}Add a repo later: cipi app edit ${app_user} --repository=<SSH-URL>${NC}"
         fi
+    elif [[ "$app_type" == "node" ]]; then
+        if [[ -n "${GIT_PROVIDER:-}" && -n "${GIT_DEPLOY_KEY_ID:-}" && -n "${GIT_WEBHOOK_ID:-}" ]]; then
+            echo -e "  ${BOLD}Git${NC}         ${GREEN}${GIT_PROVIDER} auto-configured ✓${NC}"
+            echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${url_host}/cipi/webhook${NC}"
+        else
+            echo -e "  ${BOLD}Deploy Key${NC}  (add to your Git provider)"
+            echo -e "  ${CYAN}${deploy_key}${NC}"
+            echo ""
+            echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${url_host}/cipi/webhook${NC}  ${DIM}(push events)${NC}"
+            echo -e "  ${BOLD}Secret${NC}      ${CYAN}${webhook_token}${NC}"
+        fi
+        echo ""
+        echo -e "  ${BOLD}Next:${NC} cipi app env ${app_user}      ${DIM}(build and runtime variables)${NC}"
+        echo -e "        cipi deploy ${app_user}"
+        echo -e "        cipi ssl install ${app_user}"
+        [[ "$NODE_OPT_MODE" == "ssr" ]] && echo -e "  ${DIM}Each deploy starts the new release beside the old one and switches only once it answers on ${NODE_OPT_HEALTH}.${NC}"
     elif [[ "$app_type" == "laravel" ]]; then
         if [[ -n "${GIT_PROVIDER:-}" && -n "${GIT_DEPLOY_KEY_ID:-}" && -n "${GIT_WEBHOOK_ID:-}" ]]; then
             echo -e "  ${BOLD}Git${NC}         ${GREEN}${GIT_PROVIDER} auto-configured ✓${NC}"
@@ -542,17 +657,21 @@ app_list() {
     fi
     printf "\n${BOLD}%-14s %-28s %-6s %-10s %s${NC}\n" "APP" "DOMAIN" "PHP" "RUNTIME" "CREATED"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "$_aj" | jq -r 'to_entries[]|"\(.key)\t\(.value.domain)\t\(.value.php)\t\(.value.created_at)\t\(.value.suspended // "false")\t\(.value.octane // "")"' \
-        | while IFS=$'\t' read -r a d p c s o; do
+    echo "$_aj" | jq -r 'to_entries[]|"\(.key)\t\(.value.domain)\t\(.value.php)\t\(.value.created_at)\t\(.value.suspended // "false")\t\(.value.octane // "")\t\(if .value.runtime == "node" then "node-" + .value.node_mode else "-" end)"' \
+        | while IFS=$'\t' read -r a d p c s o nd; do
         local st="${GREEN}●${NC}"
-        if [[ -n "$o" ]]; then
+        if [[ "$nd" == "node-ssr" ]]; then
+            supervisorctl status "${a}-node-blue" "${a}-node-green" 2>/dev/null | grep -q RUNNING || st="${RED}●${NC}"
+        elif [[ "$nd" == node-* ]]; then
+            :
+        elif [[ -n "$o" ]]; then
             supervisorctl status "${a}-octane" 2>/dev/null | grep -q RUNNING || st="${RED}●${NC}"
         else
             systemctl is-active --quiet "php${p}-fpm" 2>/dev/null || st="${RED}●${NC}"
         fi
         [[ "$s" == "true" ]] && st="${YELLOW}●${NC}"
         local suffix=""; [[ "$s" == "true" ]] && suffix=" ${YELLOW}(suspended)${NC}"
-        local runtime="fpm"; [[ -n "$o" ]] && runtime="octane"
+        local runtime="fpm"; [[ -n "$o" ]] && runtime="octane"; [[ "$nd" == node-* ]] && runtime="$nd"
         printf "  ${st} %-12s %-28s %-6s %-10s %s${suffix}\n" "$a" "$d" "$p" "$runtime" "${c:0:10}"
     done; echo ""
 }
@@ -575,7 +694,12 @@ app_show() {
     docroot_show=$(app_get "$app" docroot)
     echo -e "\n${BOLD}${app}${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    [[ "$is_custom" == "true" ]] && printf "  %-14s ${CYAN}%s${NC}\n" "Type" "Custom"
+    local runtime_show; runtime_show=$(app_get "$app" runtime)
+    if [[ "$runtime_show" == "node" ]]; then
+        printf "  %-14s ${CYAN}%s${NC}\n" "Type" "Node — $(app_get "$app" node_mode)$(f=$(app_get "$app" node_framework); [[ -n "$f" ]] && echo " (${f})")"
+    elif [[ "$is_custom" == "true" ]]; then
+        printf "  %-14s ${CYAN}%s${NC}\n" "Type" "Custom"
+    fi
     [[ "$is_custom" == "true" ]] && [[ -n "$docroot_show" ]] && printf "  %-14s ${CYAN}/%s${NC}\n" "Docroot" "$docroot_show"
     printf "  %-14s ${CYAN}%s${NC}\n" "Domain" "$d"
     printf "  %-14s ${CYAN}%s${NC}\n" "Aliases" "$aliases"
@@ -607,6 +731,16 @@ app_show() {
     octane_port_show=$(app_get "$app" octane_port)
     if [[ -n "$octane_show" ]]; then
         printf "  %-14s ${CYAN}%s${NC} ${DIM}(127.0.0.1:%s)${NC}\n" "Runtime" "Octane (${octane_show})" "${octane_port_show:-?}"
+    elif [[ "$runtime_show" == "node" ]]; then
+        printf "  %-14s ${CYAN}%s${NC}\n" "Runtime" "Node $(app_get "$app" node_version)"
+        printf "  %-14s ${CYAN}%s${NC}\n" "Build" "$(app_get "$app" node_build)"
+        if [[ "$(app_get "$app" node_mode)" == "ssr" ]]; then
+            printf "  %-14s ${CYAN}%s${NC} ${DIM}(blue/green on 127.0.0.1:%s)${NC}\n" "Start" "$(app_get "$app" node_start)" \
+                "$(vault_read apps.json | jq -r --arg a "$app" '.[$a].node_ports // [] | map(tostring) | join(", ")')"
+            printf "  %-14s ${CYAN}%s${NC}\n" "Health path" "$(app_get "$app" node_health)"
+        else
+            printf "  %-14s ${CYAN}%s${NC}\n" "Output" "$(app_get "$app" node_output)"
+        fi
     else
         printf "  %-14s ${CYAN}%s${NC}\n" "Runtime" "PHP-FPM"
     fi
@@ -620,6 +754,14 @@ app_show() {
         [[ -n "$rev" ]] && printf "  %-14s ${CYAN}%s${NC} ${DIM}(127.0.0.1:%s)${NC}\n" "Reverb" "enabled" "$(app_get "$app" reverb_port)"
         local nb; nb=$(app_get "$app" node_build)
         [[ -n "$nb" ]] && printf "  %-14s ${CYAN}%s${NC}\n" "Node build" "$nb"
+        local nv_show; nv_show=$(app_get "$app" node_version)
+        if [[ -n "$nv_show" ]]; then
+            printf "  %-14s ${CYAN}%s${NC} ${DIM}(pinned)${NC}\n" "Node" "$nv_show"
+        elif [[ -n "$nb" ]]; then
+            declare -f node_default_major >/dev/null 2>&1 || source "${CIPI_LIB}/node.sh"
+            local nd; nd=$(node_default_major)
+            printf "  %-14s ${CYAN}%s${NC} ${DIM}(server default)${NC}\n" "Node" "${nd:-system}"
+        fi
         [[ "$(app_get "$app" predeploy_snapshot)" == "true" ]] && printf "  %-14s ${CYAN}%s${NC}\n" "DB snapshot" "pre-deploy on"
         local hu; hu=$(app_get "$app" health_url)
         [[ -n "$hu" ]] && printf "  %-14s ${CYAN}%s${NC} ${DIM}(expect %s)${NC}\n" "Health" "$hu" "$(app_get "$app" health_expect)"
@@ -642,14 +784,14 @@ app_show() {
     fi
 
     local show_webhook; show_webhook=$(app_get "$app" webhook_token)
-    if [[ -n "$show_webhook" ]] && [[ "$is_custom" != "true" ]]; then
+    if [[ -n "$show_webhook" ]] && [[ "$is_custom" != "true" || "$runtime_show" == "node" ]]; then
         echo -e "\n  ${BOLD}Webhook${NC}  ${CYAN}https://$(domain_url_host "$d")/cipi/webhook${NC}"
     fi
 
     if [[ -f "/home/${app}/.ssh/id_ed25519.pub" ]]; then
         echo -e "\n  ${BOLD}Deploy Key${NC}\n  ${CYAN}$(cat "/home/${app}/.ssh/id_ed25519.pub")${NC}"
     fi
-    if [[ "$is_custom" != "true" ]] && [[ -L "/home/${app}/current" ]]; then
+    if [[ "$is_custom" != "true" || "$runtime_show" == "node" ]] && [[ -L "/home/${app}/current" ]]; then
         echo -e "\n  ${BOLD}Release${NC}  ${CYAN}$(readlink -f "/home/${app}/current" | xargs basename)${NC}"
     fi
     echo -e "\n  ${BOLD}Workers${NC}"
@@ -764,6 +906,11 @@ app_edit() {
         _app_change_domain "$app" "${ARG_domain}"
         local domain_rc=$?
         if [[ "$domain_rc" -eq 0 ]]; then
+            if [[ "$(app_get "$app" runtime)" == "node" ]]; then
+                # shellcheck source=/dev/null
+                source "${CIPI_LIB}/node.sh"
+                _node_state_write "$app"
+            fi
             changed=true
         elif [[ "$domain_rc" -eq 2 ]]; then
             info "Domain already '${ARG_domain}'"
@@ -783,6 +930,11 @@ app_edit() {
             if [[ -n "$(app_get "$app" octane)" ]]; then
                 # Octane apps have no FPM pool — only CLI paths in supervisor/cron/deployer
                 rm -f "/etc/php/${cur_php}/fpm/pool.d/${app}.conf" 2>/dev/null || true
+            elif [[ "$(app_get "$app" runtime)" == "node" ]]; then
+                # shellcheck source=/dev/null
+                source "${CIPI_LIB}/node.sh"
+                rm -f "/etc/php/${cur_php}/fpm/pool.d/${app}.conf"
+                _node_webhook_pool "$app" "$np"; reload_php_fpm "$cur_php"; reload_php_fpm "$np"
             else
                 rm -f "/etc/php/${cur_php}/fpm/pool.d/${app}.conf"
                 _create_fpm_pool "$app" "$np"; reload_php_fpm "$cur_php"; reload_php_fpm "$np"
@@ -807,6 +959,11 @@ app_edit() {
             app_set "$app" branch "${ARG_branch}"
             local safe_branch; safe_branch=$(printf '%s' "${ARG_branch}" | sed 's/[&|\\\/]/\\&/g')
             sed -i "s|set('branch', '.*')|set('branch', '${safe_branch}')|" "/home/${app}/.deployer/deploy.php"
+            if [[ "$(app_get "$app" runtime)" == "node" ]]; then
+                # shellcheck source=/dev/null
+                source "${CIPI_LIB}/node.sh"
+                _node_webhook_config "$app"
+            fi
             success "Branch → ${ARG_branch}"; changed=true
         fi
     fi
@@ -853,6 +1010,79 @@ app_edit() {
             _create_deployer_config_for_app "$app"
             success "Node build → ${ARG_node_build}"; changed=true
         fi
+    fi
+    # Node app options (lib/node.sh). They take effect on the next deploy; the
+    # nginx vhost, the recipe and the blue/green state are rewritten now.
+    # Laravel (and custom) apps: pin a Node major for asset builds, cipi app run
+    # and cipi.yml deploy.post, or follow the server default again.
+    if [[ -n "${ARG_node_version:-}" && "$(app_get "$app" runtime)" != "node" ]]; then
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/node.sh"
+        if [[ "${ARG_node_version}" == "default" ]]; then
+            app_unset "$app" node_version
+            success "Node → server default ($(d=$(node_default_major); [[ -n "$d" ]] && echo "Node ${d}" || echo "system Node"))"
+        else
+            _node_valid_major "${ARG_node_version}" || { error "--node-version must be an even (LTS) major such as 22 or 24, or default"; exit 1; }
+            node_is_installed "${ARG_node_version}" || _node_install_major "${ARG_node_version}" || exit 1
+            app_set "$app" node_version "${ARG_node_version}"
+            success "Node → ${ARG_node_version} (pinned for this app)"
+        fi
+        _sync_node_build_script "$app"
+        _node_recipe_config_write "$app"
+        unset ARG_node_version
+        changed=true
+    fi
+
+    if [[ -n "${ARG_build:-}${ARG_start:-}${ARG_output:-}${ARG_health_path:-}${ARG_node_version:-}" \
+          || ( -n "${ARG_node:-}" && "${ARG_node}" != "true" ) ]]; then
+        [[ "$(app_get "$app" runtime)" == "node" ]] || { error "--build/--start/--output/--health-path/--node-version/--node are for Node apps"; exit 1; }
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/node.sh"
+        local nmode; nmode=$(app_get "$app" node_mode)
+        if [[ -n "${ARG_node:-}" && "${ARG_node}" != "$nmode" ]]; then
+            _node_valid_mode "${ARG_node}" || { error "--node must be spa, static or ssr"; exit 1; }
+            if [[ "${ARG_node}" == "ssr" ]]; then
+                local nports; nports=$(_node_allocate_ports) || { error "No two free ports in ${NODE_PORT_MIN}–${NODE_PORT_MAX}"; exit 1; }
+                app_set_json "$app" node_ports "$(jq -nc --arg p "$nports" '$p | split(" ") | map(tonumber)')"
+                [[ -n "$(app_get "$app" node_start)" ]] || app_set "$app" node_start "npm run start"
+                [[ -n "$(app_get "$app" node_health)" ]] || app_set "$app" node_health "/"
+            elif [[ "$nmode" == "ssr" ]]; then
+                node_app_cleanup "$app"
+                app_unset "$app" node_ports
+            fi
+            [[ "${ARG_node}" != "ssr" && -z "$(app_get "$app" node_output)" ]] && app_set "$app" node_output "dist"
+            app_set "$app" node_mode "${ARG_node}"; nmode="${ARG_node}"
+            success "Mode → ${ARG_node}"
+        fi
+        if [[ -n "${ARG_build:-}" ]]; then
+            _validate_node_build_cmd "${ARG_build}" || { error "Invalid --build. Use npm/npx/yarn/pnpm/bun/node and safe characters only."; exit 1; }
+            app_set "$app" node_build "${ARG_build}"; _sync_node_build_script "$app"; success "Build → ${ARG_build}"
+        fi
+        if [[ -n "${ARG_start:-}" ]]; then
+            _node_valid_start "${ARG_start}" || { error "Invalid --start. A runner (node npm npx pnpm yarn bun) and plain arguments."; exit 1; }
+            app_set "$app" node_start "${ARG_start}"; success "Start → ${ARG_start}"
+        fi
+        if [[ -n "${ARG_output:-}" ]]; then
+            _node_valid_output "${ARG_output}" || { error "Invalid --output: a directory inside the repository, e.g. dist"; exit 1; }
+            app_set "$app" node_output "${ARG_output}"; success "Output → ${ARG_output}"
+        fi
+        if [[ -n "${ARG_health_path:-}" ]]; then
+            _node_valid_health "${ARG_health_path}" || { error "Invalid --health-path"; exit 1; }
+            app_set "$app" node_health "${ARG_health_path}"; success "Health path → ${ARG_health_path}"
+        fi
+        if [[ -n "${ARG_node_version:-}" ]]; then
+            _node_valid_major "${ARG_node_version}" || { error "--node-version must be an even (LTS) major such as 22 or 24"; exit 1; }
+            node_is_installed "${ARG_node_version}" || _node_install_major "${ARG_node_version}" || exit 1
+            app_set "$app" node_version "${ARG_node_version}"
+            sed -i "s|${NODE_ROOT}/[0-9]*/bin|${NODE_ROOT}/${ARG_node_version}/bin|" "/home/${app}/.bashrc" 2>/dev/null || true
+            success "Node → ${ARG_node_version}"
+        fi
+        _node_state_write "$app"
+        _create_deployer_config_for_app "$app"
+        _create_nginx_vhost "$app" "$(app_get "$app" domain)" "$(app_get "$app" php)"
+        _nginx_reapply_ssl "$app"
+        info "Takes effect on the next deploy: cipi deploy ${app}"
+        changed=true
     fi
     if [[ "${ARG_predeploy_snapshot:-}" == "true" ]]; then
         app_set "$app" predeploy_snapshot "true"
@@ -902,6 +1132,11 @@ app_delete() {
         git_cleanup_repo "$app" "$repo"
     fi
 
+    if [[ "$(app_get "$app" runtime)" == "node" ]]; then
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/node.sh"
+        step "Node processes..."; node_app_cleanup "$app"
+    fi
     step "Workers...";     supervisorctl stop "${app}-worker-"* 2>/dev/null||true; supervisorctl stop "${app}-octane" 2>/dev/null||true; supervisorctl stop "${app}-reverb" 2>/dev/null||true; supervisorctl stop "${app}-horizon" 2>/dev/null||true; rm -f "/etc/supervisor/conf.d/${app}.conf"; reload_supervisor
     step "Nginx...";       rm -f "/etc/nginx/sites-enabled/${app}" "/etc/nginx/sites-available/${app}"; reload_nginx
     step "PHP-FPM...";     rm -f "/etc/php/${p}/fpm/pool.d/${app}.conf"; reload_php_fpm "$p" 2>/dev/null||true
@@ -1074,7 +1309,7 @@ app_env() {
     [[ -z "$app" ]] && { error "Usage: cipi app env <app> [--show|--get=KEY|--set=K=V|--unset=KEY] [--json]"; exit 1; }
     app_exists "$app" || { error "Not found"; exit 1; }
     local is_custom; is_custom=$(app_get "$app" custom)
-    [[ "$is_custom" == "true" ]] && { error "Custom apps have no .env"; exit 1; }
+    [[ "$is_custom" == "true" && "$(app_get "$app" runtime)" != "node" ]] && { error "Custom apps have no .env"; exit 1; }
 
     local env_file="/home/${app}/shared/.env"
     [[ -f "$env_file" ]] || { error ".env not found at ${env_file}"; exit 1; }
@@ -1454,7 +1689,9 @@ app_run() {
     local home="/home/${app}"
     local workdir="$home"
     local is_custom; is_custom=$(app_get "$app" custom)
-    if [[ "$is_custom" == "true" ]]; then
+    if [[ "$(app_get "$app" runtime)" == "node" ]]; then
+        [[ -d "${home}/current" ]] && workdir="${home}/current"
+    elif [[ "$is_custom" == "true" ]]; then
         [[ -d "${home}/htdocs" ]] && workdir="${home}/htdocs"
     else
         [[ -d "${home}/current" ]] && workdir="${home}/current"
@@ -1474,6 +1711,11 @@ app_run() {
         COMPOSER_NO_INTERACTION=1
         NPM_CONFIG_YES=true
     )
+    # npm/node from the app's Node major, or the server default.
+    local node_bin
+    declare -f node_bin_for_app >/dev/null 2>&1 || source "${CIPI_LIB}/node.sh"
+    node_bin=$(node_bin_for_app "$app")
+    [[ -n "$node_bin" ]] && env_vars+=("PATH=${node_bin}:/usr/local/bin:/usr/bin:/bin")
 
     # Auto --no-interaction for composer when missing
     if [[ "$cmd" == "composer" ]]; then
@@ -2261,6 +2503,12 @@ EOF
 )
     fi
 
+    if [[ "$(app_get "$app" runtime)" == "node" ]]; then
+        declare -f _node_nginx_vhost >/dev/null 2>&1 || source "${CIPI_LIB}/node.sh"
+        _node_nginx_vhost "$app" "$names" "$www_redirect_block" "$auth_block" "$route_blocks" "$(_nginx_cipi_yml_deny_block)"
+        return 0
+    fi
+
     local root_path="/home/${app}/current"
     if [[ "$vhost_type" == "custom" ]]; then
         root_path="/home/${app}/htdocs"
@@ -2435,6 +2683,25 @@ _create_deployer_config_from_template() {
     repo_safe=$(printf '%s' "$repo" | sed 's/\\/\\\\/g; s/&/\\&/g')
     branch_safe=$(printf '%s' "$branch" | sed 's/\\/\\\\/g; s/&/\\&/g')
 
+    # Node apps: releases + blue/green switch (lib/deployer/node.php)
+    if [[ "$type" == "node" ]]; then
+        sed -e "s|__CIPI_APP_USER__|$an|g" \
+            -e "s|__CIPI_DEPLOY_PATH__|$dh|g" \
+            -e "s|__CIPI_PHP_VERSION__|$v|g" \
+            -e "s|__CIPI_REPOSITORY__|$repo_safe|g" \
+            -e "s|__CIPI_BRANCH__|$branch_safe|g" \
+            -e "s|__CIPI_KEEP_RELEASES__|$(_deploy_cfg_keep_releases "$an")|g" \
+            -e "s|__CIPI_NODE_VERSION__|$(app_get "$an" node_version)|g" \
+            -e "s|__CIPI_NODE_MODE__|$(app_get "$an" node_mode)|g" \
+            -e "s|__CIPI_NODE_OUTPUT__|$(app_get "$an" node_output)|g" \
+            "$tpl" > "${dh}/.deployer/deploy.php"
+        deployer_audit_ensure_hook "$an" false || warn "Deploy audit hook not added to ${dh}/.deployer/deploy.php"
+        declare -f _node_recipe_config_write >/dev/null 2>&1 || source "${CIPI_LIB}/node.sh"
+        _node_recipe_config_write "$an"
+        chown -R "${an}:${an}" "${dh}/.deployer"
+        return 0
+    fi
+
     # Custom apps: classic template has no recipe hooks / keep_releases placeholders
     if [[ "$type" == "custom" ]]; then
         sed -e "s|__CIPI_APP_USER__|$an|g" \
@@ -2443,6 +2710,7 @@ _create_deployer_config_from_template() {
             -e "s|__CIPI_REPOSITORY__|$repo_safe|g" \
             -e "s|__CIPI_BRANCH__|$branch_safe|g" \
             "$tpl" > "${dh}/.deployer/deploy.php"
+        deployer_audit_ensure_hook "$an" true || warn "Deploy audit hook not added to ${dh}/.deployer/deploy.php"
         chown -R "${an}:${an}" "${dh}/.deployer"
         return 0
     fi
@@ -2509,6 +2777,7 @@ _create_deployer_config_from_template() {
         fi
     done < "$tmp"
     rm -f "$tmp"
+    deployer_audit_ensure_hook "$an" false || warn "Deploy audit hook not added to ${dh}/.deployer/deploy.php"
     chown -R "${an}:${an}" "${dh}/.deployer"
 }
 
@@ -2519,7 +2788,8 @@ _create_deployer_config_for_app() {
     repo=$(app_get "$app" repository)
     branch=$(app_get "$app" branch)
     php_ver=$(app_get "$app" php)
-    if [[ "$(app_get "$app" custom)" == "true" ]]; then type="custom"
+    if [[ "$(app_get "$app" runtime)" == "node" ]]; then type="node"
+    elif [[ "$(app_get "$app" custom)" == "true" ]]; then type="custom"
     elif [[ -n "$(app_get "$app" octane)" ]]; then type="laravel-octane"
     else type="laravel"
     fi
@@ -2827,7 +3097,18 @@ _nginx_reapply_ssl() {
 # nginx supports apr1 natively.
 _basicauth_set_user() {
     local app="$1" user="$2" password="$3"
+    local hash; hash=$(openssl passwd -apr1 "$password" 2>/dev/null)
+    [[ -z "$hash" ]] && { error "Failed to hash password"; return 1; }
+    _basicauth_write_hash "$app" "$user" "$hash"
+}
+
+# Write "<user>:<hash>" with an already-computed hash (cipi.yml ships bcrypt or
+# SHA-512 crypt hashes — nginx checks them through the system crypt()).
+_basicauth_write_hash() {
+    local app="$1" user="$2" hash="$3"
     local file; file=$(_basicauth_file "$app")
+    [[ "$user" =~ ^[A-Za-z0-9._-]+$ ]] || { error "Invalid basic auth user '${user}'"; return 1; }
+    [[ "$hash" =~ ^[A-Za-z0-9./\$=]+$ ]] || { error "Invalid password hash for '${user}'"; return 1; }
     # htpasswd lives under /etc/nginx (same root mount as /etc/cipi). Recover
     # remount-ro before mkdir; fail closed so callers never think auth was set.
     if ! _cipi_ensure_config_writable; then
@@ -2852,9 +3133,10 @@ _basicauth_set_user() {
     }
     chown root:www-data "$BASICAUTH_DIR" 2>/dev/null || true
     chmod 750 "$BASICAUTH_DIR" 2>/dev/null || true
-    local hash; hash=$(openssl passwd -apr1 "$password" 2>/dev/null)
-    [[ -z "$hash" ]] && { error "Failed to hash password"; return 1; }
-    [[ -f "$file" ]] && sed -i "/^${user}:/d" "$file" 2>/dev/null || true
+    # Exact user match: a regex would let "a.b" also drop "axb".
+    if [[ -f "$file" ]]; then
+        (umask 027; awk -F: -v u="$user" '$1 != u' "$file" > "${file}.tmp") 2>/dev/null && mv -f "${file}.tmp" "$file"
+    fi
     echo "${user}:${hash}" >> "$file" || {
         error "Cannot write ${file}"
         return 1
@@ -2862,6 +3144,16 @@ _basicauth_set_user() {
     chown root:www-data "$file" 2>/dev/null || true
     chmod 640 "$file" 2>/dev/null || true
     return 0
+}
+
+_basicauth_remove_user() {
+    local app="$1" user="$2"
+    local file; file=$(_basicauth_file "$app")
+    [[ -f "$file" ]] || return 0
+    _cipi_ensure_config_writable || { error "Cannot write ${file}: filesystem is read-only"; return 1; }
+    (umask 027; awk -F: -v u="$user" '$1 != u' "$file" > "${file}.tmp") && mv -f "${file}.tmp" "$file" || return 1
+    chown root:www-data "$file" 2>/dev/null || true
+    chmod 640 "$file" 2>/dev/null || true
 }
 
 basicauth_enable() {
@@ -3530,7 +3822,7 @@ _schedule_crontab_write() {
     fi
     cat <<CRON | crontab -u "$app" -
 ${schedule_line}# Cipi deploy trigger (written by cipi/agent webhook)
-* * * * * test -f ${home}/.deploy-trigger && rm -f ${home}/.deploy-trigger && /usr/local/bin/cipi-app-deploy ${app} ${php_ver} webhook >/dev/null 2>&1
+* * * * * test -f ${home}/.deploy-trigger && mv -f ${home}/.deploy-trigger ${home}/.deploy-trigger.run && /usr/local/bin/cipi-app-deploy ${app} ${php_ver} webhook >/dev/null 2>&1
 CRON
 }
 

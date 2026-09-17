@@ -65,7 +65,7 @@ _help_topic_header() {
 
 _help_topics_list() {
     cat <<'EOF'
-app  domains  www  redirect  proxy  deploy  worker  schedule  health  monitor  db  search  service  ssl
+app  node  domains  www  redirect  proxy  deploy  worker  schedule  health  monitor  db  search  service  ssl
 php  package  auth  basicauth  ssh  firewall  ban  crowdsec  zt  scan  compliance  backup  sync
 git  ini  yml  nginx  api  gui  smtp  notifications  reset  server  completion
 EOF
@@ -94,6 +94,7 @@ show_help() {
     echo ""
     echo -e "  ${BOLD}Apps & deploy${NC}"
     _help_cmd "cipi app ..."               "Create, edit, logs, env, ..."
+    _help_cmd "cipi node ..."              "Node frontends: SPA, static, SSR  ${DIM}install|status|restart${NC}"
     _help_cmd "cipi domains / alias / www" "Domains, aliases & www redirects"
     _help_cmd "cipi redirect / proxy ..."  "Nginx redirects & prefix reverse proxies"
     _help_cmd "cipi deploy <app>"        "Deploy / rollback / webhook"
@@ -180,6 +181,8 @@ show_help_topic() {
             _help_h "Lifecycle"
             _help_cmd "cipi app create [--custom]"     "Create app  ${DIM}[--engine=] [--octane]${NC}"
             _help_note "Laravel Octane: --octane or --octane=frankenphp (no FPM; Nginx → Octane)"
+            _help_cmd "cipi app create --node=spa|static|ssr" "Node frontend  ${DIM}[--framework=next|nuxt|sveltekit|astro|remix|vite]${NC}"
+            _help_note "See: cipi help node"
             _help_cmd "cipi app list"                  "List apps"
             _help_cmd "cipi app show <app>"            "App details"
             _help_cmd "cipi app edit <app>"            "Edit app  ${DIM}[--domain=] [--php=] [--node-build=]${NC}"
@@ -308,10 +311,15 @@ show_help_topic() {
             _help_cmd "cipi deploy <app> --unlock"     "Unlock a stuck deploy"
             _help_cmd "cipi deploy <app> --trust-host=<host[:port]>" "Trust a custom Git server"
             _help_cmd "cipi deploy <app> --rollback-on-unhealthy" "Undo the release if it fails its healthcheck"
+            _help_cmd "cipi deploy <app> --audit"      "Audit ledger  ${DIM}[--days=90] [--json]${NC}"
             echo ""
             _help_note "Both deploy paths (CLI and Git webhook) email on success and on failure,"
             _help_note "with different subjects, naming the release, the commit and its author,"
             _help_note "the duration and the post-deploy healthcheck verdict."
+            echo ""
+            _help_note "Every deploy — CLI, webhook, cipi/agent, panel or 'dep deploy' by hand —"
+            _help_note "is recorded by root in /var/log/cipi/deploys.jsonl (hash-chained, also in"
+            _help_note "syslog): release, commit, origin, login user, SSH IP. See: cipi compliance deploys"
             echo ""
             ;;
 
@@ -399,6 +407,36 @@ show_help_topic() {
             _help_cmd "cipi db password <name>"        "Reset DB user password  ${DIM}[--engine=]${NC}"
             _help_note "MariaDB is native (3306). Optional: cipi db install pgsql (5432)"
             _help_note "app create: --engine=mariadb|pgsql (default from cipi db default)"
+            echo ""
+            ;;
+
+        node|nodejs|frontend|ssr|spa)
+            _help_topic_header "Node frontends"
+            echo ""
+            _help_cmd "cipi app create --node=spa"      "Client-side app (Vite + React/Vue/Svelte): build → nginx, fallback /index.html"
+            _help_cmd "cipi app create --node=static"   "Pre-rendered site (Astro, Nuxt generate, Next export): real 404s"
+            _help_cmd "cipi app create --node=ssr"      "Node server (Next, Nuxt, SvelteKit, Astro, Remix), blue/green deploys"
+            _help_note "  --framework=next|nuxt|sveltekit|astro|remix|vite  presets for mode, build, start, output"
+            _help_note "  --node-version=22|24  --build=\"npm run build\"  --start=\"node build\"  --output=dist  --health-path=/"
+            echo ""
+            _help_cmd "cipi node install [major]"       "Official Node build, checksum-verified  ${DIM}(default ${NODE_DEFAULT_MAJOR:-22})${NC}"
+            _help_cmd "cipi node default [major|system]" "Server-wide Node: Laravel builds, app run, deploy.post"
+            _help_cmd "cipi node list"                  "Installed majors and the apps on each"
+            _help_cmd "cipi node upgrade [major]"       "Latest patch  ${DIM}[--restart] — SSR apps with no downtime${NC}"
+            _help_cmd "cipi node remove <major>"        "Only when no app uses it"
+            _help_cmd "cipi node status <app>"          "Mode, commands, blue/green slots"
+            _help_cmd "cipi node restart <app>"         "Zero-downtime restart (SSR)"
+            _help_cmd "cipi node logs <app>"            "Log of the serving slot  ${DIM}[--lines=100]${NC}"
+            _help_cmd "cipi app edit <app>"             "${DIM}--build= --start= --output= --health-path= --node-version= --node=${NC}"
+            _help_note "Laravel apps: cipi app edit <app> --node-version=24 pins one app; =default follows the server again."
+            echo ""
+            _help_note "Deploy: lockfile install (npm ci / pnpm / yarn / bun), build with NODE_ENV=production."
+            _help_note "SSR: the new release starts on the idle slot, must answer below 500 on the health"
+            _help_note "path, then nginx switches; if it never does, the old release keeps serving."
+            _help_note "shared/.env is linked into every release (build time) and read by the server (runtime)."
+            _help_note "Git webhooks work without cipi/agent: Cipi verifies them itself."
+            _help_note "cipi.yml node: {framework, mode, version, build, start, output, health_path} is read by"
+            _help_note "each deploy before the build (needs: cipi yml auto <app> on)."
             echo ""
             ;;
 
@@ -691,7 +729,7 @@ show_help_topic() {
             _help_cmd "cipi backup run [--profile=NAME] [--dry-run]" "Run now (--dry-run shows what it would take)"
             _help_cmd "cipi backup list [--profile=NAME]"           "Runs held on each destination"
             _help_cmd "cipi backup verify [--profile=NAME] [--deep]" "Check the newest run opens"
-            _help_cmd "cipi backup prune [--profile=NAME] [--dry-run]" "Apply retention now"
+            _help_cmd "cipi backup prune [--profile=NAME] [--dry-run]" "Apply retention now (incl. pre-5.1 and removed-profile archives)"
             _help_cmd "cipi backup fetch <profile> <timestamp>"     "Download and decrypt one run"
             _help_cmd "cipi backup key show|rotate"                 "Encryption key (save it off-server)"
             echo ""
@@ -719,8 +757,9 @@ show_help_topic() {
             _help_topic_header "cipi.yml"
             echo ""
             _help_note "An app can carry a cipi.yml in its repository describing the state it"
-            _help_note "expects: aliases, PHP version and settings, extra databases, queue"
-            _help_note "workers, its healthcheck, post-deploy steps and its backup strategy."
+            _help_note "expects: aliases, www redirect, basic auth, redirects, proxies, search, PHP"
+            _help_note "version and settings, extra databases, queue workers, its healthcheck,"
+            _help_note "post-deploy steps and its backup strategy."
             _help_note "Configuration travels with the code."
             echo ""
             _help_cmd "cipi yml generate <app>"           "Print this app's current config as cipi.yml"
@@ -834,6 +873,7 @@ show_help_all() {
     show_help_topic monitor
     show_help_topic db
     show_help_topic search
+    show_help_topic node
     show_help_topic api
     show_help_topic gui
     show_help_topic git
@@ -940,6 +980,7 @@ main() {
         monitor)    _maybe_cmd_help monitor "$@";    require_root; source "${CIPI_LIB}/monitor.sh";     monitor_command "$@" ;;
         db)         _maybe_cmd_help db "$@";         require_root; source "${CIPI_LIB}/db.sh";          db_command "$@" ;;
         search)     _maybe_cmd_help search "$@";     require_root; source "${CIPI_LIB}/search.sh";      search_command "$@" ;;
+        node)       _maybe_cmd_help node "$@";       require_root; source "${CIPI_LIB}/node.sh";        node_command "$@" ;;
         ssl)        _maybe_cmd_help ssl "$@";        require_root; source "${CIPI_LIB}/ssl.sh";         ssl_command "$@" ;;
         php)        _maybe_cmd_help php "$@";        require_root; source "${CIPI_LIB}/php.sh";         php_command "$@" ;;
         package|packages) _maybe_cmd_help package "$@"; require_root; source "${CIPI_LIB}/package.sh"; package_command "$@" ;;

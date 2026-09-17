@@ -60,6 +60,7 @@ db_create|Database|Database created
 db_delete|Database|Database deleted
 search_install|Search|Meilisearch installed
 search_enable|Search|Search enabled for an app
+node_default|Node|Server-wide Node version changed
 search_disable|Search|Search disabled for an app
 search_key_rotate|Search|Meilisearch API key rotated
 search_upgrade|Search|Meilisearch upgraded

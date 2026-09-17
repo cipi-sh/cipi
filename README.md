@@ -84,7 +84,8 @@ Every app gets a fully isolated environment. **Laravel** (default): zero-downtim
 | **Security**       | Fail2ban + UFW, optional CrowdSec (firewall bouncer), optional **Cloudflare Zero Trust** (`cipi zt`: tunnel, Access, origin dark), and nightly integrity/upload scan, per-app Linux user + PHP-FPM/Octane + SSH key |
 | **Healthchecks**   | HTTP probes every 5 minutes, plus a post-deploy check with optional automatic rollback of a broken release    |
 | **Backups**        | Backup profiles: what, how often, where, how long — S3/S3-compatible/local, client-side encryption           |
-| **Configuration**  | `cipi ini` for php.ini; optional per-project `cipi.yml` for aliases, databases, workers, Reverb, backups and post-deploy steps  |
+| **Frontends**      | Node apps: SPA and static sites served by nginx, SSR (Next, Nuxt, SvelteKit, Astro, Remix) with blue/green deploys, per-app Node version |
+| **Configuration**  | `cipi ini` for php.ini; optional per-project `cipi.yml` for aliases, www, basic auth, redirects and proxies, search, databases, workers, Reverb, limits, deploy recipe, forced HTTPS, required .env names, scheduled commands, backups and post-deploy steps  |
 
 ---
 
@@ -119,6 +120,8 @@ Patch-level only (`apt --only-upgrade` of what is already installed). Cipi confi
 
 Deployer clones your repo, runs `composer install`, links storage, runs migrations, and swaps the symlink atomically. Optional **Node build** on deploy (`cipi app edit --node-build=…`). Roll back to any of the last 5 releases instantly. Opt-in **pre-deploy DB snapshot** (`cipi deploy --snapshot`).
 
+Every deploy is recorded in a root-owned, hash-chained **audit ledger** (`/var/log/cipi/deploys.jsonl`, also sent to syslog), whatever started it: `cipi deploy`, the Git webhook, cipi/agent, the panel, or `dep deploy` run by hand. Each record has the release, the commit, and who started the deploy, read by root from the process chain: origin, login user and SSH address. `cipi deploy <app> --audit` shows it.
+
 ### 💾 Backups That Match How You Actually Work
 
 Backups are driven by **profiles**: each one decides what it takes (application
@@ -144,8 +147,12 @@ none, because it still looks configured.
 ### 📄 cipi.yml — Configuration That Travels With the Code
 
 An app can carry a `cipi.yml` in its repository describing the state it expects:
-domain aliases, PHP version and settings, its extra databases, its queue workers,
-its healthcheck, its backup strategy, and **post-deploy steps** (`deploy.post`).
+domain aliases, the www redirect, HTTP basic auth, redirects and prefix proxies,
+Meilisearch for Scout, PHP version, settings and limits, its extra databases, its queue workers, its healthcheck,
+its deploy recipe options (`keep_releases`, the artisan hooks, the pre-deploy
+snapshot), the forced HTTPS redirect, the `.env` variables it requires (names
+only, never values), its scheduled commands (`crons`),
+its backup strategy, and **post-deploy steps** (`deploy.post`).
 `cipi yml plan` shows exactly what would change and `cipi yml apply` applies it.
 
 Server reconciliation (aliases, PHP, workers, databases, …) is **opt-in**:
@@ -166,6 +173,33 @@ deploy:
   # post_on_failure: abort   # default warn — log + email, release stays live
 ```
 
+```yaml
+app:
+  www: to-root                 # www → apex
+  basic_auth:
+    users: [admin]             # keeps the password set on the server
+  limits:
+    memory_limit: 512M         # cipi app limits, same bounds as the CLI
+redirects:
+  - from: /blog/
+    to: "https://blog.example.com/"
+proxies:
+  - prefix: /api/
+    upstream: "http://127.0.0.1:3000"
+    strip_prefix: true
+ssl:
+  force_https: true            # needs a certificate; only ever turned on here
+env:
+  required: [STRIPE_KEY]       # names the .env must carry — plan blocks if missing
+crons:
+  - every: 30m                 # same allowlisted runners as deploy.post
+    run: artisan queue:prune-batches
+deploy:
+  keep_releases: 3             # cipi app deploy-config, from the repository
+  migrate: false
+  snapshot: true               # DB snapshot before each deploy
+```
+
 ```bash
 cipi yml generate myapp > cipi.yml   # start from the server
 cipi yml example myapp > cipi.yml    # or a commented template
@@ -176,7 +210,39 @@ cipi yml post-deploy myapp           # run deploy.post now (test)
 It can only *configure* an app that already exists, its databases must be named
 `<app>` or `<app>_*`, its backup profiles `<app>` or `<app>-*`, and its
 healthcheck URL one of the app's own domains — so a commit can never reach
-beyond its own app.
+beyond its own app. Passwords never go in the file: a basic auth user listed by
+name keeps the password already on the server, and only bcrypt or SHA-512 crypt
+hashes are accepted. Proxies declared in the file cannot publish Cipi's own local
+services (databases, Valkey, another app's Octane/Reverb) or link-local and cloud
+metadata addresses, even through a hostname that resolves to one. `crons` entries
+go through the same allowlisted runners as `deploy.post` — never a free-form
+shell line — and only replace the crontab entries the file manages, tagged
+`# cipi-yml`. `app.limits` values outside the CLI's bounds block the plan instead
+of being clamped, and `ssl.force_https` can only ever be turned on from the file.
+
+### ⚛️ Node Frontends: SPA, Static and SSR
+
+React, Vue, Svelte, Next.js, Nuxt, SvelteKit, Astro and Remix get the same flow as Laravel: git push, releases, rollback, webhooks, SSL, basic auth, redirects, audit ledger.
+
+```bash
+cipi app create --user=shop --domain=shop.com --repository=git@github.com:acme/shop.git --framework=next
+cipi app create --user=docs --domain=docs.com --repository=git@github.com:acme/docs.git --node=static --output=dist
+cipi app create --user=dash --domain=dash.com --repository=git@github.com:acme/dash.git --framework=vite
+```
+
+- **`spa`**: built on deploy and served by nginx. Unknown paths fall back to `index.html`, fingerprinted assets are cached as immutable, HTML is revalidated.
+- **`static`**: pre-rendered output (Astro, `nuxt generate`, Next `output: 'export'`) with real 404s.
+- **`ssr`**: a Node server on localhost behind nginx, with **blue/green deploys**. The new release starts on the idle slot and must answer on its health path before nginx switches to it; the old process stops only after that. A release that never comes up fails the deploy and the old one keeps serving. `cipi node restart <app>` uses the same switch.
+
+Dependencies are installed exactly as locked (`npm ci`, pnpm, yarn or bun, detected from the lockfile), and the build runs with `NODE_ENV=production`. `shared/.env` is linked into every release, so it works for build-time variables (`VITE_*`, `NEXT_PUBLIC_*`) and runtime secrets alike. Presets (`--framework=next|nuxt|sveltekit|astro|remix|vite`) fill in the mode, build, start command and output folder; `--build`, `--start`, `--output` and `--health-path` override them.
+
+**Node per app, from nodejs.org.** `--node-version=22|24` installs the official build into `/opt/cipi/node/<major>`, verified against the release's SHA-256 list, with corepack for pnpm and yarn. Apps on different majors run side by side. `cipi node upgrade --restart` moves every app to the latest patch with no downtime.
+
+**Laravel apps too.** `cipi node default 24` makes that major the server-wide Node for Laravel asset builds (`--node-build`), `cipi app run npm` and `cipi.yml` post-deploy steps, overriding the system Node from NodeSource without uninstalling it (`cipi node default system` goes back). One app that needs something else keeps its own: `cipi app edit legacy --node-version=22`.
+
+The same settings can live in the repository as a `node:` section of `cipi.yml` (`framework`, `mode`, `version`, `build`, `start`, `output`, `health_path`). With `cipi yml auto <app> on`, each deploy reads them from the commit being deployed, before the build, so a change ships together with the code that needs it.
+
+Git webhooks work without cipi/agent: Cipi verifies GitHub/Bitbucket HMAC signatures and GitLab/Azure tokens itself, in a PHP pool that can do nothing but queue the app's own deploy. The start command runs as an argument list, never through a shell. `.env` is read as data, not sourced, and the server binds to 127.0.0.1 on a port Cipi assigns.
 
 ### 🚀 Laravel Octane (FrankenPHP)
 
@@ -236,7 +302,7 @@ The allowlist is the feature: without it this would be a root apt shell with ext
 
 `install` shows what apt actually intends to pull — package count and disk — and asks before running. `remove` purges only what is present, then shows which orphaned dependencies `autoremove` would take before touching them.
 
-Already in the base stack, so not in the list: the **Imagick PHP extension**, **Ghostscript** and **fonts-dejavu-core** (Recommends of `php-imagick`), and **Node 20**.
+Already in the base stack, so not in the list: the **Imagick PHP extension**, **Ghostscript** and **fonts-dejavu-core** (Recommends of `php-imagick`), and **Node 22** (`cipi node default` changes it).
 
 ### 🔗 Webhook Auto-Deploy
 
@@ -295,7 +361,7 @@ cipi notifications channel add ntfy phone --url=https://ntfy.sh/my-topic --prior
 
 ### 📋 Compliance Evidence (ISO 27001 / SOC 2)
 
-Cipi is self-hosted software, so it cannot be certified itself: ISO 27001 certifies an organisation, SOC 2 attests a service. What an agency or SaaS under audit needs is **evidence** that its servers meet the controls. **`cipi compliance report`** collects it in one read-only pass: SSH hardening, firewall, fail2ban, OS patches, kernel network parameters, TLS protocols and certificates, local accounts and sudo, SSH key fingerprints, API tokens (expiry, last use, scope), GUI 2FA, config encryption at rest, the deploy and rollback log with commit SHAs, backup freshness, log forwarding, monitoring and alert delivery, NTP, and malware scanning. Each control is mapped to ISO/IEC 27001:2022 Annex A and SOC 2 criteria.
+Cipi is self-hosted software, so it cannot be certified itself: ISO 27001 certifies an organisation, SOC 2 attests a service. What an agency or SaaS under audit needs is **evidence** that its servers meet the controls. **`cipi compliance report`** collects it in one read-only pass: SSH hardening, firewall, fail2ban, OS patches, kernel network parameters, TLS protocols and certificates, local accounts and sudo, SSH key fingerprints, API tokens (expiry, last use, scope), GUI 2FA, config encryption at rest, the deploy audit ledger (every deploy with commit, origin and operator, hash chain verified, cross-checked against Deployer's own release log), backup freshness, log forwarding, monitoring and alert delivery, NTP, and malware scanning. Each control is mapped to ISO/IEC 27001:2022 Annex A and SOC 2 criteria.
 
 ```bash
 cipi compliance                   # pass / warn / fail per control, exit 1 on fail

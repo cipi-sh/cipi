@@ -3,7 +3,8 @@
 # Cipi — cipi.yml (declarative app configuration)
 #
 # An app can carry a `cipi.yml` in its repository describing the state it
-# expects on the server: domain aliases, PHP version and settings, its extra
+# expects on the server: domain aliases, the www redirect, HTTP basic auth,
+# redirects and prefix proxies, search, PHP version and settings, its extra
 # databases, its queue workers and its backup strategy. `cipi yml apply`
 # reconciles the server with that file, so the configuration travels with the
 # code instead of living only in someone's shell history.
@@ -32,6 +33,7 @@ yml_command() {
         apply)          _yml_apply_cmd "$@" ;;
         auto)           _yml_auto_cmd "$@" ;;
         post-deploy|postdeploy) _yml_post_deploy_cmd "$@" ;;
+        node-sync)      _yml_node_sync_cmd "$@" ;;
         generate|dump)  _yml_generate "$@" ;;
         example|sample) _yml_example "$@" ;;
         *) error "Use: validate plan apply auto post-deploy generate example"; exit 1 ;;
@@ -130,7 +132,46 @@ REL_SCRIPT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_./-]{0,200}$")
 MAX_POST_STEPS = 20
 MAX_POST_ARGS = 32
 NPM_FORBIDDEN = frozenset({"explore", "init", "login", "adduser", "edit"})
+# Mirrors the charsets in lib/routes.sh: no quotes, '$', ';', braces or
+# whitespace, so a rule can never inject nginx directives. routes.sh validates
+# again (loops, collisions, reserved paths, upstream checks) at plan time.
+ROUTE_PATH_RE = re.compile(r"^/[A-Za-z0-9._~/+@:,=-]*$")
+ROUTE_TARGET_PATH_RE = re.compile(r"^/[A-Za-z0-9._~%/+@:,=-]*([?][A-Za-z0-9._~%/+@:,=&-]*)?$")
+ROUTE_URL_RE = re.compile(
+    r"^https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9._~%/+@:,=&?#!-]*)?$")
+ROUTE_UPSTREAM_RE = re.compile(
+    r"^https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9._~%/+-]*)?$")
+REDIRECT_CODES = {301, 302, 307, 308}
+MAX_REDIRECTS = 100
+MAX_PROXIES = 20
+WWW_MODES = {"to-root", "from-root", "none"}
+BASICAUTH_USER_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+# Only hashes that are expensive to brute-force may live in a repository:
+# bcrypt (cost 10+) and SHA-512 crypt. apr1/MD5 and plain SHA are refused.
+BCRYPT_RE = re.compile(r"^\$2[aby]\$([0-9]{2})\$[./A-Za-z0-9]{53}$")
+SHA512CRYPT_RE = re.compile(r"^\$6\$(rounds=[0-9]{4,9}\$)?[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{86}$")
+MAX_BASICAUTH_USERS = 20
+# Mirrors lib/node.sh (_node_valid_*, _validate_node_build_cmd). Bash checks
+# again when the section is resolved at deploy time.
+NODE_FRAMEWORKS = {"next", "nuxt", "sveltekit", "astro", "remix", "vite"}
+NODE_MODES = {"spa", "static", "ssr"}
+NODE_RUNNERS = {"node", "npm", "npx", "pnpm", "yarn", "bun"}
+NODE_BUILD_RE = re.compile(r"""^[a-zA-Z0-9_./= :&;'"-]+$""")
+NODE_ARG_RE = re.compile(r"^[A-Za-z0-9@._/:=+-]+$")
+NODE_OUTPUT_RE = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9._/-]{0,120}$")
+NODE_HEALTH_RE = re.compile(r"^/[A-Za-z0-9._~/-]{0,200}$")
 COMPOSER_FORBIDDEN = frozenset({"shell", "browse", "fund"})
+# Deploy recipe options (cipi app deploy-config) and app limits (cipi app
+# limits). The bounds mirror the CLI; a value outside them is refused here
+# rather than clamped, because nobody is watching an automatic apply.
+KEEP_RELEASES_MIN, KEEP_RELEASES_MAX = 1, 20
+MAX_EXTRA_ARTISAN = 20
+MEMORY_LIMIT_RE = re.compile(r"^[0-9]{1,5}[MmGg]?$")
+LIMIT_BOUNDS = {"fpm_max_children": (1, 50), "octane_workers": (1, 16), "worker_procs": (1, 20)}
+# Names only, never values: a required .env key is a check, not a secret.
+ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+MAX_ENV_REQUIRED = 100
+MAX_CRONS = 20
 
 
 class YamlError(Exception):
@@ -441,7 +482,8 @@ class Validator:
             self.err("cipi.yml", "the file must be a mapping at the top level")
             return None
 
-        allowed = {"version", "app", "databases", "workers", "backup", "schedule", "health", "deploy"}
+        allowed = {"version", "app", "databases", "workers", "backup", "schedule", "health", "deploy",
+                   "redirect", "redirects", "proxies", "search", "node", "ssl", "env", "crons"}
         self.unknown_keys(doc, allowed, "cipi.yml")
 
         version = doc.get("version")
@@ -463,17 +505,361 @@ class Validator:
             b = self.as_bool(doc["schedule"], "schedule")
             if b is not None:
                 out["schedule"] = b
+        if "search" in doc:
+            b = self.as_bool(doc["search"], "search")
+            if b is not None:
+                out["search"] = b
+        if "node" in doc:
+            out["node"] = self.v_node(doc["node"])
         if "health" in doc:
             out["health"] = self.v_health(doc["health"])
         if "deploy" in doc:
             out["deploy"] = self.v_deploy(doc["deploy"])
+        if "redirect" in doc:
+            out["redirect"] = self.v_redirect(doc["redirect"])
+        if "redirects" in doc:
+            out["redirects"] = self.v_redirects(doc["redirects"])
+        if "proxies" in doc:
+            out["proxies"] = self.v_proxies(doc["proxies"])
+        if "ssl" in doc:
+            out["ssl"] = self.v_ssl(doc["ssl"])
+        if "env" in doc:
+            out["env"] = self.v_env(doc["env"])
+        if "crons" in doc:
+            out["crons"] = self.v_crons(doc["crons"])
+        return out
+
+    # ── ssl (cipi ssl force)
+
+    def v_ssl(self, node):
+        m = self.expect_map(node, "ssl")
+        if m is None:
+            return {}
+        self.unknown_keys(m, {"force_https"}, "ssl")
+        out = {}
+        if "force_https" in m:
+            b = self.as_bool(m["force_https"], "ssl.force_https")
+            if b is not None:
+                out["force_https"] = b
+        return out
+
+    # ── env.required — names the .env must carry, never their values
+
+    def v_env(self, node):
+        m = self.expect_map(node, "env")
+        if m is None:
+            return {}
+        self.unknown_keys(m, {"required"}, "env")
+        out = {}
+        if "required" in m:
+            lst = self.expect_list(m["required"], "env.required")
+            if lst is None:
+                return out
+            if len(lst) > MAX_ENV_REQUIRED:
+                self.err("env.required", "at most %d variables" % MAX_ENV_REQUIRED)
+                return out
+            keys, seen = [], set()
+            for i, item in enumerate(lst):
+                p = "env.required[%d]" % i
+                s = self.as_str(item, p)
+                if s is None:
+                    continue
+                if not ENV_KEY_RE.match(s):
+                    self.err(p, "invalid variable name %r (UPPER_CASE letters, digits and _)" % s)
+                    continue
+                if s in seen:
+                    self.err(p, "duplicate variable %r" % s)
+                    continue
+                seen.add(s)
+                keys.append(s)
+            out["required"] = keys
+        return out
+
+    # ── crons — scheduled commands through the deploy.post runners
+
+    def v_cron_schedule(self, m, path):
+        """Returns ('every'|'cron', value) or None. Same rules as backup profiles."""
+        if "every" in m and "cron" in m:
+            self.err(path, "use either 'every' or 'cron', not both")
+            return None
+        if "every" in m:
+            s = self.as_str(m["every"], path + ".every")
+            if s is None:
+                return None
+            mm = EVERY_RE.match(s)
+            if not mm:
+                self.err(path + ".every", "expected a value like 30m, 6h or 1d")
+                return None
+            num, unit = int(mm.group(1)), mm.group(2)
+            if num == 0:
+                self.err(path + ".every", "must be greater than zero")
+                return None
+            if unit == "m" and (num > 59 or 60 % num != 0):
+                self.err(path + ".every", "minutes must divide 60 evenly (5m, 10m, 15m, 20m, 30m)")
+                return None
+            if unit == "h" and (num > 23 or 24 % num != 0):
+                self.err(path + ".every", "hours must divide 24 evenly (1h, 2h, 3h, 4h, 6h, 8h, 12h)")
+                return None
+            if unit == "d" and num > 28:
+                self.err(path + ".every", "at most 28 days")
+                return None
+            return ("every", s)
+        if "cron" in m:
+            s = self.as_str(m["cron"], path + ".cron")
+            if s is None:
+                return None
+            if not CRON_RE.match(s) or len(s.split()) != 5:
+                self.err(path + ".cron", "expected five cron fields using digits and * / , - only")
+                return None
+            return ("cron", s)
+        self.err(path, "'every' (30m, 6h, 1d) or 'cron' is required")
+        return None
+
+    def v_crons(self, node):
+        lst = self.expect_list(node, "crons")
+        if lst is None:
+            return []
+        if len(lst) > MAX_CRONS:
+            self.err("crons", "at most %d scheduled commands" % MAX_CRONS)
+            return []
+        out = []
+        for i, item in enumerate(lst):
+            p = "crons[%d]" % i
+            m = self.expect_map(item, p)
+            if m is None:
+                continue
+            self.unknown_keys(m, {"every", "cron", "run"}, p)
+            sched = self.v_cron_schedule(m, p)
+            if sched is None:
+                continue
+            run = m.get("run")
+            if not isinstance(run, str) or not run.strip():
+                self.err(p + ".run", "a command string using the deploy.post runners "
+                                     "(artisan, npm, composer, php, node, …) is required")
+                continue
+            step = self.v_deploy_post_string(run.strip(), p + ".run")
+            if step is None:
+                continue
+            entry = {sched[0]: sched[1]}
+            entry.update(step)
+            out.append(entry)
+        return out
+
+    # ── Node frontend apps (lib/node.sh)
+
+    def v_node(self, node):
+        m = self.expect_map(node, "node")
+        if m is None:
+            return {}
+        self.unknown_keys(m, {"framework", "mode", "version", "build", "start", "output", "health_path"}, "node")
+        out = {}
+        if "framework" in m:
+            fw = self.as_str(m["framework"], "node.framework")
+            if fw is not None:
+                if fw not in NODE_FRAMEWORKS:
+                    self.err("node.framework", "must be one of %s" % ", ".join(sorted(NODE_FRAMEWORKS)))
+                else:
+                    out["framework"] = fw
+        if "mode" in m:
+            mode = self.as_str(m["mode"], "node.mode")
+            if mode is not None:
+                if mode not in NODE_MODES:
+                    self.err("node.mode", "must be spa, static or ssr")
+                else:
+                    out["mode"] = mode
+        if "version" in m:
+            v = m["version"]
+            if isinstance(v, bool) or not isinstance(v, (int, str)) or not re.match(r"^[2-9][0-9]$", str(v)) or int(v) % 2:
+                self.err("node.version", "must be an even (LTS) major such as 22 or 24")
+            else:
+                out["version"] = str(v)
+        if "build" in m:
+            b = self.as_str(m["build"], "node.build")
+            if b is not None:
+                bad = (len(b) > 200 or any(c in b for c in "|<>`") or "$(" in b
+                       or not NODE_BUILD_RE.match(b) or b.split(" ")[0] not in NODE_RUNNERS)
+                if bad:
+                    self.err("node.build", "a command starting with node/npm/npx/pnpm/yarn/bun, no pipes, redirects or substitutions")
+                else:
+                    out["build"] = b
+        if "start" in m:
+            st = self.as_str(m["start"], "node.start")
+            if st is not None:
+                words = st.split()
+                if (not 2 <= len(words) <= 12 or words[0] not in NODE_RUNNERS or ".." in st
+                        or not all(NODE_ARG_RE.match(w) for w in words)):
+                    self.err("node.start", "a Node runner (node npm npx pnpm yarn bun) and plain arguments — it runs without a shell")
+                else:
+                    out["start"] = st
+        if "output" in m:
+            o = self.as_str(m["output"], "node.output")
+            if o is not None:
+                o = o.rstrip("/")
+                segs = o.split("/")
+                if (not NODE_OUTPUT_RE.match(o) or ".." in o or "//" in o or o == "."
+                        or any(sg in (".git", ".ssh", "node_modules") or sg.startswith((".git", ".env")) for sg in segs)):
+                    self.err("node.output", "a directory inside the repository, e.g. dist — never the root, .git, .env or node_modules")
+                else:
+                    out["output"] = o
+        if "health_path" in m:
+            h = self.as_str(m["health_path"], "node.health_path")
+            if h is not None:
+                if not NODE_HEALTH_RE.match(h):
+                    self.err("node.health_path", "must be a path such as / or /api/health")
+                else:
+                    out["health_path"] = h
+        return out
+
+    # ── nginx routes (lib/routes.sh)
+
+    def v_code(self, m, path):
+        if "code" not in m:
+            return 301
+        v = m["code"]
+        if isinstance(v, bool) or not isinstance(v, int) or v not in REDIRECT_CODES:
+            self.err(path + ".code", "must be 301, 302, 307 or 308")
+            return None
+        return v
+
+    def v_redirect(self, node):
+        m = self.expect_map(node, "redirect")
+        if m is None:
+            return {}
+        self.unknown_keys(m, {"enabled", "to", "code", "keep_path"}, "redirect")
+        enabled = True
+        if "enabled" in m:
+            b = self.as_bool(m["enabled"], "redirect.enabled")
+            if b is None:
+                return {}
+            enabled = b
+        if "to" not in m:
+            if enabled:
+                self.err("redirect", "'to' is required (or use 'enabled: false' to remove the app redirect)")
+                return {}
+            for k in m:
+                if k != "enabled":
+                    self.err("redirect." + k, "cannot be set without 'to'")
+            return {"enabled": False}
+        to = self.as_str(m["to"], "redirect.to")
+        if to is None:
+            return {}
+        if not ROUTE_URL_RE.match(to):
+            self.err("redirect.to", "must be an http:// or https:// URL")
+            return {}
+        code = self.v_code(m, "redirect")
+        keep = True
+        if "keep_path" in m:
+            keep = self.as_bool(m["keep_path"], "redirect.keep_path")
+        if code is None or keep is None:
+            return {}
+        return {"enabled": enabled, "to": to, "code": code, "keep_path": keep}
+
+    def v_redirects(self, node):
+        lst = self.expect_list(node, "redirects")
+        if lst is None:
+            return []
+        if len(lst) > MAX_REDIRECTS:
+            self.err("redirects", "at most %d path redirects" % MAX_REDIRECTS)
+            return []
+        out, seen = [], set()
+        for i, item in enumerate(lst):
+            p = "redirects[%d]" % i
+            m = self.expect_map(item, p)
+            if m is None:
+                continue
+            self.unknown_keys(m, {"from", "to", "code", "keep_path"}, p)
+            src = self.as_str(m.get("from"), p + ".from")
+            dst = self.as_str(m.get("to"), p + ".to")
+            if src is None or dst is None:
+                self.err(p, "'from' and 'to' are required")
+                continue
+            if not src.startswith("/"):
+                src = "/" + src
+            if not ROUTE_PATH_RE.match(src) or "//" in src or ".." in src:
+                self.err(p + ".from", "invalid path %r (letters, digits and . _ ~ / + @ : , = - only, "
+                                    "written decoded without %%-escapes)" % src)
+                continue
+            if dst.startswith("/"):
+                if not ROUTE_TARGET_PATH_RE.match(dst) or ".." in dst:
+                    self.err(p + ".to", "invalid target path %r" % dst)
+                    continue
+            elif not ROUTE_URL_RE.match(dst):
+                self.err(p + ".to", "must be a /path or an http(s):// URL")
+                continue
+            if src in seen:
+                self.err(p + ".from", "duplicate redirect from %r" % src)
+                continue
+            seen.add(src)
+            code = self.v_code(m, p)
+            keep = True
+            if "keep_path" in m:
+                keep = self.as_bool(m["keep_path"], p + ".keep_path")
+            if code is None or keep is None:
+                continue
+            out.append({"from": src, "to": dst, "code": code, "keep_path": keep})
+        return out
+
+    def v_proxies(self, node):
+        lst = self.expect_list(node, "proxies")
+        if lst is None:
+            return []
+        if len(lst) > MAX_PROXIES:
+            self.err("proxies", "at most %d proxies" % MAX_PROXIES)
+            return []
+        out, seen = [], set()
+        for i, item in enumerate(lst):
+            p = "proxies[%d]" % i
+            m = self.expect_map(item, p)
+            if m is None:
+                continue
+            self.unknown_keys(m, {"prefix", "upstream", "strip_prefix", "preserve_host",
+                                  "timeout", "buffering"}, p)
+            prefix = self.as_str(m.get("prefix"), p + ".prefix")
+            upstream = self.as_str(m.get("upstream"), p + ".upstream")
+            if prefix is None or upstream is None:
+                self.err(p, "'prefix' and 'upstream' are required")
+                continue
+            if not prefix.startswith("/"):
+                prefix = "/" + prefix
+            if not prefix.endswith("/"):
+                prefix = prefix + "/"
+            if not ROUTE_PATH_RE.match(prefix) or "//" in prefix or ".." in prefix:
+                self.err(p + ".prefix", "invalid prefix %r" % prefix)
+                continue
+            if not ROUTE_UPSTREAM_RE.match(upstream):
+                self.err(p + ".upstream", "must be http(s)://host[:port][/path] with no query or fragment")
+                continue
+            if prefix in seen:
+                self.err(p + ".prefix", "duplicate proxy prefix %r" % prefix)
+                continue
+            seen.add(prefix)
+            entry = {"prefix": prefix, "upstream": upstream, "strip_prefix": False,
+                     "preserve_host": False, "timeout": 60, "buffering": True}
+            ok = True
+            for field in ("strip_prefix", "preserve_host", "buffering"):
+                if field in m:
+                    b = self.as_bool(m[field], "%s.%s" % (p, field))
+                    if b is None:
+                        ok = False
+                    else:
+                        entry[field] = b
+            if "timeout" in m:
+                t = self.as_int(m["timeout"], p + ".timeout", 1, 3600)
+                if t is None:
+                    ok = False
+                else:
+                    entry["timeout"] = t
+            if ok:
+                out.append(entry)
         return out
 
     def v_deploy(self, node):
         m = self.expect_map(node, "deploy")
         if m is None:
             return {}
-        self.unknown_keys(m, {"post", "post_on_failure"}, "deploy")
+        self.unknown_keys(m, {"post", "post_on_failure", "keep_releases", "migrate",
+                              "optimize", "storage_link", "queue_restart",
+                              "horizon_terminate", "extra_artisan", "snapshot"}, "deploy")
         out = {"post_on_failure": "warn", "post": []}
 
         if "post_on_failure" in m:
@@ -483,6 +869,46 @@ class Validator:
                     self.err("deploy.post_on_failure", "must be 'warn' or 'abort'")
                 else:
                     out["post_on_failure"] = s
+
+        # Recipe options, the same set as `cipi app deploy-config` plus the
+        # pre-deploy snapshot toggle. Only declared keys are reconciled.
+        if "keep_releases" in m:
+            v = self.as_int(m["keep_releases"], "deploy.keep_releases",
+                            KEEP_RELEASES_MIN, KEEP_RELEASES_MAX)
+            if v is not None:
+                out["keep_releases"] = v
+        for field in ("migrate", "optimize", "storage_link", "queue_restart",
+                      "horizon_terminate", "snapshot"):
+            if field in m:
+                b = self.as_bool(m[field], "deploy." + field)
+                if b is not None:
+                    out[field] = b
+        if "extra_artisan" in m:
+            lst = self.expect_list(m["extra_artisan"], "deploy.extra_artisan")
+            if lst is not None:
+                if len(lst) > MAX_EXTRA_ARTISAN:
+                    self.err("deploy.extra_artisan", "at most %d commands" % MAX_EXTRA_ARTISAN)
+                else:
+                    cmds, seen = [], set()
+                    ok = True
+                    for i, item in enumerate(lst):
+                        p = "deploy.extra_artisan[%d]" % i
+                        s = self.as_str(item, p)
+                        if s is None:
+                            ok = False
+                            continue
+                        if not ARTISAN_CMD_RE.match(s) or s.lower() == "tinker":
+                            self.err(p, "invalid artisan command %r (tinker is never allowed)" % s)
+                            ok = False
+                            continue
+                        if s in seen:
+                            self.err(p, "duplicate command %r" % s)
+                            ok = False
+                            continue
+                        seen.add(s)
+                        cmds.append(s)
+                    if ok:
+                        out["extra_artisan"] = cmds
 
         if "post" not in m:
             return out
@@ -701,8 +1127,46 @@ class Validator:
         m = self.expect_map(node, "app")
         if m is None:
             return {}
-        self.unknown_keys(m, {"php", "aliases", "ini"}, "app")
+        self.unknown_keys(m, {"php", "aliases", "ini", "www", "basic_auth", "limits"}, "app")
         out = {}
+
+        if "limits" in m:
+            lm = self.expect_map(m["limits"], "app.limits")
+            if lm is not None:
+                limits = {}
+                self.unknown_keys(lm, {"memory_limit"} | set(LIMIT_BOUNDS), "app.limits")
+                if "memory_limit" in lm:
+                    s = lm["memory_limit"]
+                    if isinstance(s, int) and not isinstance(s, bool):
+                        s = str(s)
+                    s = self.as_str(s, "app.limits.memory_limit")
+                    if s is not None:
+                        if not MEMORY_LIMIT_RE.match(s):
+                            self.err("app.limits.memory_limit", "expected a size such as 256M or 1G")
+                        else:
+                            limits["memory_limit"] = s
+                for field, (lo, hi) in sorted(LIMIT_BOUNDS.items()):
+                    if field in lm:
+                        v = self.as_int(lm[field], "app.limits." + field, lo, hi)
+                        if v is not None:
+                            limits[field] = v
+                out["limits"] = limits
+
+        if "www" in m:
+            w = m["www"]
+            if w is False or w is None:
+                w = "none"
+            w = self.as_str(w, "app.www")
+            if w is not None:
+                if w not in WWW_MODES:
+                    self.err("app.www", "must be one of %s" % ", ".join(sorted(WWW_MODES)))
+                else:
+                    out["www"] = w
+
+        if "basic_auth" in m:
+            ba = self.v_basic_auth(m["basic_auth"])
+            if ba is not None:
+                out["basic_auth"] = ba
 
         if "php" in m:
             php = self.as_str(m["php"], "app.php")
@@ -753,6 +1217,74 @@ class Validator:
                     ini[k] = s
             out["ini"] = ini
         return out
+
+    def v_basic_auth(self, node):
+        p = "app.basic_auth"
+        if isinstance(node, bool):
+            if node:
+                self.err(p, "list the users that may log in (basic_auth.users)")
+                return None
+            return {"enabled": False}
+        m = self.expect_map(node, p)
+        if m is None:
+            return None
+        self.unknown_keys(m, {"enabled", "users"}, p)
+        enabled = True
+        if "enabled" in m:
+            enabled = self.as_bool(m["enabled"], p + ".enabled")
+            if enabled is None:
+                return None
+        if not enabled:
+            for k in m:
+                if k != "enabled":
+                    self.err(p + "." + k, "cannot be combined with 'enabled: false'")
+            return {"enabled": False}
+        lst = self.expect_list(m.get("users"), p + ".users")
+        if lst is None:
+            return None
+        if not lst:
+            self.err(p + ".users", "at least one user is required")
+            return None
+        if len(lst) > MAX_BASICAUTH_USERS:
+            self.err(p + ".users", "at most %d users" % MAX_BASICAUTH_USERS)
+            return None
+        users, seen = [], set()
+        for i, item in enumerate(lst):
+            ip = "%s.users[%d]" % (p, i)
+            if isinstance(item, str):
+                item = {"name": item}
+            um = self.expect_map(item, ip)
+            if um is None:
+                continue
+            self.unknown_keys(um, {"name", "password_hash"}, ip)
+            name = self.as_str(um.get("name"), ip + ".name")
+            if name is None:
+                continue
+            if not BASICAUTH_USER_RE.match(name):
+                self.err(ip + ".name", "invalid user name %r (letters, digits, . _ -)" % name)
+                continue
+            if name in seen:
+                self.err(ip + ".name", "duplicate user %r" % name)
+                continue
+            seen.add(name)
+            user = {"name": name}
+            if "password_hash" in um:
+                h = self.as_str(um["password_hash"], ip + ".password_hash")
+                if h is None:
+                    continue
+                bm = BCRYPT_RE.match(h)
+                if bm:
+                    if int(bm.group(1)) < 10:
+                        self.err(ip + ".password_hash", "bcrypt cost must be at least 10")
+                        continue
+                elif not SHA512CRYPT_RE.match(h):
+                    self.err(ip + ".password_hash",
+                             "must be a bcrypt ($2y$, cost 10+) or SHA-512 crypt ($6$) hash — "
+                             "never a plain password; apr1/MD5 is refused")
+                    continue
+                user["password_hash"] = h
+            users.append(user)
+        return {"enabled": True, "users": users}
 
     def db_allowed(self, name):
         """A project file may only own databases in its own namespace.
@@ -1155,8 +1687,41 @@ _yml_build_plan() {
         fi
     fi
 
+    # ── www ↔ apex canonical redirect. Clearing it must run before the aliases
+    # are reconciled (alias_remove refuses an alias the redirect still needs);
+    # setting it runs after, so a pair alias declared in the same file exists.
+    local want_www cur_www www_action="" www_primary
+    want_www=$(echo "$_YML_DATA" | jq -r '.app.www // empty')
+    cur_www=$(app_get "$app" www_redirect); [[ "$cur_www" == "to-root" || "$cur_www" == "from-root" ]] || cur_www="none"
+    www_primary=$(app_get "$app" domain)
+    _www_resolve_pair "$www_primary"
+    local www_other="$WWW_PAIR_HOST"; [[ "$www_primary" == "$WWW_PAIR_HOST" ]] && www_other="$WWW_PAIR_APEX"
+    local aliases_declared=false
+    echo "$_YML_DATA" | jq -e 'has("app") and (.app | has("aliases"))' &>/dev/null && aliases_declared=true
+    if [[ -n "$want_www" && "$want_www" != "$cur_www" ]]; then
+        if [[ "$want_www" != "none" ]] && domain_is_wildcard "$www_primary"; then
+            _YML_BLOCKERS+=("app.www is '${want_www}', but '${app}' is served on the wildcard domain '${www_primary}' — there is no www/apex pair")
+        elif [[ "$want_www" != "none" && "$aliases_declared" == true ]] \
+             && ! echo "$_YML_DATA" | jq -e --arg d "$www_other" '.app.aliases | index($d) != null' &>/dev/null; then
+            _YML_BLOCKERS+=("app.www is '${want_www}', which needs '${www_other}' — add it to app.aliases")
+        else
+            case "$want_www" in
+                to-root)   www_action="www|to-root|www redirect ${WWW_PAIR_HOST} → ${WWW_PAIR_APEX}" ;;
+                from-root) www_action="www|from-root|www redirect ${WWW_PAIR_APEX} → ${WWW_PAIR_HOST}" ;;
+                none)      www_action="www|none|clear the www redirect (${cur_www})" ;;
+            esac
+        fi
+    fi
+    # Aliases declared without the pair while the redirect stays on: alias_remove
+    # would refuse halfway through the apply, so stop it at plan time.
+    if [[ "$aliases_declared" == true && "$cur_www" != "none" && ( -z "$want_www" || "$want_www" == "$cur_www" ) ]] \
+       && ! echo "$_YML_DATA" | jq -e --arg d "$www_other" '.app.aliases | index($d) != null' &>/dev/null; then
+        _YML_BLOCKERS+=("app.aliases drops '${www_other}', which the www redirect (${cur_www}) needs — keep it, or set 'app.www: none'")
+    fi
+    [[ "$want_www" == "none" && -n "$www_action" ]] && _YML_ACTIONS+=("$www_action")
+
     # ── aliases (declared set replaces the current one)
-    if echo "$_YML_DATA" | jq -e 'has("app") and (.app | has("aliases"))' &>/dev/null; then
+    if [[ "$aliases_declared" == true ]]; then
         local primary cur_aliases want_aliases a owner
         primary=$(app_get "$app" domain)
         cur_aliases=$(vault_read apps.json | jq -r --arg a "$app" '(.[$a].aliases // [])[]' 2>/dev/null || true)
@@ -1182,6 +1747,38 @@ _yml_build_plan() {
             _YML_ACTIONS+=("alias-remove|${a}|remove domain alias ${a}")
         done <<< "$cur_aliases"
     fi
+    [[ "$want_www" != "none" && -n "$www_action" ]] && _YML_ACTIONS+=("$www_action")
+
+    # ── HTTP basic auth. Passwords never have to be in the repository: a user
+    # listed by name keeps the password already set on this server, and only a
+    # bcrypt / SHA-512 crypt hash is accepted when one is given.
+    if echo "$_YML_DATA" | jq -e 'has("app") and (.app | has("basic_auth"))' &>/dev/null; then
+        local ba_file="/etc/nginx/cipi-basicauth/${app}.htpasswd" ba_on ba_cur_users
+        ba_on=$(app_get "$app" basic_auth)
+        ba_cur_users=$(cut -d: -f1 "$ba_file" 2>/dev/null || true)
+        if [[ "$(echo "$_YML_DATA" | jq -r '.app.basic_auth.enabled')" == "false" ]]; then
+            [[ "$ba_on" == "true" || -f "$ba_file" ]] \
+                && _YML_ACTIONS+=("basicauth|off|disable HTTP basic auth")
+        else
+            local u h cur_h
+            while IFS=$'\t' read -r u h; do
+                [[ -n "$u" ]] || continue
+                if [[ -n "$h" ]]; then
+                    cur_h=$(awk -F: -v u="$u" '$1 == u { print substr($0, length(u) + 2); exit }' "$ba_file" 2>/dev/null || true)
+                    [[ "$cur_h" == "$h" ]] && continue
+                    _YML_ACTIONS+=("basicauth-user|${u}|basic auth user ${u} (password hash from cipi.yml)")
+                elif ! grep -Fxq "$u" <<< "$ba_cur_users"; then
+                    _YML_BLOCKERS+=("basic auth user '${u}' has no password on this server — set it once with: cipi basicauth enable ${app} --user=${u} (or give a password_hash)")
+                fi
+            done < <(echo "$_YML_DATA" | jq -r '.app.basic_auth.users[] | "\(.name)\t\(.password_hash // "")"')
+            while IFS= read -r u; do
+                [[ -n "$u" ]] || continue
+                echo "$_YML_DATA" | jq -e --arg u "$u" '.app.basic_auth.users | any(.name == $u)' &>/dev/null && continue
+                _YML_ACTIONS+=("basicauth-user-remove|${u}|remove basic auth user ${u}")
+            done <<< "$ba_cur_users"
+            [[ "$ba_on" != "true" ]] && _YML_ACTIONS+=("basicauth|on|enable HTTP basic auth")
+        fi
+    fi
 
     # ── php.ini overrides (app scope only)
     if echo "$_YML_DATA" | jq -e 'has("app") and (.app | has("ini"))' &>/dev/null; then
@@ -1200,6 +1797,29 @@ _yml_build_plan() {
         done < <(vault_read apps.json | jq -r --arg a "$app" '(.[$a].ini // {}) | keys[]' 2>/dev/null || true)
     fi
 
+    # ── app limits (cipi app limits). Only declared keys are reconciled;
+    # undeclared ones keep whatever the server has. The bounds are the CLI's
+    # and were already enforced by the validator, so nothing is ever clamped
+    # silently on an unattended apply.
+    if echo "$_YML_DATA" | jq -e 'has("app") and (.app | has("limits"))' &>/dev/null; then
+        local lk lv lcur ldef lpairs=""
+        while IFS=$'\t' read -r lk lv; do
+            [[ -n "$lk" ]] || continue
+            case "$lk" in
+                memory_limit)     ldef="256M" ;;
+                fpm_max_children) ldef="5" ;;
+                octane_workers)   ldef="2" ;;
+                worker_procs)     ldef="1" ;;
+                *) continue ;;
+            esac
+            lcur=$(vault_read apps.json | jq -r --arg a "$app" --arg k "$lk" '.[$a].limits[$k] // empty')
+            [[ -n "$lcur" ]] || lcur="$ldef"
+            [[ "$lcur" == "$lv" ]] && continue
+            lpairs="${lpairs}${lpairs:+;}${lk}=${lv}"
+        done < <(echo "$_YML_DATA" | jq -r '.app.limits | to_entries[] | "\(.key)\t\(.value)"')
+        [[ -n "$lpairs" ]] && _YML_ACTIONS+=("limits|${lpairs}|app limits: ${lpairs//;/, }")
+    fi
+
     # ── databases (created, never dropped)
     local name engine
     while IFS=$'\t' read -r name engine; do
@@ -1214,8 +1834,20 @@ _yml_build_plan() {
         _YML_ACTIONS+=("db|${name}|${engine}|create database ${name} (${engine})")
     done < <(echo "$_YML_DATA" | jq -r '.databases[]? | "\(.name)\t\(.engine)"')
 
+    # ── workers and scheduler are artisan processes: Laravel apps only. Caught
+    # here, because the apply-time helpers exit on a custom/Node app and would
+    # stop the whole apply halfway.
+    local is_custom_app=false
+    [[ "$(app_get "$app" custom)" == "true" ]] && is_custom_app=true
+    if [[ "$is_custom_app" == true ]]; then
+        echo "$_YML_DATA" | jq -e '(.workers.horizon == true) or ((.workers.queues // []) | length > 0)' &>/dev/null \
+            && _YML_BLOCKERS+=("workers.horizon / workers.queues are declared, but '${app}' is not a Laravel app")
+        echo "$_YML_DATA" | jq -e '.schedule == true' &>/dev/null \
+            && _YML_BLOCKERS+=("schedule is declared, but '${app}' is not a Laravel app")
+    fi
+
     # ── workers
-    if echo "$_YML_DATA" | jq -e 'has("workers")' &>/dev/null; then
+    if [[ "$is_custom_app" != true ]] && echo "$_YML_DATA" | jq -e 'has("workers")' &>/dev/null; then
         # `// empty` cannot be used to read these: jq's alternative operator
         # treats `false` exactly like a missing key, so "horizon: false" used to
         # read back as "not declared" and silently did nothing.
@@ -1272,12 +1904,119 @@ _yml_build_plan() {
     # ── scheduler
     local want_sched cur_sched
     want_sched=$(echo "$_YML_DATA" | jq -r 'if has("schedule") then (.schedule|tostring) else "" end')
-    if [[ -n "$want_sched" ]]; then
+    if [[ -n "$want_sched" && "$is_custom_app" != true ]]; then
         cur_sched="true"
         crontab -u "$app" -l 2>/dev/null | grep -q '^\* \* \* \* \*.*schedule:run' || cur_sched="false"
         [[ "$want_sched" != "$cur_sched" ]] \
             && _YML_ACTIONS+=("schedule|${want_sched}|turn Laravel scheduler ${want_sched/true/on}${want_sched/false/off}")
     fi
+
+    # ── search (Meilisearch for Laravel Scout). Installing the engine is a
+    # server-wide decision and stays with root (cipi search install); the file
+    # only turns this app's scoped key on or off. Indexes are never dropped
+    # from a commit — they stay until: cipi search disable <app> --purge-indexes
+    local want_search
+    want_search=$(echo "$_YML_DATA" | jq -r 'if has("search") then (.search|tostring) else "" end')
+    if [[ -n "$want_search" ]]; then
+        local cur_search="false"
+        [[ "$(app_get "$app" search)" == "true" ]] && cur_search="true"
+        if [[ "$want_search" == "true" && "$cur_search" != "true" ]]; then
+            if [[ "$(app_get "$app" custom)" == "true" ]]; then
+                _YML_BLOCKERS+=("search is declared, but '${app}' is a custom app — search is for Laravel Scout")
+            elif ! declare -f _search_installed >/dev/null 2>&1 || ! _search_installed; then
+                _YML_BLOCKERS+=("search is declared, but Meilisearch is not installed — run: cipi search install")
+            elif ! _search_running; then
+                _YML_BLOCKERS+=("search is declared, but Meilisearch is not running — run: cipi service start meilisearch")
+            else
+                _YML_ACTIONS+=("search|on|enable search (Meilisearch, indexes ${app}-*)")
+            fi
+        elif [[ "$want_search" == "false" && "$cur_search" == "true" ]]; then
+            _YML_ACTIONS+=("search|off|disable search (indexes ${app}-* are kept)")
+        fi
+    fi
+
+    # ── deploy recipe options (cipi app deploy-config) and pre-deploy snapshot.
+    # Only declared keys are reconciled. Custom apps have no zero-downtime
+    # recipe, and a Node recipe has no artisan hooks — both are caught here so
+    # apply never regenerates a deploy.php that cannot exist.
+    if echo "$_YML_DATA" | jq -e '.deploy | (has("keep_releases") or has("migrate") or has("optimize")
+            or has("storage_link") or has("queue_restart") or has("horizon_terminate")
+            or has("extra_artisan") or has("snapshot"))' &>/dev/null; then
+        local is_node_app=false
+        [[ "$(app_get "$app" runtime)" == "node" ]] && is_node_app=true
+        if [[ "$is_custom_app" == true ]]; then
+            _YML_BLOCKERS+=("deploy recipe options are declared, but '${app}' is a custom app — it has no zero-downtime deploy.php recipe")
+        elif [[ "$is_node_app" == true ]] && echo "$_YML_DATA" | jq -e '.deploy | (has("migrate") or has("optimize")
+                or has("storage_link") or has("queue_restart") or has("horizon_terminate") or has("extra_artisan"))' &>/dev/null; then
+            _YML_BLOCKERS+=("deploy.migrate/optimize/storage_link/queue_restart/horizon_terminate/extra_artisan are artisan hooks, but '${app}' is a Node app — only deploy.keep_releases and deploy.snapshot apply")
+        else
+            local dc_pairs="" dc_want dc_cur dc_f
+            dc_want=$(echo "$_YML_DATA" | jq -r '.deploy.keep_releases // empty')
+            if [[ -n "$dc_want" ]]; then
+                dc_cur=$(_deploy_cfg_keep_releases "$app")
+                [[ "$dc_want" != "$dc_cur" ]] && dc_pairs="keep_releases=${dc_want}"
+            fi
+            for dc_f in migrate optimize storage_link queue_restart horizon_terminate; do
+                dc_want=$(echo "$_YML_DATA" | jq -r --arg f "$dc_f" 'if .deploy | has($f) then (.deploy[$f]|tostring) else "" end')
+                [[ -n "$dc_want" ]] || continue
+                dc_cur=$(_deploy_cfg_bool "$app" "deploy_${dc_f}" true)
+                [[ "$dc_want" != "$dc_cur" ]] && dc_pairs="${dc_pairs}${dc_pairs:+;}${dc_f}=${dc_want}"
+            done
+            dc_want=$(echo "$_YML_DATA" | jq -r 'if .deploy | has("snapshot") then (.deploy.snapshot|tostring) else "" end')
+            if [[ -n "$dc_want" ]]; then
+                dc_cur=$(_deploy_cfg_bool "$app" predeploy_snapshot false)
+                [[ "$dc_want" != "$dc_cur" ]] && dc_pairs="${dc_pairs}${dc_pairs:+;}snapshot=${dc_want}"
+            fi
+            if echo "$_YML_DATA" | jq -e '.deploy | has("extra_artisan")' &>/dev/null; then
+                dc_want=$(echo "$_YML_DATA" | jq -c '.deploy.extra_artisan')
+                dc_cur=$(vault_read apps.json | jq -c --arg a "$app" '.[$a].extra_artisan // []')
+                [[ "$dc_want" != "$dc_cur" ]] \
+                    && dc_pairs="${dc_pairs}${dc_pairs:+;}extra_artisan=$(jq -r 'join(",")' <<< "$dc_want")"
+            fi
+            [[ -n "$dc_pairs" ]] && _YML_ACTIONS+=("deploy-cfg|${dc_pairs}|deploy config: ${dc_pairs//;/, } (deploy.php regenerated)")
+        fi
+    fi
+
+    # ── force HTTPS (cipi ssl force). Only ever turned on from the file: no
+    # cipi command turns the redirect back off, so a 'false' against an app
+    # already forced is refused instead of silently ignored.
+    if echo "$_YML_DATA" | jq -e '.ssl | has("force_https")' &>/dev/null; then
+        local want_force cur_force
+        want_force=$(echo "$_YML_DATA" | jq -r '.ssl.force_https | tostring')
+        cur_force="false"; [[ "$(app_get "$app" force_https)" == "true" ]] && cur_force="true"
+        if [[ "$want_force" == "true" && "$cur_force" != "true" ]]; then
+            local ssl_cert; ssl_cert=$(domain_cert_name "$(app_get "$app" domain)")
+            if [[ ! -d "/etc/letsencrypt/live/${ssl_cert}" ]]; then
+                _YML_BLOCKERS+=("ssl.force_https needs a certificate for '$(app_get "$app" domain)' — run: cipi ssl install ${app}")
+            else
+                _YML_ACTIONS+=("sslforce||force the HTTP → HTTPS redirect")
+            fi
+        elif [[ "$want_force" == "false" && "$cur_force" == "true" ]]; then
+            _YML_BLOCKERS+=("ssl.force_https is 'false' but the redirect is already forced — no cipi command disables it; remove the key instead")
+        fi
+    fi
+
+    # ── env.required — a gate, not a change: every declared variable must
+    # already be set (non-empty) in the app's .env. Only names ever appear in
+    # the repository; the values stay on the server.
+    if echo "$_YML_DATA" | jq -e '.env.required | length > 0' &>/dev/null; then
+        local envf="" env_cand ek env_missing=0 env_total=0
+        for env_cand in "/home/${app}/shared/.env" "/home/${app}/htdocs/.env" "/home/${app}/current/.env"; do
+            [[ -f "$env_cand" ]] && { envf="$env_cand"; break; }
+        done
+        while IFS= read -r ek; do
+            [[ -n "$ek" ]] || continue
+            ((env_total++)) || true
+            if [[ -z "$envf" ]] || ! grep -qE "^${ek}=..*" "$envf" 2>/dev/null; then
+                _YML_BLOCKERS+=("env.required: ${ek} is not set in the app's .env — set it once with: cipi app env ${app}")
+                ((env_missing++)) || true
+            fi
+        done < <(echo "$_YML_DATA" | jq -r '.env.required[]')
+        (( env_missing == 0 )) && _YML_NOTES+=("env.required: all ${env_total} variable(s) are set")
+    fi
+
+    # ── scheduled commands (crons:)
+    _yml_plan_crons
 
     # ── healthcheck
     if echo "$_YML_DATA" | jq -e 'has("health")' &>/dev/null; then
@@ -1316,6 +2055,12 @@ _yml_build_plan() {
             fi
         fi
     fi
+
+    # ── redirects and prefix proxies (lib/routes.sh)
+    _yml_plan_routes
+
+    # ── Node settings: applied by the deploy itself, before the build
+    _yml_plan_node
 
     # ── post-deploy steps (run after every deploy — not server state to reconcile)
     if echo "$_YML_DATA" | jq -e '.deploy.post | length > 0' &>/dev/null; then
@@ -1356,6 +2101,308 @@ _yml_build_plan() {
     fi
 }
 
+# The `every:` shorthand as one cron expression — the exact reverse of
+# _yml_cron_to_every, so generate and apply round-trip.
+_yml_every_to_cron() {
+    local every="$1"
+    [[ "$every" =~ ^([0-9]+)([mhd])$ ]] || return 1
+    local n="${BASH_REMATCH[1]}" unit="${BASH_REMATCH[2]}"
+    case "$unit" in
+        m) if [[ "$n" == "1" ]]; then echo "* * * * *"; else echo "*/${n} * * * *"; fi ;;
+        h) if [[ "$n" == "1" ]]; then echo "0 * * * *"; else echo "0 */${n} * * *"; fi ;;
+        d) if [[ "$n" == "1" ]]; then echo "0 2 * * *"; else echo "0 2 */${n} * *"; fi ;;
+    esac
+}
+
+# Scheduled commands. The declared list replaces the cron entries Cipi manages
+# for this file — every line tagged '# cipi-yml' in the app user's crontab —
+# and never touches the rest of the crontab (the Laravel scheduler line
+# included). The commands go through the same allowlisted runners as
+# deploy.post, validated by the parser, so a crontab line can never carry a
+# free-form shell command from the repository.
+_yml_plan_crons() {
+    local app="$_YML_APP"
+    _YML_CRONS_WANT=""
+    _YML_CRONS_SYNC=false
+    echo "$_YML_DATA" | jq -e 'has("crons")' &>/dev/null || return 0
+
+    # artisan needs a Laravel app; caught here so apply cannot fail every run.
+    if [[ "$(app_get "$app" custom)" == "true" || "$(app_get "$app" runtime)" == "node" ]] \
+       && echo "$_YML_DATA" | jq -e '[.crons[]?.run] | index("artisan") != null' &>/dev/null; then
+        _YML_BLOCKERS+=("crons: artisan entries are declared, but '${app}' is not a Laravel app")
+        return 0
+    fi
+
+    local php_ver wd lines="" entry sched run cmd
+    php_ver=$(app_get "$app" php)
+    wd=$(_yml_post_deploy_workdir "$app")
+    while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+        sched=$(jq -r '.cron // empty' <<< "$entry")
+        [[ -n "$sched" ]] || sched=$(_yml_every_to_cron "$(jq -r '.every' <<< "$entry")") || continue
+        run=$(jq -r '.run' <<< "$entry")
+        local -a argv=()
+        mapfile -t argv < <(jq -r '.argv[]?' <<< "$entry")
+        # Every word was validated against the deploy.post charsets: no quotes,
+        # no ';', no '%' (special to cron), so the line is safe to embed as is.
+        if [[ "$run" == "artisan" ]]; then
+            cmd="/usr/bin/php${php_ver} artisan ${argv[*]}"
+        else
+            cmd="${run} ${argv[*]}"
+        fi
+        lines+="${sched} cd ${wd} && env PATH=/usr/local/bin:/usr/bin:/bin CI=true ${cmd} >> /home/${app}/logs/cron.log 2>&1 # cipi-yml"$'\n'
+    done < <(echo "$_YML_DATA" | jq -c '.crons[]?')
+    lines="${lines%$'\n'}"
+
+    local current n
+    current=$(crontab -u "$app" -l 2>/dev/null | grep '# cipi-yml$' || true)
+    [[ "$lines" == "$current" ]] && return 0
+    _YML_CRONS_WANT="$lines"
+    _YML_CRONS_SYNC=true
+    n=$(echo "$_YML_DATA" | jq '.crons | length')
+    if (( n == 0 )); then
+        _YML_ACTIONS+=("crons||remove the managed cron entries")
+    else
+        _YML_ACTIONS+=("crons||scheduled commands — ${n} managed cron entr$( ((n==1)) && echo y || echo ies )")
+    fi
+}
+
+# `node:` is not reconciled by apply: the recipe of the next deploy reads it from
+# the release it is deploying (cipi yml node-sync), so a commit is built with the
+# settings it carries. The plan says what that deploy will change.
+_yml_plan_node() {
+    local app="$_YML_APP" nj want errf line
+    echo "$_YML_DATA" | jq -e 'has("node")' &>/dev/null || return 0
+    declare -f _node_desired_from_yml >/dev/null 2>&1 || source "${CIPI_LIB}/node.sh"
+    if [[ "$(app_get "$app" runtime)" != "node" ]]; then
+        _YML_BLOCKERS+=("node: is declared, but '${app}' is not a Node app (create one with: cipi app create --node=…)")
+        return 0
+    fi
+    nj=$(echo "$_YML_DATA" | jq -c '.node')
+    errf=$(mktemp)
+    if ! want=$(_node_desired_from_yml "$app" "$nj" 2>"$errf"); then
+        _YML_BLOCKERS+=("$(sed -e 's/\x1b\[[0-9;]*m//g' -e 's/^\[ERROR\] //' "$errf" | paste -sd' ' -)")
+        rm -f "$errf"; return 0
+    fi
+    rm -f "$errf"
+    local ver; ver=$(jq -r '.node_version' <<< "$want")
+    if ! node_is_installed "$ver"; then
+        _YML_BLOCKERS+=("node.version ${ver} is not installed — run: cipi node install ${ver}")
+    fi
+    local changes; changes=$(_node_desired_diff "$app" "$want")
+    [[ -n "$changes" ]] || return 0
+    if [[ "$(app_get "$app" yml_auto)" != "true" ]]; then
+        _YML_NOTES+=("node: ignored until 'cipi yml auto ${app} on' — deploys use the server's settings")
+        return 0
+    fi
+    _YML_NOTES+=("node settings change on the next deploy, before the build:")
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && _YML_NOTES+=("  → ${line}")
+    done <<< "$changes"
+}
+
+# cipi yml node-sync <app> <release> [--finalize] — run by the Node recipe
+# (sudo, granted only by `cipi yml auto <app> on`).
+#   without --finalize: right after checkout, read `node:` from the cipi.yml of
+#     <release> and update the app (apps.json, build script, blue/green state,
+#     ~/.deployer/node.json) so this deploy installs, builds and starts with it;
+#   --finalize: after `current` moved, regenerate the vhost when the mode or the
+#     output changed, and retire the SSR slots when the app is no longer SSR.
+# Exit 0 with nothing to do; exit 1 fails the deploy (e.g. a Node major that is
+# not installed), before anything was built.
+_yml_node_sync_cmd() {
+    local app="${1:-}" release="${2:-}"; shift 2 2>/dev/null || true
+    parse_args "$@"
+    [[ "$app" =~ ^[a-z][a-z0-9]{2,31}$ ]] && app_exists "$app" \
+        || { error "Usage: cipi yml node-sync <app> <release> [--finalize]"; exit 2; }
+    if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" && "$SUDO_USER" != "$app" ]]; then
+        error "${SUDO_USER} cannot sync ${app}"; exit 2
+    fi
+    # shellcheck source=/dev/null
+    declare -f _node_desired_from_yml >/dev/null 2>&1 || source "${CIPI_LIB}/node.sh"
+    declare -f _create_nginx_vhost >/dev/null 2>&1 || source "${CIPI_LIB}/app.sh"
+    [[ "$(app_get "$app" runtime)" == "node" ]] || { error "'${app}' is not a Node app"; exit 2; }
+    release=$(realpath -e "$release" 2>/dev/null || true)
+    [[ "$release" =~ ^/home/${app}/releases/[0-9]+$ && -d "$release" ]] \
+        || { error "not a release of ${app}"; exit 2; }
+    [[ "$(app_get "$app" yml_auto)" == "true" ]] || return 0
+
+    if [[ "${ARG_finalize:-}" == "true" ]]; then
+        [[ "$(app_get "$app" node_vhost_pending)" == "true" ]] || return 0
+        echo "[cipi.yml] nginx follows node.mode=$(app_get "$app" node_mode)"
+        _create_nginx_vhost "$app" "$(app_get "$app" domain)" "$(app_get "$app" php)"
+        _nginx_reapply_ssl "$app" || { error "nginx refused the regenerated vhost"; exit 1; }
+        if [[ "$(app_get "$app" node_mode)" != "ssr" && -n "$(app_get "$app" node_ports)" ]]; then
+            node_app_cleanup "$app"
+            reload_nginx >/dev/null 2>&1 || true
+            app_unset "$app" node_ports
+            _node_state_write "$app"
+        fi
+        app_unset "$app" node_vhost_pending
+        return 0
+    fi
+
+    local f="" c
+    for c in "${release}/cipi.yml" "${release}/cipi.yaml"; do [[ -f "$c" ]] && { f="$c"; break; }; done
+    [[ -n "$f" ]] || return 0
+    local result; result=$(_yml_parse "$f" "$app") || true
+    if [[ "$(jq -r '.ok' <<< "$result" 2>/dev/null)" != "true" ]]; then
+        warn "[cipi.yml] not valid — node settings stay as they are (cipi yml validate ${app})"
+        return 0
+    fi
+    jq -e '.data | has("node")' <<< "$result" &>/dev/null || return 0
+
+    local want
+    want=$(_node_desired_from_yml "$app" "$(jq -c '.data.node' <<< "$result")") || exit 1
+    local ver; ver=$(jq -r '.node_version' <<< "$want")
+    node_is_installed "$ver" || { error "[cipi.yml] node.version ${ver} is not installed on this server — run: cipi node install ${ver}"; exit 1; }
+    local changes; changes=$(_node_desired_diff "$app" "$want")
+    [[ -n "$changes" ]] || return 0
+
+    local old_mode old_output new_mode
+    old_mode=$(app_get "$app" node_mode); old_output=$(app_get "$app" node_output)
+    new_mode=$(jq -r '.node_mode' <<< "$want")
+    if [[ "$new_mode" == "ssr" && -z "$(app_get "$app" node_ports)" ]]; then
+        local ports; ports=$(_node_allocate_ports) || { error "No two free ports in ${NODE_PORT_MIN}–${NODE_PORT_MAX}"; exit 1; }
+        app_set_json "$app" node_ports "$(jq -nc --arg p "$ports" '$p | split(" ") | map(tonumber)')"
+    fi
+    local k v
+    for k in node_mode node_version node_build node_start node_output node_health node_framework; do
+        v=$(jq -r --arg k "$k" '.[$k] // ""' <<< "$want")
+        if [[ -n "$v" ]]; then app_set "$app" "$k" "$v"; else app_unset "$app" "$k"; fi
+    done
+    [[ "$new_mode" == "ssr" ]] && app_unset "$app" node_output
+    if [[ "$new_mode" != "$old_mode" || ( "$new_mode" != "ssr" && "$(app_get "$app" node_output)" != "$old_output" ) ]]; then
+        app_set "$app" node_vhost_pending "true"
+    fi
+    _sync_node_build_script "$app"
+    _node_state_write "$app"
+    _node_recipe_config_write "$app"
+    sed -i "s|${NODE_ROOT}/[0-9]*/bin|${NODE_ROOT}/${ver}/bin|" "/home/${app}/.bashrc" 2>/dev/null || true
+
+    local line
+    while IFS= read -r line; do echo "[cipi.yml] node ${line}"; done <<< "$changes"
+    log_action "YML NODE SYNC: ${app} release=$(basename "$release") $(paste -sd';' - <<< "$changes")"
+    cipi_notify \
+        "Cipi cipi.yml node settings: ${app} on $(hostname)" \
+        "The deploy of '${app}' picked up node settings from cipi.yml.\n\nServer: $(hostname)\nApp: ${app}\nRelease: $(basename "$release")\n\n${changes}\n\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        yml_apply
+    return 0
+}
+
+# Validate the declared routes through the same builders `cipi redirect` and
+# `cipi proxy` use, against the rule set as it will be after the apply — so a
+# redirect and a proxy declared on the same prefix collide here, not in nginx.
+# Leaves the target state in _YML_ROUTES_WANT for the apply.
+_yml_plan_routes() {
+    local app="$_YML_APP"
+    _YML_ROUTES_WANT=""
+    echo "$_YML_DATA" | jq -e 'has("redirect") or has("redirects") or has("proxies")' &>/dev/null || return 0
+
+    local cur rules errf rule i n msg ok=true
+    cur=$(vault_read apps.json | jq -c --arg a "$app" '{
+        redirect: (.[$a].redirect // null),
+        redirects: ((.[$a].redirects // []) | sort_by(.from)),
+        proxies: ((.[$a].proxies // []) | sort_by(.prefix))}')
+    rules=$(jq -c --argjson d "$_YML_DATA" '{
+        redirects: (if $d | has("redirects") then $d.redirects else .redirects end),
+        proxies:   (if $d | has("proxies")   then $d.proxies   else .proxies   end)}' <<< "$cur")
+    errf=$(mktemp)
+
+    # Reads the builder's refusal back as one line, without colour codes.
+    _yml_route_err() { sed -e 's/\x1b\[[0-9;]*m//g' -e 's/^\[ERROR\] //' "$errf" | paste -sd' ' -; }
+
+    local want_redirect want_redirects="[]" want_proxies="[]"
+    want_redirect=$(jq -c '.redirect' <<< "$cur")
+    if echo "$_YML_DATA" | jq -e 'has("redirect")' &>/dev/null; then
+        local r_enabled r_to r_code r_keep
+        r_enabled=$(echo "$_YML_DATA" | jq -r '.redirect.enabled')
+        r_to=$(echo "$_YML_DATA" | jq -r '.redirect.to // empty')
+        if [[ -z "$r_to" ]]; then
+            want_redirect=null
+        else
+            r_code=$(echo "$_YML_DATA" | jq -r '.redirect.code')
+            r_keep=$(echo "$_YML_DATA" | jq -r '.redirect.keep_path')
+            if rule=$(_routes_build_app_redirect "$app" "$r_to" "$r_code" "$r_keep" 2>"$errf"); then
+                want_redirect=$(jq -c --argjson e "$r_enabled" '.enabled = $e' <<< "$rule")
+            else
+                _YML_BLOCKERS+=("redirect: $(_yml_route_err)"); ok=false
+            fi
+        fi
+    fi
+
+    if echo "$_YML_DATA" | jq -e 'has("redirects")' &>/dev/null; then
+        n=$(echo "$_YML_DATA" | jq '.redirects | length')
+        for (( i = 0; i < n; i++ )); do
+            local f t c k
+            IFS=$'\t' read -r f t c k < <(echo "$_YML_DATA" | jq -r --argjson i "$i" '.redirects[$i] | [.from, .to, .code, .keep_path] | @tsv')
+            if rule=$(_routes_build_redirect "$app" "$f" "$t" "$c" "$k" "$rules" 2>"$errf"); then
+                want_redirects=$(jq -c --argjson r "$rule" '. + [$r]' <<< "$want_redirects")
+            else
+                _YML_BLOCKERS+=("redirects[${i}] ${f}: $(_yml_route_err)"); ok=false
+            fi
+        done
+    else
+        want_redirects=$(jq -c '.redirects' <<< "$cur")
+    fi
+
+    if echo "$_YML_DATA" | jq -e 'has("proxies")' &>/dev/null; then
+        n=$(echo "$_YML_DATA" | jq '.proxies | length')
+        for (( i = 0; i < n; i++ )); do
+            local pp pu ps ph pt pb
+            IFS=$'\t' read -r pp pu ps ph pt pb < <(echo "$_YML_DATA" | jq -r --argjson i "$i" \
+                '.proxies[$i] | [.prefix, .upstream, .strip_prefix, .preserve_host, .timeout, .buffering] | @tsv')
+            if rule=$(_routes_build_proxy "$app" "$pp" "$pu" "$ps" "$ph" "$pt" "$pb" yml "$rules" 2>"$errf"); then
+                want_proxies=$(jq -c --argjson r "$rule" '. + [$r]' <<< "$want_proxies")
+            else
+                _YML_BLOCKERS+=("proxies[${i}] ${pp}: $(_yml_route_err)"); ok=false
+            fi
+        done
+    else
+        want_proxies=$(jq -c '.proxies' <<< "$cur")
+    fi
+    rm -f "$errf"
+    unset -f _yml_route_err
+    [[ "$ok" == true ]] || return 0
+
+    local want
+    want=$(jq -nc --argjson r "$want_redirect" --argjson rs "$want_redirects" --argjson ps "$want_proxies" \
+        '{redirect: $r, redirects: ($rs | sort_by(.from)), proxies: ($ps | sort_by(.prefix))}')
+    [[ "$(jq -S -c . <<< "$want")" == "$(jq -S -c . <<< "$cur")" ]] && return 0
+    _YML_ROUTES_WANT="$want"
+
+    # One action (one vhost regeneration, one nginx -t, one revert point) with
+    # a readable summary of what differs.
+    local parts=() added removed changed
+    if [[ "$(jq -S -c '.redirect' <<< "$want")" != "$(jq -S -c '.redirect' <<< "$cur")" ]]; then
+        if [[ "$(jq -r '.redirect' <<< "$want")" == "null" ]]; then
+            parts+=("remove the app redirect")
+        elif [[ "$(jq -r '.redirect.enabled' <<< "$want")" == "false" ]]; then
+            parts+=("app redirect saved but off ($(jq -r '.redirect.to' <<< "$want"))")
+        else
+            parts+=("app redirect → $(jq -r '.redirect | "\(.to) (\(.code))"' <<< "$want")")
+        fi
+    fi
+    local kind key
+    for kind in redirects proxies; do
+        key=from; [[ "$kind" == proxies ]] && key=prefix
+        read -r added removed changed < <(jq -r --arg k "$kind" --arg key "$key" --argjson c "$cur" '
+            (.[$k] | map({key: .[$key], value: .}) | from_entries) as $w
+            | ($c[$k] | map({key: .[$key], value: .}) | from_entries) as $o
+            | [ ($w | keys - ($o | keys) | length),
+                ($o | keys - ($w | keys) | length),
+                ([$w | keys[] | select($o[.] != null and $o[.] != $w[.])] | length) ] | @tsv' <<< "$want")
+        (( added + removed + changed > 0 )) || continue
+        local desc="${kind}:"
+        (( added ))   && desc+=" +${added}"
+        (( removed )) && desc+=" -${removed}"
+        (( changed )) && desc+=" ~${changed}"
+        parts+=("$desc")
+    done
+    local joined; joined=$(printf '%s, ' "${parts[@]}"); joined="${joined%, }"
+    _YML_ACTIONS+=("routes||nginx routes — ${joined}")
+}
+
 _yml_print_plan() {
     echo -e "\n${BOLD}Plan for '${_YML_APP}'${NC} ${DIM}(${_YML_FILE})${NC}\n"
     if [[ ${#_YML_BLOCKERS[@]} -gt 0 ]]; then
@@ -1393,6 +2440,11 @@ _yml_source_libs() {
     declare -f db_create_database   >/dev/null 2>&1 || source "${CIPI_LIB}/db.sh"
     # shellcheck source=/dev/null
     declare -f _bk_profile_save     >/dev/null 2>&1 || source "${CIPI_LIB}/backup.sh"
+    # routes.sh brings app.sh with it (www pair, basic auth, vhost rendering).
+    # shellcheck source=/dev/null
+    declare -f _routes_build_proxy  >/dev/null 2>&1 || source "${CIPI_LIB}/routes.sh"
+    # shellcheck source=/dev/null
+    declare -f _search_enable       >/dev/null 2>&1 || source "${CIPI_LIB}/search.sh"
     [[ "${1:-}" == "--with-app" ]] || return 0
     # shellcheck source=/dev/null
     declare -f _create_fpm_pool     >/dev/null 2>&1 || source "${CIPI_LIB}/app.sh"
@@ -1402,6 +2454,8 @@ _yml_source_libs() {
     declare -f _ini_set             >/dev/null 2>&1 || source "${CIPI_LIB}/ini.sh"
     # shellcheck source=/dev/null
     declare -f _health_set          >/dev/null 2>&1 || source "${CIPI_LIB}/health.sh"
+    # shellcheck source=/dev/null
+    declare -f _ssl_force           >/dev/null 2>&1 || source "${CIPI_LIB}/ssl.sh"
 }
 
 _yml_plan_cmd() {
@@ -1643,16 +2697,153 @@ _yml_apply_action() {
             declare -f _health_unset >/dev/null 2>&1 || source "${CIPI_LIB}/health.sh"
             _health_unset "$app" >/dev/null
             ;;
+        www)
+            local mode="${rest%%|*}"
+            step "www ${mode}"
+            case "$mode" in
+                to-root)   www_force_to_root "$app" >/dev/null ;;
+                from-root) www_force_from_root "$app" >/dev/null ;;
+                none)      www_clear "$app" >/dev/null ;;
+            esac
+            ;;
+        basicauth-user)
+            local u="${rest%%|*}" h
+            h=$(echo "$_YML_DATA" | jq -r --arg u "$u" '.app.basic_auth.users[] | select(.name == $u) | .password_hash // empty')
+            [[ -n "$h" ]] || return 1
+            step "basic auth user ${u}"
+            _basicauth_write_hash "$app" "$u" "$h" || return 1
+            log_action "BASICAUTH USER SET (cipi.yml): ${app} user=${u}"
+            ;;
+        basicauth-user-remove)
+            local u="${rest%%|*}"
+            step "basic auth user ${u} removed"
+            _basicauth_remove_user "$app" "$u" || return 1
+            log_action "BASICAUTH USER REMOVED (cipi.yml): ${app} user=${u}"
+            ;;
+        basicauth)
+            local mode="${rest%%|*}"
+            step "basic auth ${mode}"
+            if [[ "$mode" == "on" ]]; then
+                [[ -s "$(_basicauth_file "$app")" ]] || { error "no basic auth users on the server"; return 1; }
+                app_set "$app" basic_auth "true"
+                _create_nginx_vhost "$app" "$(app_get "$app" domain)" "$(app_get "$app" php)"
+                _nginx_reapply_ssl "$app"
+                log_action "BASICAUTH ENABLED (cipi.yml): ${app}"
+                cipi_notify \
+                    "Cipi basic auth enabled: ${app} on $(hostname)" \
+                    "HTTP basic auth was enabled from cipi.yml.\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\nUsers: $(cut -d: -f1 "$(_basicauth_file "$app")" | paste -sd, -)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+                    basicauth_enable
+            else
+                basicauth_disable "$app" >/dev/null
+            fi
+            ;;
+        search)
+            local mode="${rest%%|*}"
+            step "search ${mode}"
+            # Subshell: both exit on refusal, and one failed action must not end
+            # the whole apply.
+            if [[ "$mode" == "on" ]]; then ( _search_enable "$app" >/dev/null ) || return 1
+            else ( _search_disable "$app" >/dev/null ) || return 1; fi
+            info "  .env changed — a cached config keeps the old values until the next deploy or config:clear"
+            ;;
+        routes)
+            step "nginx routes"
+            _yml_apply_routes
+            ;;
         backup-profile)
             local pname="${rest%%|*}"
             step "backup profile ${pname}"
             _yml_apply_backup_profile "$pname"
+            ;;
+        deploy-cfg)
+            local pairs="${rest%%|*}" pair dk dv
+            step "deploy config ${pairs//;/ }"
+            local -a dc_list=()
+            IFS=';' read -ra dc_list <<< "$pairs"
+            for pair in "${dc_list[@]}"; do
+                dk="${pair%%=*}"; dv="${pair#*=}"
+                case "$dk" in
+                    keep_releases) app_set "$app" keep_releases "$dv" ;;
+                    migrate|optimize|storage_link|queue_restart|horizon_terminate)
+                        if [[ "$dv" == "false" ]]; then app_set "$app" "deploy_${dk}" "false"
+                        else app_unset "$app" "deploy_${dk}"; fi ;;
+                    snapshot)
+                        if [[ "$dv" == "true" ]]; then app_set "$app" predeploy_snapshot "true"
+                        else app_unset "$app" predeploy_snapshot; fi ;;
+                    extra_artisan)
+                        if [[ -z "$dv" ]]; then app_unset "$app" extra_artisan
+                        else app_set_json "$app" extra_artisan "$(printf '%s' "$dv" | jq -R -c 'split(",")')"; fi ;;
+                esac
+            done
+            _create_deployer_config_for_app "$app"
+            log_action "DEPLOY-CONFIG UPDATED (cipi.yml): ${app} ${pairs}"
+            ;;
+        limits)
+            local pairs="${rest%%|*}" pair lk lv
+            step "app limits ${pairs//;/ }"
+            unset ARG_fpm_max_children ARG_memory_limit ARG_octane_workers ARG_worker_procs 2>/dev/null || true
+            local -a lim_args=() lim_list=()
+            IFS=';' read -ra lim_list <<< "$pairs"
+            for pair in "${lim_list[@]}"; do
+                lk="${pair%%=*}"; lv="${pair#*=}"
+                lim_args+=("--${lk//_/-}=${lv}")
+            done
+            # Subshell: app_limits exits on a bad value, and one failed action
+            # must not end the whole apply.
+            ( app_limits "$app" "${lim_args[@]}" >/dev/null ) || return 1
+            log_action "APP LIMITS (cipi.yml): ${app} ${pairs}"
+            ;;
+        sslforce)
+            step "force HTTPS"
+            declare -f _ssl_force >/dev/null 2>&1 || source "${CIPI_LIB}/ssl.sh"
+            ( _ssl_force "$app" >/dev/null ) || return 1
+            ;;
+        crons)
+            step "scheduled commands (crontab)"
+            local cron_keep
+            cron_keep=$(crontab -u "$app" -l 2>/dev/null | grep -v '# cipi-yml$' || true)
+            {
+                [[ -n "$cron_keep" ]] && printf '%s\n' "$cron_keep"
+                [[ -n "$_YML_CRONS_WANT" ]] && printf '%s\n' "$_YML_CRONS_WANT"
+            } | crontab -u "$app" - || return 1
+            app_set_json "$app" yml_crons "$(echo "$_YML_DATA" | jq -c '.crons')"
+            log_action "YML CRONS: ${app} entries=$(echo "$_YML_DATA" | jq '.crons | length')"
             ;;
         *)
             error "Unknown plan action: ${kind}"
             return 1
             ;;
     esac
+}
+
+_yml_apply_routes() {
+    local app="$_YML_APP" want="$_YML_ROUTES_WANT"
+    [[ -n "$want" ]] || return 0
+    _routes_preflight || return 1
+
+    local before; before=$(_routes_app_json "$app")
+    local cur_rd cur_px
+    cur_rd=$(jq -S -c '{r: (.redirect // null), rs: ((.redirects // []) | sort_by(.from))}' <<< "$before")
+    cur_px=$(jq -S -c '(.proxies // []) | sort_by(.prefix)' <<< "$before")
+
+    if [[ "$(jq -r '.redirect' <<< "$want")" == "null" ]]; then
+        app_unset "$app" redirect
+    else
+        app_set_json "$app" redirect "$(jq -c '.redirect' <<< "$want")"
+    fi
+    app_set_json "$app" redirects "$(jq -c '.redirects' <<< "$want")"
+    app_set_json "$app" proxies "$(jq -c '.proxies' <<< "$want")"
+    _routes_apply "$app" "$before" || return 1
+
+    local summary
+    summary=$(jq -r '"app redirect: \(if .redirect == null then "none" elif .redirect.enabled then "\(.redirect.to) (\(.redirect.code))" else "off" end), path redirects: \(.redirects | length), proxies: \(.proxies | length)"' <<< "$want")
+    if [[ "$(jq -S -c '{r: .redirect, rs: .redirects}' <<< "$want")" != "$cur_rd" ]]; then
+        _routes_notify redirect_change "$app" "REDIRECTS FROM CIPI.YML: ${app} — ${summary}"
+    fi
+    if [[ "$(jq -S -c '.proxies' <<< "$want")" != "$cur_px" ]]; then
+        _routes_notify proxy_change "$app" "PROXIES FROM CIPI.YML: ${app} — ${summary}"
+    fi
+    return 0
 }
 
 # Create a declared database and hand its credentials to the app rather than
@@ -1774,6 +2965,16 @@ _yml_post_deploy_exec() {
     local -a argv=("$@") wd cmd_q args_q
     wd=$(_yml_post_deploy_workdir "$app")
     local -a env=(CI=true DEBIAN_FRONTEND=noninteractive GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat PAGER=cat COMPOSER_NO_INTERACTION=1 NPM_CONFIG_YES=true)
+    # Node apps build with their own Node major (lib/node.sh). ~/.deployer/node.json
+    # names it and is readable by root and by the app user alike.
+    local node_major
+    node_major=$(jq -r '.version // empty' "/home/${app}/.deployer/node.json" 2>/dev/null || true)
+    if [[ "$node_major" =~ ^[0-9]{2}$ && -d "/opt/cipi/node/${node_major}/bin" ]]; then
+        env+=("PATH=/opt/cipi/node/${node_major}/bin:/usr/local/bin:/usr/bin:/bin")
+    else
+        # Cron's PATH has no /usr/local/bin, where the server default lives.
+        env+=("PATH=/usr/local/bin:/usr/bin:/bin")
+    fi
 
     case "$run" in
         artisan)
@@ -1902,6 +3103,7 @@ _yml_auto_cmd() {
             # line and no other.
             cat > "$sudoers" <<SUDO
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi yml apply ${app} --yes --auto
+${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi yml node-sync ${app} *
 SUDO
             chmod 440 "$sudoers"
             if ! visudo -cf "$sudoers" &>/dev/null; then
@@ -1913,7 +3115,10 @@ SUDO
             success "cipi.yml will be applied after every successful deploy of '${app}'"
             info "Both paths: 'cipi deploy ${app}' and the Git webhook."
             warn "Anyone who can commit to the repository can now change this app's"
-            warn "aliases, PHP settings, workers, databases and backup schedule."
+            warn "aliases, PHP settings, limits, workers, deploy recipe, scheduled"
+            warn "commands, databases and backup schedule."
+            [[ "$(app_get "$app" runtime)" == "node" ]] \
+                && warn "For this Node app also: node mode, Node version, build and start commands — read by each deploy before the build."
             log_action "YML AUTO ON: $app"
             ;;
         off|disable)
@@ -2096,6 +3301,51 @@ _yml_generate() {
             echo "  #   post_max_size: 60M"
         fi
 
+        # ── per-app limits (cipi app limits)
+        local limits_json
+        limits_json=$(vault_read apps.json | jq -c --arg a "$app" '.[$a].limits // {}')
+        echo ""
+        if [[ "$limits_json" != "{}" ]]; then
+            echo "  # Per-app limits (cipi app limits). Only declared keys are reconciled."
+            echo "  limits:"
+            jq -r 'to_entries[] | "    \(.key): \(.value)"' <<< "$limits_json"
+        else
+            echo "  # No limits set (defaults: memory_limit 256M, fpm_max_children 5,"
+            echo "  # octane_workers 2, worker_procs 1). Uncomment to pin some:"
+            echo "  # limits:"
+            echo "  #   memory_limit: 512M"
+            echo "  #   fpm_max_children: 10"
+        fi
+
+        # ── www ↔ apex canonical redirect
+        local www_mode; www_mode=$(app_get "$app" www_redirect)
+        [[ "$www_mode" == "to-root" || "$www_mode" == "from-root" ]] || www_mode="none"
+        echo ""
+        if [[ "$domain" == \*.* ]]; then
+            echo "  # www: none           # wildcard primary — no www/apex pair to redirect"
+        else
+            echo "  # to-root (www → apex), from-root (apex → www) or none."
+            echo "  www: ${www_mode}"
+        fi
+
+        # ── HTTP basic auth — user names only, never the hashes on this server
+        local ba_users
+        ba_users=$(cut -d: -f1 "/etc/nginx/cipi-basicauth/${app}.htpasswd" 2>/dev/null || true)
+        echo ""
+        if [[ "$(app_get "$app" basic_auth)" == "true" && -n "$ba_users" ]]; then
+            echo "  # A user listed by name keeps the password already set on the server."
+            echo "  # Users on the server that are not listed here are removed on apply."
+            echo "  basic_auth:"
+            echo "    users:"
+            local bu
+            while IFS= read -r bu; do
+                [[ -n "$bu" ]] || continue
+                echo "      - $(_yml_q "$bu")"
+            done <<< "$ba_users"
+        else
+            echo "  basic_auth: false     # or a list of users — see: cipi yml example ${app}"
+        fi
+
         # ── databases the app owns, beyond the one created with it
         local dbs="" eng db
         for eng in mariadb pgsql; do
@@ -2168,6 +3418,27 @@ _yml_generate() {
             echo ""
             echo "# Laravel scheduler (* * * * * artisan schedule:run)"
             echo "schedule: ${sched}"
+
+            local srch="false"
+            [[ "$(app_get "$app" search)" == "true" ]] && srch="true"
+            echo ""
+            echo "# Meilisearch for Laravel Scout (needs: cipi search install). Turning it"
+            echo "# off here keeps the indexes; they are only dropped by root."
+            echo "search: ${srch}"
+        fi
+
+        # ── force HTTPS
+        echo ""
+        if [[ "$(app_get "$app" force_https)" == "true" ]]; then
+            echo "# The HTTP → HTTPS redirect is forced (cipi ssl force). It can only"
+            echo "# ever be turned on from this file, never off."
+            echo "ssl:"
+            echo "  force_https: true"
+        else
+            echo "# Force the HTTP → HTTPS redirect. Needs a certificate first:"
+            echo "# cipi ssl install ${app}"
+            echo "# ssl:"
+            echo "#   force_https: true"
         fi
 
         # ── healthcheck
@@ -2196,14 +3467,149 @@ _yml_generate() {
             echo "#   expect: 200"
         fi
 
-        # ── post-deploy steps (only from an existing cipi.yml in the release)
+        # ── redirects and prefix proxies
+        local rj; rj=$(vault_read apps.json | jq -c --arg a "$app" '{
+            redirect: (.[$a].redirect // null),
+            redirects: (.[$a].redirects // []),
+            proxies: (.[$a].proxies // [])}')
         echo ""
-        echo "# Post-deploy commands (run after every successful deploy)."
-        echo "# Uncomment and edit — or declare them here and commit:"
-        echo "# deploy:"
-        echo "#   post:"
-        echo "#     - artisan cache:clear"
-        echo "#     - npm run build"
+        if [[ "$(jq -r '.redirect' <<< "$rj")" != "null" ]]; then
+            echo "# Whole-app redirect. Path redirects and proxies below still apply first."
+            echo "redirect:"
+            [[ "$(jq -r '.redirect.enabled' <<< "$rj")" == "false" ]] && echo "  enabled: false"
+            echo "  to: $(_yml_q "$(jq -r '.redirect.to' <<< "$rj")")"
+            echo "  code: $(jq -r '.redirect.code // 301' <<< "$rj")"
+            [[ "$(jq -r '.redirect.keep_path' <<< "$rj")" == "false" ]] && echo "  keep_path: false"
+        else
+            echo "# No whole-app redirect. Uncomment to send every request elsewhere:"
+            echo "# redirect:"
+            echo "#   to: \"https://new.example.com\""
+            echo "#   code: 301"
+        fi
+        echo ""
+        if [[ "$(jq '.redirects | length' <<< "$rj")" -gt 0 ]]; then
+            echo "# The declared list replaces the current path redirects."
+            echo "redirects:"
+            local rf rt rc rk
+            while IFS=$'\t' read -r rf rt rc rk; do
+                [[ -n "$rf" ]] || continue
+                echo "  - from: $(_yml_q "$rf")"
+                echo "    to: $(_yml_q "$rt")"
+                [[ "$rc" != "301" ]] && echo "    code: ${rc}"
+                [[ "$rk" == "false" ]] && echo "    keep_path: false"
+            done < <(jq -r '.redirects[] | [.from, .to, (.code // 301 | tostring), (.keep_path | tostring)] | @tsv' <<< "$rj")
+        else
+            echo "# No path redirects. A 'from' ending in / is a prefix."
+            echo "# redirects:"
+            echo "#   - from: /old-page"
+            echo "#     to: /new-page"
+        fi
+        echo ""
+        if [[ "$(jq '.proxies | length' <<< "$rj")" -gt 0 ]]; then
+            echo "# The declared list replaces the current proxy prefixes."
+            echo "proxies:"
+            local pp pu ps ph pt pb
+            while IFS=$'\t' read -r pp pu ps ph pt pb; do
+                [[ -n "$pp" ]] || continue
+                echo "  - prefix: $(_yml_q "$pp")"
+                echo "    upstream: $(_yml_q "$pu")"
+                [[ "$ps" == "true" ]] && echo "    strip_prefix: true"
+                [[ "$ph" == "true" ]] && echo "    preserve_host: true"
+                [[ "$pt" != "60" ]] && echo "    timeout: ${pt}"
+                [[ "$pb" == "false" ]] && echo "    buffering: false"
+            done < <(jq -r '.proxies[] | [.prefix, .upstream, (.strip_prefix | tostring), (.preserve_host | tostring), (.timeout // 60 | tostring), (.buffering | tostring)] | @tsv' <<< "$rj")
+        else
+            echo "# No proxy prefixes. Uncomment to route a prefix to another service:"
+            echo "# proxies:"
+            echo "#   - prefix: /api/"
+            echo "#     upstream: \"http://127.0.0.1:3000\""
+            echo "#     strip_prefix: true"
+        fi
+
+        # ── Node settings (Node apps only)
+        if [[ "$(app_get "$app" runtime)" == "node" ]]; then
+            local nmode; nmode=$(app_get "$app" node_mode)
+            echo ""
+            echo "# Node settings, read by each deploy before the build (needs: cipi yml auto ${app} on)."
+            echo "node:"
+            [[ -n "$(app_get "$app" node_framework)" ]] && echo "  framework: $(app_get "$app" node_framework)"
+            echo "  mode: ${nmode}"
+            echo "  version: $(app_get "$app" node_version)"
+            echo "  build: $(_yml_q "$(app_get "$app" node_build)")"
+            if [[ "$nmode" == "ssr" ]]; then
+                echo "  start: $(_yml_q "$(app_get "$app" node_start)")"
+                echo "  health_path: $(_yml_q "$(app_get "$app" node_health)")"
+            else
+                echo "  output: $(_yml_q "$(app_get "$app" node_output)")"
+            fi
+        fi
+
+        # ── deploy recipe options (cipi app deploy-config) + post-deploy steps
+        echo ""
+        if [[ "$custom" != "true" ]]; then
+            echo "# Deploy recipe options (cipi app deploy-config). Only declared keys are"
+            echo "# reconciled; 'snapshot' takes a database snapshot before each deploy."
+            echo "deploy:"
+            echo "  keep_releases: $(_deploy_cfg_keep_releases "$app")"
+            if [[ "$(app_get "$app" runtime)" != "node" ]]; then
+                echo "  migrate: $(_deploy_cfg_bool "$app" deploy_migrate true)"
+                echo "  optimize: $(_deploy_cfg_bool "$app" deploy_optimize true)"
+                echo "  storage_link: $(_deploy_cfg_bool "$app" deploy_storage_link true)"
+                echo "  queue_restart: $(_deploy_cfg_bool "$app" deploy_queue_restart true)"
+                echo "  horizon_terminate: $(_deploy_cfg_bool "$app" deploy_horizon_terminate true)"
+                local xa; xa=$(vault_read apps.json | jq -r --arg a "$app" '(.[$a].extra_artisan // []) | join(" ")')
+                if [[ -n "${xa// }" ]]; then
+                    # shellcheck disable=SC2086
+                    echo "  extra_artisan: $(_yml_flow $xa)"
+                fi
+            fi
+            echo "  snapshot: $(_deploy_cfg_bool "$app" predeploy_snapshot false)"
+            echo "  # Post-deploy commands (run after every successful deploy):"
+            echo "  # post:"
+            echo "  #   - artisan cache:clear"
+            echo "  #   - npm run build"
+        else
+            echo "# Post-deploy commands (run after every successful deploy)."
+            echo "# Uncomment and edit — or declare them here and commit:"
+            echo "# deploy:"
+            echo "#   post:"
+            echo "#     - npm run build"
+        fi
+
+        # ── required .env variables
+        echo ""
+        echo "# Names (never values) this app's .env must carry — the plan is blocked"
+        echo "# while one is missing or empty. Uncomment and list yours:"
+        echo "# env:"
+        echo "#   required: [ STRIPE_KEY, MAIL_HOST ]"
+
+        # ── scheduled commands
+        local crons_json ce
+        crons_json=$(vault_read apps.json | jq -c --arg a "$app" '.[$a].yml_crons // []')
+        echo ""
+        if [[ "$crons_json" != "[]" ]]; then
+            echo "# Scheduled commands managed from this file (the '# cipi-yml' lines of"
+            echo "# the app user's crontab). The declared list replaces them."
+            echo "crons:"
+            while IFS= read -r ce; do
+                [[ -n "$ce" ]] || continue
+                if [[ "$(jq -r 'has("every")' <<< "$ce")" == "true" ]]; then
+                    echo "  - every: $(jq -r '.every' <<< "$ce")"
+                else
+                    echo "  - cron: $(_yml_q "$(jq -r '.cron' <<< "$ce")")"
+                fi
+                local crun cargs
+                crun=$(jq -r '.run' <<< "$ce")
+                cargs=$(jq -r '[.argv[]?] | join(" ")' <<< "$ce")
+                echo "    run: $(_yml_q "${crun}${cargs:+ ${cargs}}")"
+            done < <(jq -c '.[]' <<< "$crons_json")
+        else
+            echo "# Scheduled commands, through the same runners as deploy.post. The"
+            echo "# declared list replaces the '# cipi-yml' crontab entries."
+            echo "# crons:"
+            echo "#   - every: 30m"
+            echo "#     run: artisan queue:prune-batches"
+        fi
 
         # ── backup profiles this app owns
         local owned="" p
@@ -2338,6 +3744,28 @@ app:
     post_max_size: 60M
     memory_limit: 512M
 
+  # Per-app limits (cipi app limits). Only the declared keys are reconciled;
+  # the bounds are the CLI's (fpm_max_children 1-50, octane_workers 1-16,
+  # worker_procs 1-20) and a value outside them blocks the plan.
+  # limits:
+  #   memory_limit: 512M
+  #   fpm_max_children: 10
+
+  # Canonical www redirect: to-root (www → apex), from-root (apex → www) or none.
+  # The other name of the pair must be in the aliases above.
+  www: to-root
+
+  # HTTP basic auth in front of the app (ACME challenges stay public).
+  # Never commit a password. A user listed by name keeps the password already set
+  # on the server (cipi basicauth enable ${app} --user=NAME); password_hash takes
+  # a bcrypt (cost 10+) or SHA-512 crypt hash:  htpasswd -nbB -C 12 NAME 'secret'
+  # Server users not listed here are removed. "basic_auth: false" turns it off.
+  basic_auth:
+    users:
+      - admin
+      # - name: preview
+      #   password_hash: "\$2y\$12\$…"
+
 # Extra databases beyond the one created with the app.
 # Credentials land in /home/${app}/shared/cipi-databases.env — never dropped.
 databases:
@@ -2366,16 +3794,50 @@ workers:
 # Laravel scheduler (* * * * * artisan schedule:run)
 schedule: true
 
-# Commands to run after every successful deploy, from the live release directory.
-# Each step uses an allowlisted runner — no shell, no pipes, no free-form scripts.
-# Runs on both 'cipi deploy' and the Git webhook; does not require 'cipi yml auto'.
+# Meilisearch for Laravel Scout: a scoped key for indexes ${app}-* and the
+# SCOUT_* / MEILISEARCH_* variables in .env. The engine itself is installed by
+# root (cipi search install). false turns it off and keeps the indexes.
+search: false
+
+# Deploy recipe options (the same set as \`cipi app deploy-config\`) and
+# commands to run after every successful deploy, from the live release
+# directory. Each post step uses an allowlisted runner — no shell, no pipes,
+# no free-form scripts. post runs on both 'cipi deploy' and the Git webhook
+# and does not require 'cipi yml auto'.
 deploy:
+  # keep_releases: 5          # releases kept for rollback (1-20)
+  # migrate: false            # skip artisan:migrate in the recipe
+  # optimize: true            # artisan:optimize after vendors
+  # storage_link: true        # artisan:storage:link after vendors
+  # queue_restart: true       # artisan:queue:restart after the symlink
+  # horizon_terminate: true   # horizon:terminate before the symlink
+  # extra_artisan: [ "view:clear" ]   # extra artisan commands in the recipe
+  # snapshot: true            # database snapshot before each deploy
   post:
     - artisan cache:clear
     - artisan scout:import --force
     - npm run build
     - composer dump-autoload -o
   # post_on_failure: abort   # default warn — log + email, leave the release live
+
+# Force the HTTP → HTTPS redirect (cipi ssl force). It needs a certificate
+# (cipi ssl install ${app}) and can only ever be turned on from this file.
+# ssl:
+#   force_https: true
+
+# Names (never values) the app's .env must carry: the plan is blocked while
+# one is missing or empty, so code that expects them is never deployed blind.
+# env:
+#   required: [ STRIPE_KEY, MAIL_HOST ]
+
+# Scheduled commands, through the same allowlisted runners as deploy.post.
+# The declared list replaces the '# cipi-yml' lines of the app's crontab and
+# never touches the rest of it (the Laravel scheduler included).
+# crons:
+#   - every: 30m              # 5m/10m/15m/20m/30m, 1h..12h, 1d..28d
+#     run: artisan queue:prune-batches
+#   - cron: "15 3 * * *"      # or five cron fields
+#     run: php scripts/cleanup.php
 
 # HTTP healthcheck. Probed every 5 minutes and right after every deploy.
 # The URL must be one of this app's own domains.
@@ -2387,6 +3849,47 @@ health:
   # rollback_on_unhealthy: true   # undo a release that fails the check
   #                               # (the code symlink only — migrations are NOT undone)
   # Use "health: {enabled: false}" to remove the healthcheck entirely.
+
+# Whole-app redirect (every name of the app, www included, in one hop).
+# ACME stays public, and the redirects/proxies below keep working.
+# redirect:
+#   to: "https://new.example.com"
+#   code: 301              # 301, 302, 307 or 308
+#   keep_path: true        # /a?b → https://new.example.com/a?b
+#   enabled: true          # false keeps the target but serves the app again
+# "redirect: {enabled: false}" removes it.
+
+# Path redirects. The declared list replaces the current one.
+# A 'from' ending in / is a prefix and carries the rest of the path over.
+redirects:
+  - from: /old-page
+    to: /new-page
+  - from: /blog/
+    to: "https://blog.${domain}/"
+    code: 308
+
+# Reverse proxy on a prefix. The declared list replaces the current one.
+# Refused from this file: Cipi's own local ports (databases, Valkey, SSH,
+# another app's Octane/Reverb) and link-local / metadata addresses.
+proxies:
+  - prefix: /api/
+    upstream: "http://127.0.0.1:3000"
+    strip_prefix: true     # /api/users → upstream/users
+    # preserve_host: true
+    # timeout: 60          # seconds, 1-3600
+    # buffering: false     # for SSE, long polling, streamed downloads
+
+# Node apps only (cipi app create --node=…). Read by each deploy right after the
+# checkout, so the commit that changes them is built and started with them.
+# Needs: cipi yml auto ${app} on. A new Node major is installed by root first.
+# node:
+#   framework: next        # next nuxt sveltekit astro remix vite — fills the rest
+#   mode: ssr              # spa | static | ssr
+#   version: 22            # even (LTS) major
+#   build: npm run build
+#   start: npx next start -H 127.0.0.1   # ssr: runs without a shell
+#   health_path: /         # ssr: must answer below 500 before nginx switches
+#   output: dist           # spa/static: the directory nginx serves
 
 # Backup strategy for this app. Profile names must be ${app} or ${app}-*.
 backup:
@@ -2403,7 +3906,7 @@ backup:
     # Slower, complete, off-site and encrypted.
     - name: ${app}-nightly
       scope: all           # all | files | db
-      cron: "0 2 * * *"    # or use \\`every:\\`
+      cron: "0 2 * * *"    # or use \`every:\`
       keep_days: 14
       destinations: [s3]
       encrypt: true

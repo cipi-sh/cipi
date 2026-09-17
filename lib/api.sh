@@ -210,6 +210,18 @@ _api_lock_package_version() {
     jq -r --arg n "$pkg" '.packages[] | select(.name == $n) | .version' "$lock" 2>/dev/null | head -1
 }
 
+# What is actually installed: every locked package with its version and the
+# exact dist/source reference, hashed. `composer require` rewrites the lock's
+# content-hash even when it resolves to the same packages, so the lock file
+# itself cannot tell "updated" from "already current" — this can.
+_api_lock_fingerprint() {
+    local lock="${CIPI_API_ROOT}/composer.lock"
+    [[ -f "$lock" ]] && command -v jq >/dev/null 2>&1 || { echo ""; return 0; }
+    jq -r '[(.packages // [])[], (.["packages-dev"] // [])[]]
+        | map("\(.name)@\(.version)#\(.dist.reference // .source.reference // "")")
+        | sort | .[]' "$lock" 2>/dev/null | sha256sum | awk '{print $1}'
+}
+
 # Absolute path to panel SQLite DB from .env (default Laravel relative path).
 _api_panel_sqlite_path() {
     local envf="${CIPI_API_ROOT}/.env" raw
@@ -844,6 +856,10 @@ api_update() {
 
     ensure_cipi_api_permissions
 
+    local fp_before ver_before
+    fp_before=$(_api_lock_fingerprint)
+    ver_before=$(_api_lock_package_version "cipi/api" 2>/dev/null || true)
+
     # Soft update = package bump only. Full Laravel rebuild: cipi api upgrade.
     if ! _api_update_package; then
         error "Composer update failed (timed out or error). Try: cipi api upgrade"
@@ -860,10 +876,21 @@ api_update() {
 
     _api_show_versions
 
-    log_action "API UPDATED"
+    # The nightly cron runs this every day: only a change in the locked
+    # packages is an update worth logging and announcing. An unreadable lock
+    # (empty fingerprint) counts as a change rather than hiding a real one.
+    local fp_after ver_after
+    fp_after=$(_api_lock_fingerprint)
+    if [[ -n "$fp_before" && "$fp_before" == "$fp_after" ]]; then
+        echo ""; success "API already up to date — no package changed"; echo ""
+        return 0
+    fi
+    ver_after=$(_api_lock_package_version "cipi/api" 2>/dev/null || true)
+
+    log_action "API UPDATED: cipi/api ${ver_before:-?} → ${ver_after:-?}"
     cipi_notify \
         "Cipi API updated on $(hostname)" \
-        "The panel API was updated.\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The panel API was updated.\n\nServer: $(hostname)\ncipi/api: ${ver_before:-?} → ${ver_after:-?}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         api_update
     echo ""; success "API updated successfully"; echo ""
 }

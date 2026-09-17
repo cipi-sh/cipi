@@ -4,6 +4,23 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.3.1] — 2026-09-17
+
+### Added — Compliance evidence (`cipi compliance`)
+
+Cipi cannot be ISO 27001 or SOC 2 certified: there is no organisation or service to audit, only software on your server. What a team under audit needs is evidence that the deploy platform meets the controls, in a form the auditor accepts. `cipi compliance` collects that evidence. It is **read-only**: no check changes the server, runs `apt update`, or writes config.
+
+- **`cipi compliance [check] [--days=90] [--json]`** — runs 17 controls and prints pass / warn / fail / info / n/a. Exits 1 on any fail, so it can gate CI or cron.
+- **`cipi compliance report [--days=90] [--out=/abs/path] [--no-archive] [--json]`** — writes `/var/log/cipi/compliance/<host>-<UTC time>/` with `report.md` (for the auditor), `report.json`, `evidence/<control>/…` (the raw command output behind each finding) and `SHA256SUMS`, plus a `.tar.gz` and its `.sha256`. Everything is root-only (700/600). The command prints the archive SHA-256 so you can record it outside the server. The run is logged to `cipi.log`.
+- **`cipi compliance list`** / **`cipi compliance controls`** — past reports with their counts, and the control catalog with its mapping.
+- **Controls and mapping** (ISO/IEC 27001:2022 Annex A · SOC 2 TSC): `ssh` (effective `sshd -T`), `firewall` (ufw default deny), `intrusion` (fail2ban jails, CrowdSec), `patching` (unattended-upgrades, pending security updates from the cached lists, reboot-required), `kernel` (CIS network sysctls), `tls` (`nginx -T` protocols, HSTS, Let's Encrypt expiry and key type), `accounts` (UID 0, empty passwords, accounts not managed by Cipi, sudoers), `ssh_keys` (fingerprints; RSA < 3072 and DSA flagged), `api_tokens` (no expiry, expired, unused for the period, `*` ability, IP allowlist `*`), `gui_2fa`, `secrets` (encrypted and root-only config, key file modes), `deploys` (deploy log banners: trigger, branch, release, commit SHA from Deployer's `REVISION`, result, rollbacks), `backups` (schedule freshness, off-site copy, encryption), `logging` (remote forwarding, auth.log history, journald, auditd), `monitoring` (monitor cron, disabled checks, alert delivery, muted triggers), `time` (NTP), `malware` (`cipi scan`).
+- **No secrets in the bundle.** Panel SQLite databases are read as their owner with `sqlite3 -readonly` (PHP PDO fallback), using named columns only. Token hashes, password hashes and 2FA secrets are never selected. SSH keys are exported as fingerprints only, and backup credentials are not exported.
+- **Honest about gaps.** `secrets` is at best a warn: the vault uses AES-256-CBC without a MAC, so it is not authenticated encryption, and the report says so before an auditor has to ask. `backups` notes that restore tests are not recorded. `deploys` notes that the person who ran a CLI deploy is in `auth.log`, not in the deploy log. Cipi's own design choices appear as notes, not failures: password SFTP login for `cipi-apps` users, and nginx, databases and PHP kept off unattended-upgrades.
+
+No migration: nothing is installed, scheduled or enabled.
+
+---
+
 ## [5.3.0] — 2026-09-11
 
 ### Added — Cloudflare Zero Trust (`cipi zt`)

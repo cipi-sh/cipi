@@ -278,6 +278,17 @@ cipi notifications channel add telegram ops --token=<bot-token> --chat-id=<id>
 cipi notifications channel add ntfy phone --url=https://ntfy.sh/my-topic --priority=high
 ```
 
+### 📋 Compliance Evidence (ISO 27001 / SOC 2)
+
+Cipi is self-hosted software, so it cannot be certified itself: ISO 27001 certifies an organisation, SOC 2 attests a service. What an agency or SaaS under audit needs is **evidence** that its servers meet the controls. **`cipi compliance report`** collects it in one read-only pass: SSH hardening, firewall, fail2ban, OS patches, kernel network parameters, TLS protocols and certificates, local accounts and sudo, SSH key fingerprints, API tokens (expiry, last use, scope), GUI 2FA, config encryption at rest, the deploy and rollback log with commit SHAs, backup freshness, log forwarding, monitoring and alert delivery, NTP, and malware scanning. Each control is mapped to ISO/IEC 27001:2022 Annex A and SOC 2 criteria.
+
+```bash
+cipi compliance                   # pass / warn / fail per control, exit 1 on fail
+cipi compliance report --days=90  # report.md + report.json + raw evidence + SHA256SUMS, as a .tar.gz
+```
+
+The bundle has no secrets (no token hashes, no key material, no vault content) and is written root-only under `/var/log/cipi/compliance/`. Give the archive and its SHA-256 to your auditor. Organisational controls such as policies, risk assessment and incident response are still yours to cover.
+
 ### 🤖 AI Agent Ready (MCP)
 
 Cipi ships with a built-in MCP server. Laravel first: install the `cipi-agent` Laravel package, point your AI client at the endpoint, and deploy, rollback, query logs, and run Artisan commands via natural language — no SSH required.

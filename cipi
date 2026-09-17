@@ -66,7 +66,7 @@ _help_topic_header() {
 _help_topics_list() {
     cat <<'EOF'
 app  domains  www  deploy  worker  schedule  health  monitor  db  search  service  ssl
-php  package  auth  basicauth  ssh  firewall  ban  crowdsec  zt  scan  backup  sync
+php  package  auth  basicauth  ssh  firewall  ban  crowdsec  zt  scan  compliance  backup  sync
 git  ini  yml  nginx  api  gui  smtp  notifications  reset  server  completion
 EOF
 }
@@ -108,6 +108,7 @@ show_help() {
     _help_cmd "cipi crowdsec ..."          "IP reputation (opt-in)  ${DIM}enable|disable|status|rescue${NC}"
     _help_cmd "cipi zt ..."                "Cloudflare Zero Trust (opt-in)  ${DIM}enable|hostname|access|lock${NC}"
     _help_cmd "cipi scan ..."              "Nightly malware scan (opt-in)  ${DIM}enable|disable|<app>${NC}"
+    _help_cmd "cipi compliance ..."        "ISO 27001 / SOC 2 evidence  ${DIM}check|report${NC}"
     _help_cmd "cipi auth / basicauth ..."  "Composer auth.json & HTTP basic auth"
     _help_cmd "cipi reset ..."             "Reset root / DB / Valkey passwords"
     echo ""
@@ -556,6 +557,24 @@ show_help_topic() {
             echo ""
             ;;
 
+        compliance|audit|iso27001|soc2)
+            _help_topic_header "Compliance evidence"
+            echo ""
+            _help_cmd "cipi compliance"                 "Run every control now  ${DIM}[--days=90] [--json]${NC}"
+            _help_cmd "cipi compliance report"          "Evidence bundle for an auditor  ${DIM}[--days=90] [--out=] [--no-archive] [--json]${NC}"
+            _help_cmd "cipi compliance list"            "Reports generated on this server  ${DIM}[--json]${NC}"
+            _help_cmd "cipi compliance controls"        "Controls and their ISO 27001:2022 / SOC 2 mapping"
+            echo ""
+            _help_note "Read-only. Checks SSH, firewall, fail2ban, patches, kernel, TLS, accounts,"
+            _help_note "SSH keys, API tokens, GUI 2FA, config encryption, deploys, backups, logging,"
+            _help_note "monitoring, NTP and malware scanning. check exits 1 on any fail."
+            _help_note "report writes report.md + report.json + raw evidence + SHA256SUMS to"
+            _help_note "/var/log/cipi/compliance/<host>-<time>/ and a root-only .tar.gz."
+            _help_note "No secrets in the bundle: fingerprints, names and metadata only."
+            _help_note "Evidence for an audit, not a certification: Cipi itself cannot be certified."
+            echo ""
+            ;;
+
         crowdsec)
             _help_topic_header "CrowdSec"
             echo ""
@@ -780,6 +799,7 @@ show_help_all() {
     show_help_topic crowdsec
     show_help_topic zt
     show_help_topic scan
+    show_help_topic compliance
     show_help_topic backup
     show_help_topic ini
     show_help_topic yml
@@ -878,6 +898,7 @@ main() {
         crowdsec)   _maybe_cmd_help crowdsec "$@";   require_root; source "${CIPI_LIB}/crowdsec.sh";    crowdsec_command "$@" ;;
         zt|zerotrust) _maybe_cmd_help zt "$@";       require_root; source "${CIPI_LIB}/zt.sh";        zt_command "$@" ;;
         scan)       _maybe_cmd_help scan "$@";       require_root; source "${CIPI_LIB}/scan.sh";        scan_command "$@" ;;
+        compliance) _maybe_cmd_help compliance "$@"; require_root; source "${CIPI_LIB}/compliance.sh";  compliance_command "$@" ;;
         backup)     _maybe_cmd_help backup "$@";     require_root; source "${CIPI_LIB}/backup.sh";      backup_command "$@" ;;
         ini)        _maybe_cmd_help ini "$@";        require_root; source "${CIPI_LIB}/ini.sh";         ini_command "$@" ;;
         yml|yaml)   _maybe_cmd_help yml "$@";        require_root; source "${CIPI_LIB}/yml.sh";        yml_command "$@" ;;

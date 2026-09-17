@@ -43,8 +43,8 @@ _cipi_complete() {
         words=("${COMP_WORDS[@]}"); cword=$COMP_CWORD
     fi
 
-    local commands="status version self-update service app alias domains www auth basicauth deploy worker schedule health monitor db search ssl php package firewall ban crowdsec zt scan backup ini yml nginx api gui git sync ssh smtp notifications reset completion help"
-    local topics="app domains www deploy worker schedule health monitor db search service ssl php package auth basicauth ssh firewall ban crowdsec zt scan backup sync git ini yml nginx api gui smtp notifications reset server completion all"
+    local commands="status version self-update service app alias domains www auth basicauth deploy worker schedule health monitor db search ssl php package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh smtp notifications reset completion help"
+    local topics="app domains www deploy worker schedule health monitor db search service ssl php package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui smtp notifications reset server completion all"
 
     # skip a leading path/wrapper (e.g. `sudo cipi`, `/usr/local/bin/cipi`)
     local start=1 j
@@ -230,6 +230,16 @@ _cipi_complete() {
                        ssh)      sub="enable disable unlock" ;;
                        lock)     sub="http ssh" ;;
                        unlock)   sub="http ssh" ;;
+                   esac ;;
+            esac ;;
+
+        compliance)
+            case $pos in
+                1) sub="check report list controls --days= --json" ;;
+                *) case "$w1" in
+                       report)      sub="--days= --out= --no-archive --json" ;;
+                       check)       sub="--days= --json" ;;
+                       list|controls) sub="--json" ;;
                    esac ;;
             esac ;;
 

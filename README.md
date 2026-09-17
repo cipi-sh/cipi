@@ -252,6 +252,21 @@ Clone an app for staging with **`cipi app clone <src> --domain=…`**.
 
 Add multiple domains or subdomains to any app. A domain can be a **wildcard** (`*.example.com`), as the app's primary domain or as an alias — multi-tenant apps get one vhost for every tenant. Manage www/apex aliases and canonical redirects with **`cipi www`**. A single SAN certificate covers all of them — HTTP-01 by default, or **DNS-01 via Cloudflare** for wildcards (`cipi ssl install --dns=cloudflare --wildcard`). Auto-renew handles the rest.
 
+### ↪️ Redirects & prefix proxies
+
+Redirects and reverse proxies are written into the app's nginx vhost, so they cost nothing at runtime and never reach PHP. Every change runs `nginx -t` and is reverted if nginx refuses it.
+
+```bash
+cipi redirect set old-shop --to=https://shop.example.com   # whole app, path kept, 301
+cipi redirect disable old-shop                             # serve it again, target kept
+cipi redirect add shop /blog/ https://blog.example.com/ --308
+cipi redirect add shop /promo /sale --302
+cipi proxy add shop /api/ http://10.0.0.5:8080 --strip-prefix   # /api/users → :8080/users
+cipi proxy add shop /events/ http://127.0.0.1:3000 --no-buffering
+```
+
+A proxy only takes its prefix; the rest of the app is served as usual. WebSockets pass through, `X-Forwarded-*` headers are set, and basic auth covers the prefix when it is on.
+
 ### ❤️ HTTP Healthchecks
 
 Point Cipi at an HTTP endpoint; it probes every 5 minutes and alerts after consecutive failures:

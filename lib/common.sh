@@ -214,7 +214,7 @@ _update_apps_public() {
     echo "$json" | jq '
         with_entries(.value |= {
             domain, aliases, php, branch, repository, user, created_at, suspended,
-            basic_auth, www_redirect, force_https, custom, docroot, engine,
+            basic_auth, www_redirect, redirect, redirects, proxies, force_https, custom, docroot, engine,
             octane, octane_port, reverb, reverb_port, horizon, schedule, node_build,
             cloned_from, predeploy_snapshot, limits, ini, health_url, health_expect,
             ssl_dns_provider, backup_profiles, search

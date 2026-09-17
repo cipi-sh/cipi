@@ -65,7 +65,7 @@ _help_topic_header() {
 
 _help_topics_list() {
     cat <<'EOF'
-app  domains  www  deploy  worker  schedule  health  monitor  db  search  service  ssl
+app  domains  www  redirect  proxy  deploy  worker  schedule  health  monitor  db  search  service  ssl
 php  package  auth  basicauth  ssh  firewall  ban  crowdsec  zt  scan  compliance  backup  sync
 git  ini  yml  nginx  api  gui  smtp  notifications  reset  server  completion
 EOF
@@ -95,6 +95,7 @@ show_help() {
     echo -e "  ${BOLD}Apps & deploy${NC}"
     _help_cmd "cipi app ..."               "Create, edit, logs, env, ..."
     _help_cmd "cipi domains / alias / www" "Domains, aliases & www redirects"
+    _help_cmd "cipi redirect / proxy ..."  "Nginx redirects & prefix reverse proxies"
     _help_cmd "cipi deploy <app>"        "Deploy / rollback / webhook"
     _help_cmd "cipi worker ..."            "Queue workers / Horizon"
     _help_cmd "cipi schedule ..."          "Laravel scheduler on/off"
@@ -227,6 +228,51 @@ show_help_topic() {
             _help_cmd "cipi www force-from-root <app>" "Redirect apex → www"
             _help_cmd "cipi www clear <app>"           "Clear www canonical redirect"
             _help_cmd "cipi www status <app>"          "Show www redirect status"
+            echo ""
+            ;;
+
+        redirect|redirects)
+            _help_topic_header "Redirects"
+            _help_h "Whole app"
+            _help_cmd "cipi redirect set <app> --to=<url>"  "Redirect every request  ${DIM}[--301|--302|--307|--308] [--no-path]${NC}"
+            _help_cmd "cipi redirect disable <app>"         "Serve the app again, keep the target"
+            _help_cmd "cipi redirect enable <app>"          "Re-enable the saved target"
+            _help_cmd "cipi redirect unset <app>"           "Forget the app redirect"
+            _help_h "Paths"
+            _help_cmd "cipi redirect add <app> <from> <to>" "Path redirect  ${DIM}[--301|--302|--307|--308] [--no-path]${NC}"
+            _help_cmd "cipi redirect remove <app> <from>"   "Remove a path redirect"
+            _help_cmd "cipi redirect list <app> [--json]"   "Show app + path redirects"
+            echo ""
+            _help_note "Default code 301. 307/308 keep the method and body (POST stays POST)."
+            _help_note "<to> is a /path on the same app or an http(s):// URL."
+            _help_note "A <from> ending in / is a prefix: /blog/x?y → <to>x?y (the rest of the"
+            _help_note "path and the query are kept; --no-path sends all of it to <to> as is)."
+            _help_note "Otherwise <from> is exact and only the query string is carried over."
+            _help_note "set keeps the path by default: old.com/a?b → https://new.com/a?b."
+            _help_note "Path redirects and proxies keep working while the app redirect is on."
+            _help_note "Every change runs nginx -t and is reverted if nginx refuses it."
+            _help_note "See also: cipi help www (www ↔ apex), cipi help proxy"
+            echo ""
+            ;;
+
+        proxy|proxies|gateway)
+            _help_topic_header "Reverse proxy (prefix)"
+            echo ""
+            _help_cmd "cipi proxy add <app> <prefix> <url>" "Proxy <prefix>* to an upstream"
+            _help_note "  --strip-prefix     /api/users → <url>/users  (default: /api/users → <url>/api/users)"
+            _help_note "  --preserve-host    send the visitor's Host (default: the upstream's)"
+            _help_note "  --timeout=N        read/send timeout in seconds (default 60, max 3600)"
+            _help_note "  --no-buffering     stream responses (SSE, long polling, large downloads)"
+            _help_note "  --force            allow a loopback port Cipi already uses (DB, Meilisearch, …)"
+            _help_cmd "cipi proxy remove <app> <prefix>"    "Remove a route"
+            _help_cmd "cipi proxy list <app> [--json]"      "Show routes"
+            echo ""
+            _help_note "Example: cipi proxy add shop /api/ http://10.0.0.5:8080 --strip-prefix"
+            _help_note "The rest of the app is served as usual; only <prefix> goes upstream."
+            _help_note "WebSockets pass through. X-Forwarded-For/-Proto/-Host are set, and"
+            _help_note "X-Forwarded-Prefix with --strip-prefix. Basic auth, when on, covers it."
+            _help_note "An upstream with a path (http://h/v1) replaces the prefix: needs --strip-prefix."
+            _help_note "nginx resolves upstream hostnames at reload; an IP never goes stale."
             echo ""
             ;;
 
@@ -777,6 +823,8 @@ show_help_all() {
     show_help_topic app
     show_help_topic domains
     show_help_topic www
+    show_help_topic redirect
+    show_help_topic proxy
     show_help_topic auth
     show_help_topic basicauth
     show_help_topic deploy
@@ -881,6 +929,8 @@ main() {
         alias)      _maybe_cmd_help domains "$@";    require_root; source "${CIPI_LIB}/app.sh";         alias_command "$@" ;;
         domains)    _maybe_cmd_help domains "$@";    require_root; source "${CIPI_LIB}/app.sh";         domains_command "$@" ;;
         www)        _maybe_cmd_help www "$@";        require_root; source "${CIPI_LIB}/app.sh";         www_command "$@" ;;
+        redirect|redirects) _maybe_cmd_help redirect "$@"; require_root; source "${CIPI_LIB}/routes.sh"; redirect_command "$@" ;;
+        proxy)      _maybe_cmd_help proxy "$@";      require_root; source "${CIPI_LIB}/routes.sh";      proxy_command "$@" ;;
         auth)       _maybe_cmd_help auth "$@";       require_root; source "${CIPI_LIB}/app.sh";         auth_command "$@" ;;
         basicauth)  _maybe_cmd_help basicauth "$@";  require_root; source "${CIPI_LIB}/app.sh";         basicauth_command "$@" ;;
         deploy)     _maybe_cmd_help deploy "$@";     require_root; source "${CIPI_LIB}/deploy.sh";      deploy_command "$@" ;;

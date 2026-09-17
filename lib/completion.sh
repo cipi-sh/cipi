@@ -43,8 +43,8 @@ _cipi_complete() {
         words=("${COMP_WORDS[@]}"); cword=$COMP_CWORD
     fi
 
-    local commands="status version self-update service app alias domains www auth basicauth deploy worker schedule health monitor db search ssl php package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh smtp notifications reset completion help"
-    local topics="app domains www deploy worker schedule health monitor db search service ssl php package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui smtp notifications reset server completion all"
+    local commands="status version self-update service app alias domains www redirect proxy auth basicauth deploy worker schedule health monitor db search ssl php package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh smtp notifications reset completion help"
+    local topics="app domains www redirect proxy deploy worker schedule health monitor db search service ssl php package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui smtp notifications reset server completion all"
 
     # skip a leading path/wrapper (e.g. `sudo cipi`, `/usr/local/bin/cipi`)
     local start=1 j
@@ -122,6 +122,27 @@ _cipi_complete() {
             case $pos in
                 1) sub="add force-to-root force-from-root clear status" ;;
                 2) sub="$(_cipi_apps)" ;;
+            esac ;;
+
+        redirect|redirects)
+            case $pos in
+                1) sub="set enable disable unset add remove list" ;;
+                2) sub="$(_cipi_apps)" ;;
+                *) case "$w1" in
+                       set)      sub="--to= --301 --302 --307 --308 --no-path" ;;
+                       add)      sub="--301 --302 --307 --308 --no-path" ;;
+                       list)     sub="--json" ;;
+                   esac ;;
+            esac ;;
+
+        proxy)
+            case $pos in
+                1) sub="add remove list" ;;
+                2) sub="$(_cipi_apps)" ;;
+                *) case "$w1" in
+                       add)  sub="--strip-prefix --preserve-host --timeout= --no-buffering --force" ;;
+                       list) sub="--json" ;;
+                   esac ;;
             esac ;;
 
         auth)

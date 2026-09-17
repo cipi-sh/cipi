@@ -586,6 +586,19 @@ app_show() {
     if [[ "$(app_get "$app" force_https)" == "true" ]]; then
         printf "  %-14s ${GREEN}%s${NC}\n" "HTTPS" "forced (http → https)"
     fi
+    local routes_show
+    routes_show=$(vault_read apps.json | jq -r --arg a "$app" '
+        .[$a] as $x |
+        (if ($x.redirect.enabled // false) then "Redirect\t\($x.redirect.code // 301) → \($x.redirect.to)" else empty end),
+        (if (($x.redirects // []) | length) > 0 then "Paths\t\($x.redirects | length) redirect(s)" else empty end),
+        (if (($x.proxies // []) | length) > 0 then "Proxy\t\($x.proxies | map(.prefix) | join(", "))" else empty end)
+    ' 2>/dev/null || true)
+    if [[ -n "$routes_show" ]]; then
+        local rk rv
+        while IFS=$'\t' read -r rk rv; do
+            printf "  %-14s ${CYAN}%s${NC}\n" "$rk" "$rv"
+        done <<< "$routes_show"
+    fi
     printf "  %-14s ${CYAN}%s${NC}\n" "Repository" "$repo"
     printf "  %-14s ${CYAN}%s${NC}\n" "Branch" "$b"
     printf "  %-14s ${CYAN}%s${NC}\n" "PHP" "$p"
@@ -1929,6 +1942,100 @@ _nginx_reverb_location_block() {
 EOF
 }
 
+# ── REDIRECTS & PROXY ROUTES (cipi redirect / cipi proxy) ─────
+# Rules live in apps.json (.redirect, .redirects[], .proxies[]) and are
+# validated on the way in by lib/routes.sh — paths and URLs never contain
+# quotes, '$', ';', braces or whitespace — so they are rendered verbatim here.
+# Every block is a `location = ` or `location ^~ `, which nginx picks before
+# the regex locations (\.php$, dotfiles), so order in the file does not matter.
+# certbot clones them into :443 with the rest of the server block.
+
+# Regex-escape a validated path (only '.' and '+' of its charset are special).
+_routes_regex_escape() {
+    local s="$1"
+    s="${s//./\\.}"
+    s="${s//+/\\+}"
+    printf '%s' "$s"
+}
+
+# Path redirects. A 'from' ending in '/' is a prefix: /old/x?y → <to>x?y (the
+# rest of the raw request URI, query included, is appended). Otherwise it is
+# an exact path and the query string is carried over unless 'to' has its own.
+_nginx_redirect_location_blocks() {
+    local app="$1" rules from to code keep re q
+    rules=$(vault_read apps.json | jq -r --arg a "$app" '
+        .[$a].redirects // [] | .[] |
+        [.from, .to, (.code // 301 | tostring), (if .keep_path == false then "0" else "1" end)] | @tsv
+    ' 2>/dev/null) || return 0
+    [[ -z "$rules" ]] && return 0
+    while IFS=$'\t' read -r from to code keep; do
+        [[ -z "$from" || -z "$to" ]] && continue
+        if [[ "$from" == */ ]]; then
+            if [[ "$keep" == "1" ]]; then
+                re=$(_routes_regex_escape "$from")
+                printf '    location = %s { return %s "%s"; }\n' "${from%/}" "$code" "$to"
+                printf '    location ^~ %s {\n' "$from"
+                printf '        if ($request_uri ~ "^%s(.*)$") { return %s "%s$1"; }\n' "$re" "$code" "$to"
+                printf '        return %s "%s";\n' "$code" "$to"
+                printf '    }\n'
+            else
+                printf '    location = %s { return %s "%s"; }\n' "${from%/}" "$code" "$to"
+                printf '    location ^~ %s { return %s "%s"; }\n' "$from" "$code" "$to"
+            fi
+        else
+            q='$is_args$args'
+            [[ "$keep" != "1" || "$to" == *\?* ]] && q=""
+            printf '    location = %s { return %s "%s%s"; }\n' "$from" "$code" "$to" "$q"
+        fi
+    done <<< "$rules"
+}
+
+# Prefix reverse proxies (API gateway style). $2 is the app's basic auth block,
+# so a protected app stays protected under its proxied prefixes too.
+_nginx_proxy_location_blocks() {
+    local app="$1" auth_block="${2:-}" rules
+    rules=$(vault_read apps.json | jq -r --arg a "$app" '
+        .[$a].proxies // [] | .[] |
+        [.prefix, .upstream,
+         (if .strip_prefix == true then "1" else "0" end),
+         (if .preserve_host == true then "1" else "0" end),
+         (.timeout // 60 | tostring),
+         (if .buffering == false then "0" else "1" end)] | @tsv
+    ' 2>/dev/null) || return 0
+    [[ -z "$rules" ]] && return 0
+    _ensure_nginx_octane_map
+    local prefix upstream strip preserve timeout buffering pass host_hdr
+    while IFS=$'\t' read -r prefix upstream strip preserve timeout buffering; do
+        [[ -z "$prefix" || -z "$upstream" ]] && continue
+        pass="$upstream"
+        # proxy_pass with a URI part replaces the matched prefix; without one
+        # the original URI (prefix included) is passed through untouched.
+        if [[ "$strip" == "1" && ! "${upstream#*://}" == */* ]]; then
+            pass="${upstream}/"
+        fi
+        host_hdr='$proxy_host'
+        [[ "$preserve" == "1" ]] && host_hdr='$host'
+        printf '    location ^~ %s {\n' "$prefix"
+        printf '%s' "$auth_block"
+        printf '        proxy_http_version 1.1;\n'
+        printf '        proxy_set_header Host %s;\n' "$host_hdr"
+        printf '        proxy_set_header X-Real-IP $remote_addr;\n'
+        printf '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n'
+        printf '        proxy_set_header X-Forwarded-Proto $scheme;\n'
+        printf '        proxy_set_header X-Forwarded-Host $host;\n'
+        [[ "$strip" == "1" ]] && printf '        proxy_set_header X-Forwarded-Prefix %s;\n' "${prefix%/}"
+        printf '        proxy_set_header Upgrade $http_upgrade;\n'
+        printf '        proxy_set_header Connection $connection_upgrade;\n'
+        [[ "$upstream" == https://* ]] && printf '        proxy_ssl_server_name on;\n'
+        printf '        proxy_connect_timeout 10s;\n'
+        printf '        proxy_read_timeout %ss;\n' "$timeout"
+        printf '        proxy_send_timeout %ss;\n' "$timeout"
+        [[ "$buffering" == "0" ]] && printf '        proxy_buffering off;\n'
+        printf '        proxy_pass %s;\n' "$pass"
+        printf '    }\n'
+    done <<< "$rules"
+}
+
 # ── SUSPEND (offline page) ────────────────────────────────────
 # `cipi app suspend <app>` takes a site offline by replacing its vhost with a
 # generic static suspension page served with HTTP 503. State lives in apps.json
@@ -2056,6 +2163,60 @@ EOF
         return 0
     fi
 
+    # HTTP basic auth (cipi basicauth enable <app>). Injected into the app's
+    # location blocks — NOT at server level — so that certbot's auto-generated
+    # ACME challenge location (exact match, inherits from server) stays public
+    # and SSL issue/renewal keeps working. certbot clones these location blocks
+    # into the :443 server, so HTTPS is protected too.
+    local auth_block=""
+    if [[ "$(app_get "$app" basic_auth)" == "true" ]] && [[ -f "/etc/nginx/cipi-basicauth/${app}.htpasswd" ]]; then
+        auth_block="        auth_basic \"Restricted\";
+        auth_basic_user_file /etc/nginx/cipi-basicauth/${app}.htpasswd;
+"
+    fi
+
+    # Path redirects and prefix proxies (cipi redirect add / cipi proxy add).
+    local route_blocks="" redirect_blocks proxy_blocks
+    redirect_blocks=$(_nginx_redirect_location_blocks "$app")
+    proxy_blocks=$(_nginx_proxy_location_blocks "$app" "$auth_block")
+    [[ -n "$redirect_blocks" ]] && route_blocks+="${redirect_blocks}"$'\n'
+    [[ -n "$proxy_blocks" ]] && route_blocks+="${proxy_blocks}"$'\n'
+
+    # App-wide redirect (cipi redirect set <app> --to=URL). Every name of the
+    # app answers with a redirect, www host included, so there is one hop only.
+    # Path redirects and proxies stay live — they are more specific than
+    # `location /` — which lets a moved site keep e.g. /api/ where it was.
+    # ACME stays public so the certificate of the old name keeps renewing.
+    local app_redirect
+    app_redirect=$(vault_read apps.json | jq -r --arg a "$app" '
+        .[$a].redirect // {} | select(.enabled == true and (.to // "") != "") |
+        [.to, (.code // 301 | tostring), (if .keep_path == false then "0" else "1" end)] | @tsv
+    ' 2>/dev/null || true)
+    if [[ -n "$app_redirect" ]]; then
+        local r_to r_code r_keep r_target
+        IFS=$'\t' read -r r_to r_code r_keep <<< "$app_redirect"
+        r_target="$r_to"
+        [[ "$r_keep" == "1" ]] && r_target="${r_to%/}\$request_uri"
+        cat > "/etc/nginx/sites-available/${app}" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${names};
+    access_log /home/${app}/logs/nginx-access.log;
+    error_log /home/${app}/logs/nginx-error.log;
+    location ^~ /.well-known/acme-challenge/ {
+        default_type "text/plain";
+        root /var/www/html;
+        try_files \$uri =404;
+    }
+${route_blocks}    location / {
+        return ${r_code} "${r_target}";
+    }
+}
+EOF
+        return 0
+    fi
+
     # WWW canonical redirect (cipi www force-to-root|force-from-root). Emits a
     # dedicated server block for the non-canonical host; the app block keeps the
     # remaining names. ACME stays public on the redirect host. certbot install
@@ -2100,17 +2261,6 @@ EOF
 )
     fi
 
-    # HTTP basic auth (cipi basicauth enable <app>). Injected into the app's
-    # location blocks — NOT at server level — so that certbot's auto-generated
-    # ACME challenge location (exact match, inherits from server) stays public
-    # and SSL issue/renewal keeps working. certbot clones these location blocks
-    # into the :443 server, so HTTPS is protected too.
-    local auth_block=""
-    if [[ "$(app_get "$app" basic_auth)" == "true" ]] && [[ -f "/etc/nginx/cipi-basicauth/${app}.htpasswd" ]]; then
-        auth_block="        auth_basic \"Restricted\";
-        auth_basic_user_file /etc/nginx/cipi-basicauth/${app}.htpasswd;
-"
-    fi
     local root_path="/home/${app}/current"
     if [[ "$vhost_type" == "custom" ]]; then
         root_path="/home/${app}/htdocs"
@@ -2140,7 +2290,7 @@ ${www_redirect_block}server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     client_max_body_size 256M;
-${reverb_block}    location / {
+${reverb_block}${route_blocks}    location / {
 ${auth_block}        try_files \$uri \$uri/ /index.php?\$args;
     }
     location ~ \.php$ {
@@ -2171,7 +2321,7 @@ ${www_redirect_block}server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     client_max_body_size 256M;
-${reverb_block}    location /index.php {
+${reverb_block}${route_blocks}    location /index.php {
 ${auth_block}        try_files /not_exists @octane;
     }
     location / {
@@ -2214,7 +2364,7 @@ ${www_redirect_block}server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     client_max_body_size 256M;
-${reverb_block}    location / {
+${reverb_block}${route_blocks}    location / {
 ${auth_block}        try_files \$uri \$uri/ /index.php?\$query_string;
     }
     location ~ \.php$ {

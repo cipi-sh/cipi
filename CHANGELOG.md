@@ -17,6 +17,22 @@ Cipi cannot be ISO 27001 or SOC 2 certified: there is no organisation or service
 - **No secrets in the bundle.** Panel SQLite databases are read as their owner with `sqlite3 -readonly` (PHP PDO fallback), using named columns only. Token hashes, password hashes and 2FA secrets are never selected. SSH keys are exported as fingerprints only, and backup credentials are not exported.
 - **Honest about gaps.** `secrets` is at best a warn: the vault uses AES-256-CBC without a MAC, so it is not authenticated encryption, and the report says so before an auditor has to ask. `backups` notes that restore tests are not recorded. `deploys` notes that the person who ran a CLI deploy is in `auth.log`, not in the deploy log. Cipi's own design choices appear as notes, not failures: password SFTP login for `cipi-apps` users, and nginx, databases and PHP kept off unattended-upgrades.
 
+### Added — Redirects (`cipi redirect`) and prefix proxies (`cipi proxy`)
+
+Both are rendered by `_create_nginx_vhost` from `apps.json` (`redirect`, `redirects[]`, `proxies[]`), so they survive every vhost regeneration (alias, www, basic auth, PHP switch, `cipi sync import`), and certbot clones them into `:443` like every other location.
+
+- **`cipi redirect set <app> --to=<url> [--301|--302|--307|--308] [--no-path]`** — every name of the app, www host included, redirects in one hop. The path and query are kept by default (`old.com/a?b` → `https://new.com/a?b`). ACME stays public, so the old name's certificate keeps renewing. Refuses a target served by the app itself (loop).
+- **`cipi redirect enable|disable <app>`** toggles the saved target; **`unset`** forgets it.
+- **`cipi redirect add <app> <from> <to> [--301|--302|--307|--308] [--no-path]`** — path redirects. `<to>` is a same-app `/path` or an `http(s)://` URL. A `<from>` ending in `/` is a prefix: the rest of the raw request URI is appended (`/blog/x?y` → `https://blog.example.com/x?y`), and `/blog` without the slash goes to the target too; `--no-path` sends everything to `<to>` as is. Otherwise `<from>` is exact and only the query string is carried over (unless `<to>` has its own). Adding an existing `<from>` updates it. **`remove`**, **`list [--json]`**.
+- **`cipi proxy add <app> <prefix> <http(s)://upstream> [--strip-prefix] [--preserve-host] [--timeout=60] [--no-buffering] [--force]`** — `location ^~ <prefix>` with `proxy_pass`. Without `--strip-prefix` the URI goes upstream unchanged; with it, `/api/users` → `<upstream>/users` and `X-Forwarded-Prefix` is sent. An upstream with a path (`http://h/v1`) always replaces the prefix, so it requires `--strip-prefix`. WebSocket upgrade, `X-Real-IP`, `X-Forwarded-For/-Proto/-Host`, `proxy_ssl_server_name` for HTTPS upstreams. `Host` is the upstream's unless `--preserve-host`. `--no-buffering` is for SSE, long polling and streamed downloads. Basic auth, when on, covers the prefix. **`remove`**, **`list [--json]`**.
+- **Path redirects and proxies keep working while the app redirect is on** — they are more specific than `location /`, so a moved site can keep `/api/` where it was.
+- **Validation.** Paths and URLs are limited to a charset with no quotes, `$`, `;`, braces or whitespace, so a rule cannot inject nginx directives. Source paths must be written decoded (nginx matches the decoded URI). Refused: `/`, the ACME challenge, `/favicon.ico`, `/robots.txt`, `/index.php`, `/cipi/webhook`, Reverb's `/app` and `/apps` on a Reverb app, and any path another redirect or proxy already occupies (e.g. a redirect and a proxy on `/api/`). Redirects that would loop back into themselves are refused.
+- **Loopback guard.** A proxy to `127.0.0.1`/`localhost` on a port Cipi already uses — nginx itself (80/443), SSH, MariaDB, PostgreSQL, Valkey, Meilisearch, another app's Octane or Reverb — is refused without `--force`. An upstream hostname that does not resolve is refused (nginx resolves it at reload); one that does not answer within 5s is only a warning.
+- **Safe apply.** `nginx -t` must pass before the change. If nginx refuses the new vhost, `apps.json` and the vhost are restored and the command exits 1.
+- `cipi app show` lists the app redirect, path redirects and proxy prefixes. Two notification triggers: `redirect_change`, `proxy_change` (on by default). Shell completion and `cipi help redirect|proxy`.
+
+CLI only for now: the panel API sudoers are unchanged.
+
 No migration: nothing is installed, scheduled or enabled.
 
 ---

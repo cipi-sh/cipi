@@ -22,6 +22,8 @@ www_add|Domains|WWW alias added
 www_force_to_root|Domains|WWW force to-root
 www_force_from_root|Domains|WWW force from-root
 www_clear|Domains|WWW redirect cleared
+redirect_change|Domains|Redirect set, toggled, added or removed
+proxy_change|Domains|Proxy route added or removed
 auth_create|Auth|Composer auth.json created
 auth_edit|Auth|Composer auth.json edited
 auth_delete|Auth|Composer auth.json deleted

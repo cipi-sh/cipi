@@ -4,6 +4,21 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.4.1] — 2026-09-17
+
+Opens redirects, proxies and Node app management to the panel API. The commands themselves exist since 5.3.1 (`cipi redirect`, `cipi proxy`) and 5.4.0 (`cipi node`); until now they were CLI-root only, so a panel (cipi/api ≥ 1.20.0) could not offer them.
+
+### Changed
+
+- **Panel API sudoers** (`/etc/sudoers.d/cipi-api`): `www-data` may now run `cipi redirect set|enable|disable|unset|add|remove|list`, `cipi proxy add|remove|list` and `cipi node list|status|restart`. Every rule is the usual exact command line, nothing broader.
+- **What deliberately stays CLI-root:** Node runtime management (`cipi node install|default|upgrade|remove`), `cipi search install|upgrade|key-rotate`, `cipi package install|remove` and every `zt` mutation — installing software on the server is not something a web panel should be able to do, compromised or not. The redirect/proxy validation is the CLI's own (loops, collisions, reserved paths, loopback and metadata upstreams), so the panel gets exactly the same refusals.
+
+### Migration
+
+`lib/migrations/5.4.1.sh`: regenerates `/etc/sudoers.d/cipi-api` and checks it with `visudo -cf` afterwards, warning if it does not validate. Nothing is deployed, reloaded or restarted.
+
+---
+
 ## [5.4.0] — 2026-09-17
 
 ### Added — Deploy audit ledger (every deploy, whatever started it)

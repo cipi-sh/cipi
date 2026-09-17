@@ -48,6 +48,19 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi www force-from-root *, \
                                /usr/local/bin/cipi www clear *, \
                                /usr/local/bin/cipi www status *, \
+                               /usr/local/bin/cipi redirect set *, \
+                               /usr/local/bin/cipi redirect enable *, \
+                               /usr/local/bin/cipi redirect disable *, \
+                               /usr/local/bin/cipi redirect unset *, \
+                               /usr/local/bin/cipi redirect add *, \
+                               /usr/local/bin/cipi redirect remove *, \
+                               /usr/local/bin/cipi redirect list *, \
+                               /usr/local/bin/cipi proxy add *, \
+                               /usr/local/bin/cipi proxy remove *, \
+                               /usr/local/bin/cipi proxy list *, \
+                               /usr/local/bin/cipi node list, \
+                               /usr/local/bin/cipi node status *, \
+                               /usr/local/bin/cipi node restart *, \
                                /usr/local/bin/cipi ssl install *, \
                                /usr/local/bin/cipi ssl force *, \
                                /usr/local/bin/cipi ssl dns *, \

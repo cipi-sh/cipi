@@ -3,7 +3,7 @@
 # Cipi Migration 5.4.1
 #
 # Opens redirects, proxies and Node app management to the panel API
-# (cipi/api ≥ 1.20.0). Nothing else changes on the server. It only:
+# (cipi/api ≥ 1.30.0). Nothing else changes on the server. It only:
 #
 #  1. Regenerates the panel API sudoers so www-data may run
 #     `cipi redirect …`, `cipi proxy …` and `cipi node list|status|restart`.

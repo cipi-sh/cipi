@@ -635,6 +635,122 @@ ensure_app_logs_permissions() {
     fi
 }
 
+# Laravel apps log to one file, storage/logs/laravel.log, which logrotate
+# (cipi-app-logs) rotates, compresses and expires. With the `daily` channel
+# Laravel named a file per day and logrotate then rotated each of those once:
+# laravel-<date>.log.1 kept the content for good, uncompressed, next to an empty
+# laravel-<date>.log — the file `cipi app logs` and the panel then showed.
+#
+# Points an .env at `single`: LOG_CHANNEL=daily, and the `daily` member of
+# LOG_STACK. Any other channel is left as it is. The file is rewritten in place,
+# so owner and mode stay. Returns 0 when it was changed, 1 when it was not.
+laravel_env_single_log() {
+    local envf="${1:-}"
+    [[ -f "$envf" ]] || return 1
+    local tmp line val p out changed=1
+    local -a parts
+    tmp=$(mktemp) || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+            LOG_CHANNEL=*|LOG_STACK=*)
+                val="${line#*=}"; val="${val%%#*}"
+                val=$(printf '%s' "$val" | tr -d "\"'[:space:]")
+                case ",${val}," in
+                    *,daily,*)
+                        out=""
+                        IFS=',' read -ra parts <<< "$val"
+                        for p in "${parts[@]}"; do
+                            [[ "$p" == "daily" ]] && p="single"
+                            case ",${out}," in *",${p},"*) continue ;; esac
+                            out="${out:+${out},}${p}"
+                        done
+                        line="${line%%=*}=${out}"
+                        changed=0
+                        ;;
+                esac
+                ;;
+        esac
+        printf '%s\n' "$line" >> "$tmp"
+    done < "$envf"
+    if [[ $changed -eq 0 ]]; then
+        cat "$tmp" > "$envf" || changed=1
+    fi
+    rm -f "$tmp"
+    return $changed
+}
+
+# Folds what the `daily` channel and logrotate left in a Laravel logs directory
+# into laravel.log, oldest first: laravel-<date>.log, its rotations (.log.N,
+# .log.N.gz) and the empty stubs. A piece is removed only once its content is in
+# laravel.log; one that cannot be read stays where it is, and so do the file
+# names given after the directory (files a process still has open). Prints how
+# many files were folded in. Called through laravel_logs_unify, as the app user.
+_laravel_logs_unify_dir() {
+    local dir="${1:-}"
+    [[ -n "$dir" && -d "$dir" ]] || { echo 0; return 0; }
+    shift
+    local target="${dir}/laravel.log" tmp="${dir}/.laravel-unify.$$"
+    local re='^laravel-([0-9]{4}-[0-9]{2}-[0-9]{2})\.log(\.([0-9]+))?(\.gz)?$'
+    local f name n list="" merged="" count=0 keep=" $* "
+    for f in "$dir"/laravel-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].log*; do
+        [[ -f "$f" ]] || continue
+        name="${f##*/}"
+        [[ "$name" =~ $re ]] || continue
+        [[ "$keep" == *" ${name} "* ]] && continue
+        # Higher rotation numbers are older: they sort first within their day.
+        n="${BASH_REMATCH[3]:-0}"
+        list+="${BASH_REMATCH[1]} $(printf '%09d' $((999999999 - 10#$n))) ${name}"$'\n'
+    done
+    [[ -n "$list" ]] || { echo 0; return 0; }
+
+    : > "$tmp" || return 1
+    while read -r _ _ name; do
+        [[ -n "$name" ]] || continue
+        f="${dir}/${name}"
+        if [[ -s "$f" ]]; then
+            if [[ "$name" == *.gz ]]; then
+                gzip -t "$f" 2>/dev/null || continue
+                gzip -dc "$f" >> "$tmp" || { rm -f "$tmp"; return 1; }
+            else
+                [[ -r "$f" ]] || continue
+                cat "$f" >> "$tmp" || { rm -f "$tmp"; return 1; }
+            fi
+            # The next piece starts on a line of its own.
+            if [[ -s "$tmp" && -n "$(tail -c1 "$tmp")" ]]; then echo >> "$tmp"; fi
+        fi
+        merged+="${name}"$'\n'
+    done <<< "$(printf '%s' "$list" | sort)"
+
+    if [[ -s "$tmp" ]]; then
+        # ln refuses an existing target, so laravel.log either appears whole or,
+        # when the app already writes one, gets the history appended.
+        if ! ln "$tmp" "$target" 2>/dev/null; then
+            cat "$tmp" >> "$target" || { rm -f "$tmp"; return 1; }
+        fi
+        chmod 664 "$target" 2>/dev/null || true
+    fi
+    rm -f "$tmp"
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        rm -f "${dir}/${name}" && count=$((count + 1))
+    done <<< "$merged"
+    echo "$count"
+}
+
+# laravel_logs_unify <app> [file-name-to-leave…]
+# Runs as the app user, never as root: the app can write in that directory, and
+# root must not follow a link planted there.
+laravel_logs_unify() {
+    local app="${1:-}"
+    [[ -z "$app" || "$app" == "cipi" ]] && return 0
+    shift
+    local dir="/home/${app}/shared/storage/logs"
+    [[ -d "$dir" ]] || return 0
+    id "$app" &>/dev/null || return 0
+    # cd /: root's working directory may be one the app user cannot read.
+    (cd / && sudo -u "$app" bash -c "$(declare -f _laravel_logs_unify_dir); _laravel_logs_unify_dir \"\$@\"" _ "$dir" "$@")
+}
+
 # Restore the permission model `cipi app create` left behind. Do NOT chown -R
 # the whole home as app:app: nginx writes vhost logs as www-data into logs/
 # (2775 setgid), and a 700 home would lock www-data out of the docroot

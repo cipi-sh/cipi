@@ -3,8 +3,8 @@
 # Cipi — System monitor
 #
 # `cipi health` watches app URLs; `cipi monitor` watches the server itself:
-# disk, certificate expiry, services, queue workers, 5xx spikes, read-only
-# filesystems, load. Checks run every 5 minutes from /etc/cron.d/cipi-monitor
+# disk, per-app disk limits, certificate expiry, services, queue workers, 5xx
+# spikes, read-only filesystems, load. Checks run every 5 minutes from /etc/cron.d/cipi-monitor
 # and alert through cipi_notify (email + configured channels) on state
 # transitions only: ok → warn/crit fires once, fail → ok sends a recovery,
 # a persisting failure re-alerts every `reminder_minutes` (default 4h).
@@ -19,6 +19,7 @@
 _mon_catalog() {
     cat <<'EOF'
 disk|Disk usage
+app_disk|App disk limits
 ssl|SSL certificate expiry
 services|System services
 workers|Queue workers / Horizon
@@ -42,6 +43,7 @@ _mon_check_label() {
 _mon_settable_keys() {
     case "${1:-}" in
         disk)     echo "warn crit" ;;
+        app_disk) echo "warn minutes" ;;
         ssl)      echo "days" ;;
         http_5xx) echo "count ratio" ;;
         load)     echo "factor runs" ;;
@@ -54,6 +56,7 @@ _mon_default_config() {
         reminder_minutes: 240,
         checks: {
             disk:     {enabled: true, warn: 80, crit: 90},
+            app_disk: {enabled: true, warn: 90, minutes: 30},
             ssl:      {enabled: true, days: 14},
             services: {enabled: true},
             workers:  {enabled: true},
@@ -129,6 +132,86 @@ _mon_check_disk() {
     else
         _mon_result "$status" "filesystem over threshold (worst ${worst}%)" "${detail%\\n}"
     fi
+}
+
+# Soft per-app disk limits (cipi app limits <app> --disk=GB; none by default).
+# Nothing is blocked: an app at `warn`% of its limit, or over it, raises an
+# alert. Each app has its own alert state, so a second app going over is not
+# hidden behind the first one. Measuring is a `du` of the whole home, so it is
+# done at most every `minutes` and only for apps that have a limit; a manual
+# `cipi monitor` measures afresh.
+_mon_check_app_disk() {
+    local warn minutes
+    warn=$(_mon_cfg_val app_disk warn 90);       [[ "$warn" =~ ^[0-9]+$ ]] || warn=90
+    minutes=$(_mon_cfg_val app_disk minutes 30); [[ "$minutes" =~ ^[0-9]+$ ]] || minutes=30
+
+    local limited
+    limited=$(vault_read apps.json 2>/dev/null | jq -r 'to_entries[]
+        | select((.value.disk_limit_gb // 0) > 0)
+        | "\(.key)|\(.value.engine // "mariadb")|\(.value.disk_limit_gb)"' 2>/dev/null || true)
+
+    # An app that lost its limit (or was deleted) takes its alert state with it.
+    local f a
+    shopt -s nullglob
+    for f in "${MONITOR_STATE_DIR}"/app_disk_*.state; do
+        a="${f##*/app_disk_}"; a="${a%.state}"
+        grep -q "^${a}|" <<< "$limited" || rm -f "${MONITOR_STATE_DIR}/app_disk_${a}".{state,lastalert,since} 2>/dev/null
+    done
+    shopt -u nullglob
+
+    local cache="${MONITOR_STATE_DIR}/app_disk.cache"
+    if [[ -z "$limited" ]]; then
+        rm -f "$cache" 2>/dev/null || true
+        _mon_result ok "no app has a disk limit" | jq -c '. + {self_alerts: true}'
+        return 0
+    fi
+
+    # shellcheck source=/dev/null
+    source "${CIPI_LIB}/disk.sh"
+    local pg_sizes=""
+    if grep -q '^[^|]*|pgsql|' <<< "$limited"; then
+        pg_sizes=$(_disk_pgsql_sizes)
+    fi
+
+    # cache lines: <app>|<epoch>|<files KiB>|<database KiB>
+    local now old new="" total=0 near="" over="" worst=ok
+    now=$(date +%s)
+    old=$(cat "$cache" 2>/dev/null || true)
+    local app engine limit ts files_kb db_kb kb pct st summary detail
+    while IFS='|' read -r app engine limit; do
+        [[ -n "$app" ]] || continue
+        total=$((total + 1))
+        IFS='|' read -r _ ts files_kb db_kb <<< "$(grep "^${app}|" <<< "$old" | head -1)"
+        if [[ "${_MON_FRESH:-false}" == "true" || ! "${ts:-}" =~ ^[0-9]+$ || $(( now - ts )) -ge $(( minutes * 60 )) \
+              || ! "${files_kb:-}" =~ ^[0-9]+$ || ! "${db_kb:-}" =~ ^[0-9]+$ ]]; then
+            read -r files_kb db_kb <<< "$(_disk_app_usage "$app" "$engine" "$pg_sizes")"
+            ts=$now
+        fi
+        new+="${app}|${ts}|${files_kb}|${db_kb}"$'\n'
+        kb=$((files_kb + db_kb))
+        pct=$(_disk_limit_pct "$kb" "$limit")
+        st=ok
+        if awk -v kb="$kb" -v gb="$limit" 'BEGIN { exit !(kb > gb * 1048576) }'; then
+            st=crit; worst=crit; over="${over} ${app} (${pct}%)"
+        elif (( pct >= warn )); then
+            st=warn; [[ "$worst" == "ok" ]] && worst=warn; near="${near} ${app} (${pct}%)"
+        fi
+        summary="${app} uses $(_disk_gb "$kb") GB of its ${limit} GB limit (${pct}%)"
+        detail="Files: $(_disk_gb "$files_kb") GB\nDatabase: $(_disk_gb "$db_kb") GB\n\nNothing is blocked: the limit only raises this alert.\nEvery app: cipi disk\nChange the limit: cipi app limits ${app} --disk=<GB>|none"
+        _mon_apply_state "app_disk_${app}" "$st" "$summary" "$detail" "${_MON_DO_ALERT:-false}" \
+            "Disk limit of ${app}" "monitor_app_disk"
+    done <<< "$limited"
+    printf '%s' "$new" > "$cache" 2>/dev/null || true
+
+    local out
+    if [[ -n "$over" ]]; then
+        out=$(_mon_result crit "over the limit:${over}" "over:${over}${near:+\nnear:${near}}")
+    elif [[ -n "$near" ]]; then
+        out=$(_mon_result warn "near the limit (${warn}%):${near}" "near:${near}")
+    else
+        out=$(_mon_result ok "${total} app(s) with a limit, all below ${warn}%")
+    fi
+    jq -c '. + {self_alerts: true}' <<< "$out"
 }
 
 _mon_check_ssl() {
@@ -330,11 +413,14 @@ _mon_check_load() {
 
 # ── Runner + alert state machine ───────────────────────────────
 
-# _mon_apply_state <id> <status> <summary> <detail> <alert?>
+# _mon_apply_state <id> <status> <summary> <detail> <alert?> [label] [trigger]
 # Edge-triggered: alert on ok→fail and warn↔crit transitions, one recovery
 # message on fail→ok, and a reminder every reminder_minutes while failing.
+# label and trigger default to the catalog entry of <id>; a check that keeps a
+# state per item (app_disk: one per app) passes its own.
 _mon_apply_state() {
     local id="$1" status="$2" summary="$3" detail="$4" do_alert="${5:-false}"
+    local label="${6:-}" trigger="${7:-monitor_${1}}"
     local state_file="${MONITOR_STATE_DIR}/${id}.state"
     local alert_file="${MONITOR_STATE_DIR}/${id}.lastalert"
     local since_file="${MONITOR_STATE_DIR}/${id}.since"
@@ -349,7 +435,7 @@ _mon_apply_state() {
     [[ "$do_alert" != "true" ]] && return 0
     declare -f cipi_notify &>/dev/null || return 0
 
-    local label; label=$(_mon_check_label "$id")
+    [[ -n "$label" ]] || label=$(_mon_check_label "$id")
     local host; host=$(hostname)
     local now; now=$(date +%s)
 
@@ -381,7 +467,7 @@ _mon_apply_state() {
     if [[ "$prev" == "ok" || "$prev" != "$status" ]]; then
         # Fresh failure, or warn↔crit escalation.
         [[ "$prev" == "ok" ]] && { echo "$now" > "$since_file" 2>/dev/null || true; }
-        cipi_notify "Cipi monitor [${status}]: ${label} on ${host}" "$body" "monitor_${id}" >/dev/null
+        cipi_notify "Cipi monitor [${status}]: ${label} on ${host}" "$body" "$trigger" >/dev/null
         echo "$now" > "$alert_file" 2>/dev/null || true
         return 0
     fi
@@ -397,7 +483,7 @@ _mon_apply_state() {
         cipi_notify \
             "Cipi monitor reminder: ${label} still ${status} on ${host}" \
             "${body}\nFailing since: $(date -d "@${since}" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo '?')" \
-            "monitor_${id}" >/dev/null
+            "$trigger" >/dev/null
         echo "$now" > "$alert_file" 2>/dev/null || true
     fi
     return 0
@@ -408,8 +494,10 @@ _mon_run_all() {
     local do_alert="${1:-false}"
     _mon_ensure_config
     mkdir -p "$MONITOR_STATE_DIR" 2>/dev/null || true
+    # Read by checks that alert per item themselves (app_disk).
+    _MON_DO_ALERT="$do_alert"
     local results="[]"
-    local id label out status summary detail
+    local id label out status summary detail self
     while IFS='|' read -r id label; do
         [[ -z "$id" ]] && continue
         if ! _mon_check_enabled "$id"; then
@@ -422,7 +510,13 @@ _mon_run_all() {
         status=$(jq -r '.status // "crit"' <<<"$out" 2>/dev/null) || status=crit
         summary=$(jq -r '.summary // ""' <<<"$out" 2>/dev/null)
         detail=$(jq -r '.detail // ""' <<<"$out" 2>/dev/null)
-        _mon_apply_state "$id" "$status" "$summary" "$detail" "$do_alert"
+        # A check that already alerted per item only records its overall state.
+        self=$(jq -r '.self_alerts // false' <<<"$out" 2>/dev/null) || self=false
+        if [[ "$self" == "true" ]]; then
+            _mon_apply_state "$id" "$status" "$summary" "$detail" false
+        else
+            _mon_apply_state "$id" "$status" "$summary" "$detail" "$do_alert"
+        fi
         results=$(jq -c --arg id "$id" --arg s "$status" --arg m "$summary" --arg d "$detail" \
             '. + [{check:$id, status:$s, summary:$m, detail:$d}]' <<<"$results")
     done < <(_mon_catalog)
@@ -470,6 +564,8 @@ _mon_run_cmd() {
     # warn() writes to stdout; --json must stay machine-readable, so the
     # "could not install the cron" diagnostics go to stderr.
     _mon_ensure_cron >&2
+    # A manual run measures app disk usage now instead of reusing the cron's figures.
+    _MON_FRESH=true
     local results; results=$(_mon_run_all true)
     if [[ "${ARG_json:-}" == "true" ]]; then
         jq -n --argjson checks "$results" '{checks: $checks}'
@@ -618,7 +714,7 @@ monitor_command() {
         test)         _mon_test ;;
         *)
             error "Use: run list enable disable set test"
-            echo -e "  ${DIM}cipi monitor [--json] | set disk --warn=80 --crit=90 | set reminder --minutes=240${NC}"
+            echo -e "  ${DIM}cipi monitor [--json] | set disk --warn=80 --crit=90 | set app_disk --warn=90 --minutes=30 | set reminder --minutes=240${NC}"
             exit 1
             ;;
     esac

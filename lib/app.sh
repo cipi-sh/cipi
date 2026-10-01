@@ -323,7 +323,7 @@ APP_KEY=${app_key}
 APP_DEBUG=false
 APP_URL=https://${url_host}
 
-LOG_CHANNEL=daily
+LOG_CHANNEL=single
 LOG_LEVEL=error
 
 ${db_env}
@@ -3851,11 +3851,63 @@ _schedule_set() {
 
 # ── LIMITS ────────────────────────────────────────────────────
 
+# cipi app limits <app> --disk=<GB>|none
+# Stores the soft limit and says where the app stands. The alert comes from
+# the monitor (check app_disk); nothing here stops the app from writing.
+_app_disk_limit_set() {
+    local app="$1" want="$2" gb
+    case "$want" in
+        none|off|0)
+            app_unset "$app" disk_limit_gb
+            log_action "APP DISK LIMIT: $app none"
+            success "Disk limit removed for '${app}'"
+            return 0
+            ;;
+    esac
+    if [[ ! "$want" =~ ^[0-9]{1,6}(\.[0-9]{1,2})?$ ]]; then
+        error "--disk takes a size in GB (e.g. 10 or 2.5), or none"
+        exit 1
+    fi
+    # 2.50 → 2.5, 010 → 10: a plain JSON number.
+    gb=$(awk -v v="$want" 'BEGIN { s = sprintf("%.2f", v); sub(/\.?0+$/, "", s); print s }')
+    if [[ -z "$gb" || "$gb" == "0" ]]; then
+        error "--disk must be greater than 0 (use none to remove the limit)"
+        exit 1
+    fi
+    app_set_json "$app" disk_limit_gb "$gb"
+    log_action "APP DISK LIMIT: $app ${gb} GB"
+    success "Disk limit for '${app}': ${gb} GB (files + database)"
+
+    # shellcheck source=/dev/null
+    source "${CIPI_LIB}/disk.sh"
+    local engine pg_sizes="" files_kb db_kb kb pct
+    engine=$(app_get "$app" engine); [[ -z "$engine" ]] && engine="mariadb"
+    [[ "$engine" == "pgsql" ]] && pg_sizes=$(_disk_pgsql_sizes)
+    read -r files_kb db_kb <<< "$(_disk_app_usage "$app" "$engine" "$pg_sizes")"
+    kb=$((files_kb + db_kb))
+    pct=$(_disk_limit_pct "$kb" "$gb")
+    if awk -v kb="$kb" -v gb="$gb" 'BEGIN { exit !(kb > gb * 1048576) }'; then
+        warn "It already uses $(_disk_gb "$kb") GB (${pct}%): the next monitor run sends the alert"
+    else
+        info "It uses $(_disk_gb "$kb") GB now (${pct}%)"
+    fi
+    echo -e "  ${DIM}Nothing is blocked at the limit: cipi monitor alerts (check app_disk), cipi disk shows it.${NC}"
+}
+
 app_limits() {
     local app="${1:-}"; shift || true
-    [[ -z "$app" ]] && { error "Usage: cipi app limits <app> [--fpm-max-children=N] [--memory-limit=256M] [--octane-workers=N] [--worker-procs=N]"; exit 1; }
+    [[ -z "$app" ]] && { error "Usage: cipi app limits <app> [--fpm-max-children=N] [--memory-limit=256M] [--octane-workers=N] [--worker-procs=N] [--disk=<GB>|none]"; exit 1; }
     app_exists "$app" || { error "App '$app' not found"; exit 1; }
     parse_args "$@"
+
+    # Soft disk limit in GB (files + database). Kept apart from .limits: that
+    # object is what cipi.yml reconciles, and the app's own repository must not
+    # be able to raise the space its host grants it. It restarts nothing.
+    local disk_changed=false
+    if [[ -n "${ARG_disk:-}" ]]; then
+        _app_disk_limit_set "$app" "${ARG_disk}"
+        disk_changed=true
+    fi
 
     local changed=false
     local limits
@@ -3889,12 +3941,16 @@ app_limits() {
     fi
 
     if [[ "$changed" == false ]]; then
+        [[ "$disk_changed" == true ]] && return 0
+        local disk_limit; disk_limit=$(app_get "$app" disk_limit_gb)
         echo -e "\n${BOLD}Limits — ${app}${NC}"
         echo "$limits" | jq -r 'to_entries[] | "  \(.key): \(.value)"' 2>/dev/null || echo "  (defaults)"
+        [[ -n "$disk_limit" ]] && echo "  disk: ${disk_limit} GB"
         echo -e "  ${DIM}fpm_max_children default 5 (max 50)${NC}"
         echo -e "  ${DIM}memory_limit default 256M${NC}"
         echo -e "  ${DIM}octane_workers default 2 (max 16)${NC}"
         echo -e "  ${DIM}worker_procs default 1 (max 20)${NC}"
+        echo -e "  ${DIM}disk default none — soft limit in GB, alerts only (--disk=<GB>|none)${NC}"
         echo ""
         return 0
     fi

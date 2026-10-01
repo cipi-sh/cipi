@@ -600,6 +600,8 @@ BASH
         else
             sed -i "/^DB_HOST=/a DB_PORT=${db_port}" "${home}/shared/.env"
         fi
+        # A source server not yet on 5.4.2 still exports LOG_CHANNEL=daily.
+        laravel_env_single_log "${home}/shared/.env" || true
         success ".env (restored, DB credentials updated)"
     else
         warn "No .env in archive"
@@ -616,6 +618,8 @@ BASH
 
     # 9. Ownership
     chown -R "${app}:${app}" "$home"
+    # Dated Laravel logs that came with the storage go into laravel.log.
+    laravel_logs_unify "$app" >/dev/null || true
     ensure_app_logs_permissions "$app"
 
     # 10. apps.json
@@ -775,6 +779,7 @@ _sync_update_app() {
         [[ -n "$local_db_host" ]] && sed -i "s|^DB_HOST=.*|DB_HOST=${local_db_host}|" "${home}/shared/.env"
         [[ -n "$local_db_port" ]] && sed -i "s|^DB_PORT=.*|DB_PORT=${local_db_port}|" "${home}/shared/.env"
         [[ -n "$local_db_conn" ]] && sed -i "s|^DB_CONNECTION=.*|DB_CONNECTION=${local_db_conn}|" "${home}/shared/.env"
+        laravel_env_single_log "${home}/shared/.env" || true
         chown "${app}:${app}" "${home}/shared/.env"
         chmod 640 "${home}/shared/.env"
         success ".env (synced, local DB credentials preserved)"
@@ -807,6 +812,8 @@ _sync_update_app() {
         tar -xzf "${ad}/storage.tar.gz" -C "${home}/shared/" 2>/dev/null && \
             success "Storage synced" || warn "Storage sync failed"
         chown -R "${app}:${app}" "${home}/shared/storage"
+        laravel_logs_unify "$app" >/dev/null || true
+        ensure_app_logs_permissions "$app"
     fi
 
     # 5. PHP version change

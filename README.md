@@ -95,6 +95,27 @@ Every app gets a fully isolated environment. **Laravel** (default): zero-downtim
 
 Each app runs under its own Linux user with an isolated filesystem, PHP-FPM pool (or Octane process), and database. A compromise in one app cannot touch the others. Configs are encrypted at rest with AES-256 (Vault). GDPR-compliant log rotation included. Per-app **resource limits** (`cipi app limits`) cap FPM children, memory, Octane workers, and queue processes. `cipi app fix-permissions` restores that layout if a deploy or a zip-as-root left the home unreadable.
 
+**Brute-force protection is on from the first boot.** UFW denies all inbound traffic except SSH, HTTP and HTTPS, and fail2ban bans the addresses that keep failing SSH logins. These are the defaults:
+
+| Setting                        | Default                                              |
+| ------------------------------ | ---------------------------------------------------- |
+| Failed SSH logins before a ban | **3**                                                |
+| Counted over                   | 1 hour                                               |
+| Ban                            | 24 hours, longer for each repeat, up to 7 days       |
+| Repeat offenders               | 3 bans in 24 hours → banned for 7 days               |
+
+The number of failed logins can be changed; the rest stays as above:
+
+```bash
+cipi firewall attempts            # current threshold, counting window and ban time
+cipi firewall attempts 5          # ban after 5 failed SSH logins (1–100)
+cipi firewall attempts default    # back to 3
+cipi ban list                     # who is banned right now
+cipi ban unban <IP>
+```
+
+The new value is checked with `fail2ban-client -t` and then applied with a fail2ban reload; a configuration fail2ban refuses is rolled back. It is stored in `/etc/fail2ban/jail.d/cipi-attempts.local`, so Cipi updates do not reset it.
+
 Optional, off until you turn them on — `setup.sh` / `self-update` never install them:
 
 ```bash
@@ -350,6 +371,8 @@ cipi monitor                      # run all checks now
 cipi monitor set disk --warn=80 --crit=90
 ```
 
+**The disk is watched from the first boot.** Every filesystem of the server is checked every 5 minutes: a warning at **80%** full, a critical alert at **90%**, a recovery message when it drops back, and a reminder every 4 hours while it stays over. Those are the defaults, changed with the command above. Apps that have a soft disk limit (`cipi app limits <app> --disk=<GB>`) are watched the same way by the `app_disk` check; apps without one, the default, are not measured at all.
+
 Alerts reach you where you actually look. Email works out of the box (`cipi smtp configure`); chat channels take one command and apply to **every** Cipi notification — deploys, backups, scans, logins, monitor alerts:
 
 ```bash
@@ -358,6 +381,52 @@ cipi notifications channel add discord ops --url=https://discord.com/api/webhook
 cipi notifications channel add telegram ops --token=<bot-token> --chat-id=<id>
 cipi notifications channel add ntfy phone --url=https://ntfy.sh/my-topic --priority=high
 ```
+
+### 💽 Disk Usage, Server and Per App
+
+`cipi monitor` tells you when the disk is filling up; **`cipi disk`** tells you who is filling it. One command shows every filesystem and then every app, largest first, in GB and as a percentage of the disk:
+
+```bash
+cipi disk            # the server, then every app
+cipi disk --json     # the same figures for scripts
+```
+
+```
+  Server disk
+  MOUNT                          SIZE         USED         FREE     USE
+  /                         100.00 GB     40.00 GB     60.00 GB     40%
+
+  Apps (3) — % of the 100.00 GB on /
+  APP                           FILES     DATABASE        TOTAL    DISK  LIMIT
+  shop                        2.00 GB      1.00 GB      3.00 GB    3.0%  10 GB (30%)
+  blog                        0.50 GB      0.50 GB      1.00 GB    1.0%  —
+  front                       0.10 GB      0.00 GB      0.10 GB    0.1%  —
+  All apps                                              4.10 GB    4.1%
+  Everything else                                      35.90 GB   35.9%
+```
+
+**Files** is the app's home (releases, shared storage, logs) and **Database** is its database as it sits on disk. **Everything else** is what remains of the used space: system, packages, logs, local backups, other databases. Sizes are measured when you run the command, so a server with large apps takes a few seconds.
+
+**A soft limit per app.** No app has a limit until you give it one. A limit is a number of GB for files and database together, and it is a notification threshold: nothing is blocked and the app keeps working when it is passed.
+
+```bash
+cipi app limits shop --disk=10      # alert when shop reaches 10 GB
+cipi app limits shop --disk=none    # back to no limit (the default)
+```
+
+`cipi disk` then shows the limit next to the app (`10 GB (30%)`, and `over` once it is passed), and `cipi monitor` sends the alert: a warning at 90% of the limit, a critical one when the app is over it, a message when it is back under. Each app is alerted on its own. The limit is set on the server only; it cannot be changed from the app's `cipi.yml`.
+
+### ⌨️ Tab-Completion That Is Already There
+
+Press `<Tab>` after `cipi` and the shell completes commands, sub-commands, flags and **app names**. Nothing to enable: `setup.sh` installs it on new servers and every `cipi self-update` installs or refreshes it on existing ones.
+
+```bash
+sudo cipi dep<Tab>            # → deploy
+sudo cipi deploy sh<Tab>      # → shop, shop2 (your apps)
+sudo cipi firewall <Tab>      # → allow  list  attempts
+```
+
+It works the way servers are really used: after `sudo cipi`, which is how the `cipi` user runs it, with or without the `bash-completion` package; in the shells that `sudo -s`, `su`, tmux and screen open, which skip `/etc/profile.d`; and with app names for every user, not only root. All of that holds for bash; zsh loads the same completion from its vendor directory and `/etc/profile.d`. `cipi completion bash|zsh` is only for another user or a custom rc file.
 
 ### 📋 Compliance Evidence (ISO 27001 / SOC 2)
 
@@ -422,6 +491,7 @@ An official provisioning module that bridges the WHMCS lifecycle to the Cipi RES
 ## Requirements
 
 - Ubuntu **24.04 LTS** or **26.04 LTS** (no other releases)
+- A VPS or VM with **full virtualization** (KVM, VMware, Hyper-V, Xen HVM) or a bare-metal server. Not shared-kernel virtualization (OpenVZ, LXC) and not container runtimes, including the desktop ones that emulate a Linux machine (Docker Desktop, Podman, OrbStack, WSL): Cipi sets up the firewall, fail2ban, swap and kernel parameters, which needs a kernel of its own. The installer stops there and says which environment it found.
 - Root access
 - Ports **22**, **80**, **443** open
 

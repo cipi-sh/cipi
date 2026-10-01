@@ -1,6 +1,6 @@
 #!/bin/bash
 #############################################
-# Cipi — SSH Key Management
+# Cipi — SSH Key Management, and remote SSH access of app users
 #############################################
 
 AUTHORIZED_KEYS="/home/cipi/.ssh/authorized_keys"
@@ -12,7 +12,8 @@ ssh_command() {
         add)    _ssh_add "$@" ;;
         remove) _ssh_remove "$@" ;;
         rename) _ssh_rename "$@" ;;
-        *)      error "Use: list add remove rename"; exit 1 ;;
+        apps)   _ssh_apps "$@" ;;
+        *)      error "Use: list add remove rename apps"; exit 1 ;;
     esac
 }
 
@@ -383,4 +384,261 @@ _ssh_remove() {
         "Cipi SSH key removed on $(hostname)" \
         "An SSH key was removed from the cipi user.\n\nServer: $(hostname) (${server_ip})\nComment: ${removed_comment}\nFingerprint: ${removed_fp}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\nRemaining keys: $((${#keys[@]} - 1))" \
         ssh_key_remove
+}
+
+# ── APP USERS: SSH / SFTP ACCESS FROM OUTSIDE ────────────────
+#
+#   cipi ssh apps [--json]               app users and their access
+#   cipi ssh apps enable|disable <app>   one app user
+#   cipi ssh apps enable|disable --all   every app user, and apps created later
+#
+# "Disabled" means no SSH or SFTP login from another machine. Logins from the
+# server itself stay allowed, because Deployer reaches the app user over
+# `ssh localhost`: deploys keep working. The cipi user is never touched.
+#
+# The state is membership of the group cipi-nossh. One static Match block in
+# sshd_config denies that group from every non-local address; toggling a user
+# is a group change, which sshd reads at login, so nothing is rewritten or
+# reloaded per user.
+
+[[ -z "${SSH_APPS_SSHD_CONFIG:-}" ]] && readonly SSH_APPS_SSHD_CONFIG="/etc/ssh/sshd_config"
+[[ -z "${SSH_APPS_GROUP:-}" ]]       && readonly SSH_APPS_GROUP="cipi-nossh"
+
+_ssh_apps_sshd() {
+    if command -v sshd >/dev/null 2>&1; then sshd "$@"; else /usr/sbin/sshd "$@"; fi
+}
+
+_ssh_apps_block_present() {
+    grep -q "^Match Group ${SSH_APPS_GROUP} " "$SSH_APPS_SSHD_CONFIG" 2>/dev/null
+}
+
+# App users: the apps Cipi knows that exist as system users.
+_ssh_apps_users() {
+    local a
+    while IFS= read -r a; do
+        [[ -n "$a" && "$a" != "cipi" && "$a" != "root" ]] || continue
+        id "$a" &>/dev/null && echo "$a"
+    done <<< "$(vault_read apps.json 2>/dev/null | jq -r 'keys[]' 2>/dev/null || true)"
+    return 0
+}
+
+_ssh_apps_in_group() {
+    id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -qx "$SSH_APPS_GROUP"
+}
+
+# What new apps get: follows the last enable|disable --all.
+_ssh_apps_default() {
+    local d
+    d=$(vault_read server.json 2>/dev/null | jq -r '.app_ssh_default // "enabled"' 2>/dev/null || true)
+    [[ "$d" == "disabled" ]] && echo "disabled" || echo "enabled"
+}
+
+# server.json holds the server's passwords: it is read whole, checked, and only
+# then written back — never piped straight from a read that may have failed.
+_ssh_apps_set_default() {
+    local sj
+    sj=$(vault_read server.json 2>/dev/null) || { warn "Could not read server.json — new apps keep the previous default"; return 0; }
+    sj=$(jq --arg v "$1" '.app_ssh_default = $v' <<< "$sj" 2>/dev/null) || sj=""
+    if [[ -z "$sj" ]] || ! jq -e 'type == "object" and length > 1' <<< "$sj" >/dev/null 2>&1; then
+        warn "Could not update server.json — new apps keep the previous default"
+        return 0
+    fi
+    printf '%s\n' "$sj" | vault_write server.json
+}
+
+# The group and the sshd rule, once. The new sshd_config is a copy that sshd
+# validates before it replaces the live one; a rejected copy changes nothing.
+_ssh_apps_ensure_block() {
+    if ! getent group "$SSH_APPS_GROUP" >/dev/null 2>&1; then
+        groupadd "$SSH_APPS_GROUP" 2>/dev/null || { error "Could not create the group ${SSH_APPS_GROUP}"; return 1; }
+    fi
+    _ssh_apps_block_present && return 0
+    [[ -f "$SSH_APPS_SSHD_CONFIG" ]] || { error "${SSH_APPS_SSHD_CONFIG} not found"; return 1; }
+
+    local new
+    new=$(mktemp "${SSH_APPS_SSHD_CONFIG}.XXXXXX" 2>/dev/null) || new=""
+    [[ -n "$new" ]] || { error "Could not create a working copy of ${SSH_APPS_SSHD_CONFIG}"; return 1; }
+    if ! cp -p "$SSH_APPS_SSHD_CONFIG" "$new" 2>/dev/null; then
+        rm -f "$new"
+        error "Could not copy ${SSH_APPS_SSHD_CONFIG}"
+        return 1
+    fi
+    cat >> "$new" <<EOF
+
+# cipi ssh apps — no SSH/SFTP from outside for members of ${SSH_APPS_GROUP}.
+# Logins from the server itself stay allowed: deploys run over ssh localhost.
+Match Group ${SSH_APPS_GROUP} Address *,!127.0.0.1,!::1
+    DenyUsers *
+EOF
+    if ! _ssh_apps_sshd -t -f "$new" >/dev/null 2>&1; then
+        rm -f "$new"
+        error "sshd rejected the new configuration — nothing changed (check: sshd -t)"
+        return 1
+    fi
+    if ! mv -f "$new" "$SSH_APPS_SSHD_CONFIG" 2>/dev/null; then
+        rm -f "$new"
+        error "Could not replace ${SSH_APPS_SSHD_CONFIG} — nothing changed"
+        return 1
+    fi
+    # reload, not restart: sessions that are open stay open
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null \
+        || warn "Could not reload sshd — run: systemctl reload ssh"
+    return 0
+}
+
+# Does sshd really refuse this user from outside and accept it from localhost?
+_ssh_apps_enforced() {
+    local user="$1"
+    _ssh_apps_sshd -T -C "user=${user},host=cipi-check,addr=203.0.113.1" 2>/dev/null | grep -qi '^denyusers \*' || return 1
+    ! _ssh_apps_sshd -T -C "user=${user},host=localhost,addr=127.0.0.1" 2>/dev/null | grep -qi '^denyusers'
+}
+
+# _ssh_apps_set <user> enabled|disabled
+# 0: the state changed · 1: it was already there · 2: the group could not be changed
+_ssh_apps_set() {
+    local user="$1" want="$2"
+    if [[ "$want" == "disabled" ]]; then
+        _ssh_apps_in_group "$user" && return 1
+        gpasswd -a "$user" "$SSH_APPS_GROUP" >/dev/null 2>&1 \
+            || usermod -aG "$SSH_APPS_GROUP" "$user" >/dev/null 2>&1 || true
+        _ssh_apps_in_group "$user" || return 2
+    else
+        _ssh_apps_in_group "$user" || return 1
+        gpasswd -d "$user" "$SSH_APPS_GROUP" >/dev/null 2>&1 || true
+        _ssh_apps_in_group "$user" && return 2
+    fi
+    return 0
+}
+
+_ssh_apps_list() {
+    local json="$1" users u st block=true stale=""
+    users=$(_ssh_apps_users)
+    _ssh_apps_block_present || block=false
+
+    if [[ "$json" == true ]]; then
+        local items="[]"
+        while IFS= read -r u; do
+            [[ -n "$u" ]] || continue
+            st="enabled"
+            [[ "$block" == true ]] && _ssh_apps_in_group "$u" && st="disabled"
+            items=$(jq -c --arg a "$u" --arg s "$st" '. + [{app: $a, ssh_access: $s}]' <<< "$items")
+        done <<< "$users"
+        jq -n --arg d "$(_ssh_apps_default)" --argjson apps "$items" '{new_apps: $d, apps: $apps}'
+        return 0
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}App users — SSH / SFTP access from outside${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if [[ -z "$users" ]]; then
+        echo -e "  ${DIM}No apps yet${NC}"
+    else
+        printf "  ${BOLD}%-24s %s${NC}\n" "APP" "ACCESS"
+        while IFS= read -r u; do
+            [[ -n "$u" ]] || continue
+            if _ssh_apps_in_group "$u"; then
+                if [[ "$block" == true ]]; then
+                    printf "  %-24s ${RED}○ disabled${NC}\n" "$u"
+                else
+                    printf "  %-24s ${GREEN}● enabled${NC}\n" "$u"
+                    stale="${stale} ${u}"
+                fi
+            else
+                printf "  %-24s ${GREEN}● enabled${NC}\n" "$u"
+            fi
+        done <<< "$users"
+    fi
+    echo ""
+    echo -e "  New apps: ${CYAN}$(_ssh_apps_default)${NC}"
+    if [[ -n "$stale" ]]; then
+        echo -e "  ${YELLOW}Marked as disabled but the sshd rule is missing:${stale} — run: cipi ssh apps disable <app>${NC}"
+    fi
+    echo -e "  ${DIM}Disabled: no SSH or SFTP login from another machine. Deploys are not affected${NC}"
+    echo -e "  ${DIM}(they run over ssh localhost). The cipi user is managed with: cipi ssh list${NC}"
+    echo -e "  ${DIM}Change: cipi ssh apps enable|disable <app> | --all${NC}"
+    echo ""
+}
+
+_ssh_apps() {
+    local action="" target="" all=false json=false a
+    for a in "$@"; do
+        case "$a" in
+            --all)  all=true ;;
+            --json) json=true ;;
+            -*)     error "Usage: cipi ssh apps [--json] | cipi ssh apps enable|disable <app>|--all"; exit 1 ;;
+            *)      if [[ -z "$action" ]]; then action="$a"; else target="$a"; fi ;;
+        esac
+    done
+    case "${action:-list}" in
+        list)            _ssh_apps_list "$json" ;;
+        enable|disable)  _ssh_apps_change "$action" "$target" "$all" ;;
+        *)               error "Usage: cipi ssh apps [--json] | cipi ssh apps enable|disable <app>|--all"; exit 1 ;;
+    esac
+}
+
+_ssh_apps_change() {
+    local action="$1" target="$2" all="$3"
+    local want="enabled"; [[ "$action" == "disable" ]] && want="disabled"
+
+    if [[ "$all" == true && -n "$target" ]] || [[ "$all" == false && -z "$target" ]]; then
+        error "Usage: cipi ssh apps ${action} <app>   or   cipi ssh apps ${action} --all"
+        exit 1
+    fi
+
+    local users
+    if [[ "$all" == true ]]; then
+        users=$(_ssh_apps_users)
+    else
+        [[ "$target" == "cipi" || "$target" == "root" ]] && { error "'${target}' is not an app user — its keys are managed with: cipi ssh list"; exit 1; }
+        app_exists "$target" || { error "App '${target}' not found"; exit 1; }
+        id "$target" &>/dev/null || { error "App '${target}' has no system user"; exit 1; }
+        users="$target"
+    fi
+
+    if [[ "$want" == "disabled" ]]; then
+        _ssh_apps_ensure_block || exit 1
+    fi
+
+    local u changed="" failed="" n=0 rc
+    while IFS= read -r u; do
+        [[ -n "$u" ]] || continue
+        rc=0
+        _ssh_apps_set "$u" "$want" || rc=$?
+        case "$rc" in
+            0) changed="${changed} ${u}"; n=$((n + 1)) ;;
+            2) failed="${failed} ${u}" ;;
+        esac
+    done <<< "$users"
+    if [[ -n "$failed" ]]; then
+        error "Could not change the group ${SSH_APPS_GROUP} for:${failed} — their access is unchanged"
+        [[ "$all" == true ]] || exit 1
+    fi
+
+    if [[ "$all" == true ]]; then
+        _ssh_apps_set_default "$want"
+        success "SSH/SFTP access from outside ${want} for every app user (${n} changed); new apps: ${want}"
+    elif [[ "$n" -eq 0 ]]; then
+        info "SSH/SFTP access of '${target}' is already ${want}"
+    else
+        success "SSH/SFTP access from outside ${want} for '${target}'"
+    fi
+
+    if [[ "$want" == "disabled" ]]; then
+        # Ask sshd itself, for one of the users, whether the rule bites.
+        local probe="${users%%$'\n'*}"
+        if [[ -n "$probe" ]] && ! _ssh_apps_enforced "$probe"; then
+            warn "sshd does not apply the rule to '${probe}' — check the Match block at the end of ${SSH_APPS_SSHD_CONFIG} (sshd -T -C user=${probe},addr=203.0.113.1)"
+        fi
+        echo -e "  ${DIM}Deploys keep working (ssh localhost). Sessions already open stay open until they close.${NC}"
+    fi
+
+    if [[ "$n" -gt 0 || "$all" == true ]]; then
+        local who="${changed# }"
+        [[ "$all" == true ]] && who="all app users (${n} changed)"
+        log_action "SSH APPS ${action}: ${who}"
+        cipi_notify \
+            "Cipi app SSH access ${want}: ${who} on $(hostname)" \
+            "SSH/SFTP access from outside was ${want}.\n\nServer: $(hostname)\nApp users: ${who}\nNew apps: $(_ssh_apps_default)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            app_ssh_access
+    fi
 }

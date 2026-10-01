@@ -520,6 +520,7 @@ _sync_create_app() {
     step "User..."
     local user_pass; user_pass=$(generate_password 40)
     useradd -m -s /bin/bash -G www-data,cipi-apps "$app"
+    app_ssh_apply_default "$app"
     echo "${app}:${user_pass}" | chpasswd
     chmod 750 "$home"
     usermod -aG "$app" www-data
@@ -616,6 +617,10 @@ BASH
 
     # 9. Ownership
     chown -R "${app}:${app}" "$home"
+    # A source server not yet on 5.5.0 still exports LOG_CHANNEL=daily, and
+    # dated Laravel logs that came with the storage go into laravel.log.
+    laravel_app_env_single_log "$app" || true
+    laravel_logs_unify "$app" >/dev/null || true
     ensure_app_logs_permissions "$app"
 
     # 10. apps.json
@@ -777,6 +782,7 @@ _sync_update_app() {
         [[ -n "$local_db_conn" ]] && sed -i "s|^DB_CONNECTION=.*|DB_CONNECTION=${local_db_conn}|" "${home}/shared/.env"
         chown "${app}:${app}" "${home}/shared/.env"
         chmod 640 "${home}/shared/.env"
+        laravel_app_env_single_log "$app" || true
         success ".env (synced, local DB credentials preserved)"
     fi
 
@@ -807,6 +813,8 @@ _sync_update_app() {
         tar -xzf "${ad}/storage.tar.gz" -C "${home}/shared/" 2>/dev/null && \
             success "Storage synced" || warn "Storage sync failed"
         chown -R "${app}:${app}" "${home}/shared/storage"
+        laravel_logs_unify "$app" >/dev/null || true
+        ensure_app_logs_permissions "$app"
     fi
 
     # 5. PHP version change

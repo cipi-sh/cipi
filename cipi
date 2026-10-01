@@ -87,6 +87,7 @@ show_help() {
     echo ""
     echo -e "  ${BOLD}Core${NC}"
     _help_cmd "cipi status"              "Server overview"
+    _help_cmd "cipi disk"                "Disk usage: server and per app  ${DIM}db · [--json]${NC}"
     _help_cmd "cipi version"             "Cipi version"
     _help_cmd "cipi self-update"         "Update Cipi  ${DIM}[--check]${NC}"
     _help_cmd "cipi completion bash|zsh" "Shell tab-completion"
@@ -101,7 +102,7 @@ show_help() {
     _help_cmd "cipi worker ..."            "Queue workers / Horizon"
     _help_cmd "cipi schedule ..."          "Laravel scheduler on/off"
     _help_cmd "cipi health ..."            "HTTP healthchecks, incl. post-deploy"
-    _help_cmd "cipi monitor ..."           "Server checks: disk, ssl, services, workers, 5xx"
+    _help_cmd "cipi monitor ..."           "Server checks: disk, app disk limits, ssl, services, workers, 5xx"
     _help_cmd "cipi db ..."                "Databases"
     _help_cmd "cipi search ..."            "Meilisearch for Scout (opt-in)  ${DIM}install|enable${NC}"
     echo ""
@@ -137,10 +138,13 @@ show_help_topic() {
     topic=$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')
 
     case "$topic" in
-        server|core|status|self-update|version)
+        server|core|status|self-update|version|disk)
             _help_topic_header "Server"
             echo ""
             _help_cmd "cipi status"                    "Server status"
+            _help_cmd "cipi disk [--json]"             "Disk usage: the server and every app (GB and %)"
+            _help_cmd "cipi disk db [--json]"          "Databases in MB: MariaDB, PostgreSQL, Valkey, Meilisearch"
+            _help_cmd "cipi app limits <app> --disk=<GB>|none" "Soft disk limit for an app: alerts, blocks nothing"
             _help_cmd "cipi version"                   "Cipi version"
             _help_cmd "cipi self-update [--check]"     "Update Cipi"
             echo ""
@@ -152,13 +156,14 @@ show_help_topic() {
             _help_cmd "cipi completion bash [--print]"  "Install bash tab-completion"
             _help_cmd "cipi completion zsh [--print]"   "Install zsh tab-completion"
             echo ""
-            _help_note "setup.sh and every 'cipi self-update' install this for every"
-            _help_note "shell already (/etc/bash_completion.d + /etc/profile.d) — you only"
-            _help_note "need this command for a non-login shell or a custom rc file."
+            _help_note "setup.sh and every 'cipi self-update' install this already: login"
+            _help_note "shells through /etc/profile.d, and root and the cipi user in every"
+            _help_note "other shell (sudo -s, su, tmux) through ~/.bashrc. You only need this"
+            _help_note "command for another user or a custom rc file."
             _help_note "It writes /etc/bash_completion.d/cipi and a loader in your rc file;"
             _help_note "--print writes the script to stdout and changes nothing."
-            _help_note "App names complete when you can read /etc/cipi/apps-public.json"
-            _help_note "(root or the cipi-api group); the rest is static."
+            _help_note "'sudo cipi <Tab>' works with or without the bash-completion package,"
+            _help_note "and app names complete for every user."
             echo ""
             ;;
 
@@ -190,7 +195,7 @@ show_help_topic() {
             _help_cmd "cipi app clone <app>"           "Clone app (staging)  ${DIM}--domain= [--with-db]${NC}"
             _help_cmd "cipi app reverb …"              "Reverb WebSockets  ${DIM}enable|disable|status${NC}"
             _help_note "enable [--restart-supervisor] — lifts Supervisor's open-file limit now (restarts every worker)"
-            _help_cmd "cipi app limits <app>"          "Resource limits  ${DIM}[--fpm-max-children=]${NC}"
+            _help_cmd "cipi app limits <app>"          "Resource limits  ${DIM}[--fpm-max-children=] [--disk=<GB>|none]${NC}"
             _help_cmd "cipi app delete <app>"          "Delete app"
             _help_cmd "cipi app suspend <app>"         "Take offline (503)"
             _help_cmd "cipi app unsuspend <app>"       "Bring back online"
@@ -376,7 +381,7 @@ show_help_topic() {
             _help_cmd "cipi monitor"                   "Run all checks now  ${DIM}[--json]${NC}"
             _help_cmd "cipi monitor list"              "Checks, thresholds, current state"
             _help_cmd "cipi monitor enable|disable <check>" "Toggle a check"
-            _help_cmd "cipi monitor set <check> --key=value"  "Thresholds  ${DIM}(disk: warn crit · ssl: days · http_5xx: count ratio · load: factor runs)${NC}"
+            _help_cmd "cipi monitor set <check> --key=value"  "Thresholds  ${DIM}(disk: warn crit · app_disk: warn minutes · ssl: days · http_5xx: count ratio · load: factor runs)${NC}"
             _help_cmd "cipi monitor set reminder --minutes=N" "Re-alert interval while failing (default 240)"
             _help_cmd "cipi monitor test"              "Send a test alert to email + channels"
             echo ""
@@ -564,14 +569,19 @@ show_help_topic() {
             _help_cmd "cipi ssh list"                  "List authorized SSH keys"
             _help_cmd "cipi ssh add [key]"             "Add an SSH public key"
             _help_cmd "cipi ssh remove [n]"            "Remove an SSH key by number"
+            _help_cmd "cipi ssh apps"                  "App users: SSH/SFTP access from outside  ${DIM}[--json]${NC}"
+            _help_cmd "cipi ssh apps enable|disable <app>" "One app user (deploys keep working)"
+            _help_cmd "cipi ssh apps enable|disable --all" "Every app user, and apps created later"
             echo ""
             ;;
 
         ssl|cert|certs|certificate)
             _help_topic_header "SSL"
             echo ""
-            _help_cmd "cipi ssl install <app>"         "SSL certificate  ${DIM}[--dns=cloudflare] [--wildcard]${NC}"
-            _help_cmd "cipi ssl dns set"               "DNS-01 credentials  ${DIM}--provider=cloudflare --token=${NC}"
+            _help_cmd "cipi ssl install <app>"         "SSL certificate  ${DIM}[--dns=cloudflare [--account=NAME] [--wildcard]]${NC}"
+            _help_cmd "cipi ssl dns set"               "Cloudflare account for DNS-01  ${DIM}[--name=NAME] --token=${NC}"
+            _help_cmd "cipi ssl dns list"              "Accounts and the certificates on each"
+            _help_cmd "cipi ssl dns remove <NAME>"     "Remove an account no certificate uses"
             _help_cmd "cipi ssl force <app>"           "Force HTTP → HTTPS redirect"
             _help_cmd "cipi ssl renew"                 "Renew all certs"
             _help_cmd "cipi ssl status"                "List certificates"
@@ -596,6 +606,8 @@ show_help_topic() {
             echo ""
             _help_cmd "cipi firewall allow <port>"     "Allow port"
             _help_cmd "cipi firewall list"             "Firewall rules"
+            _help_cmd "cipi firewall attempts"         "Failed SSH logins before a ban (default 3)"
+            _help_cmd "cipi firewall attempts <n>"     "Set it  ${DIM}1-100 | default${NC}"
             echo ""
             ;;
 
@@ -965,6 +977,7 @@ main() {
         version|--version|-v) echo "Cipi v${CIPI_VERSION}" ;;
         completion)           source "${CIPI_LIB}/completion.sh"; completion_command "$@" ;;
         status)     require_root; show_status ;;
+        disk)       _maybe_cmd_help server "$@";     require_root; source "${CIPI_LIB}/disk.sh";        disk_command "$@" ;;
         app)        _maybe_cmd_help app "$@";        require_root; source "${CIPI_LIB}/app.sh";         app_command "$@" ;;
         alias)      _maybe_cmd_help domains "$@";    require_root; source "${CIPI_LIB}/app.sh";         alias_command "$@" ;;
         domains)    _maybe_cmd_help domains "$@";    require_root; source "${CIPI_LIB}/app.sh";         domains_command "$@" ;;

@@ -95,6 +95,39 @@ Every app gets a fully isolated environment. **Laravel** (default): zero-downtim
 
 Each app runs under its own Linux user with an isolated filesystem, PHP-FPM pool (or Octane process), and database. A compromise in one app cannot touch the others. Configs are encrypted at rest with AES-256 (Vault). GDPR-compliant log rotation included. Per-app **resource limits** (`cipi app limits`) cap FPM children, memory, Octane workers, and queue processes. `cipi app fix-permissions` restores that layout if a deploy or a zip-as-root left the home unreadable.
 
+**Brute-force protection is on from the first boot.** UFW denies all inbound traffic except SSH, HTTP and HTTPS, and fail2ban bans the addresses that keep failing SSH logins. These are the defaults:
+
+| Setting                        | Default                                              |
+| ------------------------------ | ---------------------------------------------------- |
+| Failed SSH logins before a ban | **3**                                                |
+| Counted over                   | 1 hour                                               |
+| Ban                            | 24 hours, longer for each repeat, up to 7 days       |
+| Repeat offenders               | 3 bans in 24 hours → banned for 7 days               |
+
+The number of failed logins can be changed; the rest stays as above:
+
+```bash
+cipi firewall attempts            # current threshold, counting window and ban time
+cipi firewall attempts 5          # ban after 5 failed SSH logins (1–100)
+cipi firewall attempts default    # back to 3
+cipi ban list                     # who is banned right now
+cipi ban unban <IP>
+```
+
+The new value is checked with `fail2ban-client -t` and then applied with a fail2ban reload; a configuration fail2ban refuses is rolled back. It is stored in `/etc/fail2ban/jail.d/cipi-attempts.local`, so Cipi updates do not reset it.
+
+**App users can be kept out of SSH.** Every app has its own Linux user, which can log in over SSH and SFTP with a password. Where nobody needs that, turn it off, for one app or for all of them:
+
+```bash
+cipi ssh apps                     # every app user: access enabled or disabled
+cipi ssh apps disable shop        # no SSH/SFTP from outside for shop
+cipi ssh apps enable shop
+cipi ssh apps disable --all       # every app user, and the apps created from now on
+cipi ssh apps enable --all        # everyone back, whatever the single settings were
+```
+
+Disabled means no login from another machine. Deploys are not affected: Deployer reaches the app user over `ssh localhost`, which stays allowed. The `cipi` user is never touched by these commands. By default every app user has access.
+
 Optional, off until you turn them on — `setup.sh` / `self-update` never install them:
 
 ```bash
@@ -318,6 +351,18 @@ Clone an app for staging with **`cipi app clone <src> --domain=…`**.
 
 Add multiple domains or subdomains to any app. A domain can be a **wildcard** (`*.example.com`), as the app's primary domain or as an alias — multi-tenant apps get one vhost for every tenant. Manage www/apex aliases and canonical redirects with **`cipi www`**. A single SAN certificate covers all of them — HTTP-01 by default, or **DNS-01 via Cloudflare** for wildcards (`cipi ssl install --dns=cloudflare --wildcard`). Auto-renew handles the rest.
 
+**Domains in different Cloudflare accounts.** A wildcard certificate needs an API token of the Cloudflare account that holds the zone. One token is enough when every zone is in the same account; when your clients each have their own, give every account a name:
+
+```bash
+cipi ssl dns set --token=<TOKEN>                    # the default account
+cipi ssl dns set --name=client-a --token=<TOKEN>    # another account, any number of them
+cipi ssl dns list                                   # accounts and the certificates on each
+cipi ssl install shop --dns=cloudflare --wildcard --account=client-a
+cipi ssl dns remove client-a                        # refused while a certificate still renews with it
+```
+
+Each certificate renews with the token of the account it was issued with, and reissuing an app without `--account` keeps the account it had. `cipi ssl dns set` on an existing name replaces its token, which is how a token is rotated. Tokens are stored root-only and are never shown. `cipi ssl status` says which account every DNS-01 certificate uses.
+
 ### ↪️ Redirects & prefix proxies
 
 Redirects and reverse proxies are written into the app's nginx vhost, so they cost nothing at runtime and never reach PHP. Every change runs `nginx -t` and is reverted if nginx refuses it.
@@ -350,6 +395,8 @@ cipi monitor                      # run all checks now
 cipi monitor set disk --warn=80 --crit=90
 ```
 
+**The disk is watched from the first boot.** Every filesystem of the server is checked every 5 minutes: a warning at **80%** full, a critical alert at **90%**, a recovery message when it drops back, and a reminder every 4 hours while it stays over. Those are the defaults, changed with the command above. Apps that have a soft disk limit (`cipi app limits <app> --disk=<GB>`) are watched the same way by the `app_disk` check; apps without one, the default, are not measured at all.
+
 Alerts reach you where you actually look. Email works out of the box (`cipi smtp configure`); chat channels take one command and apply to **every** Cipi notification — deploys, backups, scans, logins, monitor alerts:
 
 ```bash
@@ -358,6 +405,76 @@ cipi notifications channel add discord ops --url=https://discord.com/api/webhook
 cipi notifications channel add telegram ops --token=<bot-token> --chat-id=<id>
 cipi notifications channel add ntfy phone --url=https://ntfy.sh/my-topic --priority=high
 ```
+
+### 💽 Disk Usage, Server and Per App
+
+`cipi monitor` tells you when the disk is filling up; **`cipi disk`** tells you who is filling it. One command shows every filesystem and then every app, largest first, in GB and as a percentage of the disk:
+
+```bash
+cipi disk            # the server, then every app
+cipi disk db         # databases, in MB
+cipi disk --json     # the same figures for scripts (also: cipi disk db --json)
+```
+
+```
+  Server disk
+  MOUNT                          SIZE         USED         FREE     USE
+  /                         100.00 GB     40.00 GB     60.00 GB     40%
+
+  Apps (3) — % of the 100.00 GB on /
+  APP                           FILES     DATABASE        TOTAL    DISK  LIMIT
+  shop                        2.00 GB      1.00 GB      3.00 GB    3.0%  10 GB (30%)
+  blog                        0.50 GB     120.4 MB      0.62 GB    0.6%  —
+  front                       0.10 GB      0.00 GB      0.10 GB    0.1%  —
+  All apps                                              3.72 GB    3.7%
+  Everything else                                      36.28 GB   36.3%
+```
+
+**Files** is the app's home (releases, shared storage, logs). **Database** is the app's database: the one named after the app and, if `shared/.env` points at another one, that one too. Sizes below 0.01 GB are shown in MB, so a small database does not read as zero. **Everything else** is what remains of the used space: system, packages, logs, local backups, other databases. Sizes are measured when you run the command, so a server with large apps takes a few seconds.
+
+**Every database, engine by engine.** `cipi disk db` goes through every engine installed on the server and prints sizes in MB:
+
+```
+  MariaDB
+  DATABASE                                               SIZE
+  blog                                                 2.0 MB
+  shop                                               200.0 MB
+  On disk, whole engine                              500.0 MB
+
+  Valkey
+  DATABASE                                     KEYS      SIZE
+  db0                                          1204         —
+  Memory in use                                       12.3 MB
+  On disk, whole engine                                3.0 MB
+
+  Meilisearch
+  INDEX                                   DOCUMENTS      SIZE
+  shop-products                               12000    8.4 MB
+  On disk, whole engine                               45.0 MB
+```
+
+MariaDB and PostgreSQL give one size per database. Valkey only knows how many keys each of its databases holds, and Meilisearch how many documents each index has (plus the size of an index's documents on recent versions): for those two the size in MB is the engine's, in memory and on disk. An engine that is not installed is left out.
+
+**A soft limit per app.** No app has a limit until you give it one. A limit is a number of GB for files and database together (the TOTAL column), and it is a notification threshold: nothing is blocked and the app keeps working when it is passed.
+
+```bash
+cipi app limits shop --disk=10      # alert when shop reaches 10 GB
+cipi app limits shop --disk=none    # back to no limit (the default)
+```
+
+`cipi disk` then shows the limit next to the app (`10 GB (30%)`, and `over` once it is passed), and `cipi monitor` sends the alert: a warning at 90% of the limit, a critical one when the app is over it, a message when it is back under. Each app is alerted on its own. The limit is set on the server only; it cannot be changed from the app's `cipi.yml`.
+
+### ⌨️ Tab-Completion That Is Already There
+
+Press `<Tab>` after `cipi` and the shell completes commands, sub-commands, flags and **app names**. Nothing to enable: `setup.sh` installs it on new servers and every `cipi self-update` installs or refreshes it on existing ones.
+
+```bash
+sudo cipi dep<Tab>            # → deploy
+sudo cipi deploy sh<Tab>      # → shop, shop2 (your apps)
+sudo cipi firewall <Tab>      # → allow  list  attempts
+```
+
+It works the way servers are really used: after `sudo cipi`, which is how the `cipi` user runs it, with or without the `bash-completion` package; in the shells that `sudo -s`, `su`, tmux and screen open, which skip `/etc/profile.d`; and with app names for every user, not only root. All of that holds for bash; zsh loads the same completion from its vendor directory and `/etc/profile.d`. `cipi completion bash|zsh` is only for another user or a custom rc file.
 
 ### 📋 Compliance Evidence (ISO 27001 / SOC 2)
 
@@ -422,6 +539,7 @@ An official provisioning module that bridges the WHMCS lifecycle to the Cipi RES
 ## Requirements
 
 - Ubuntu **24.04 LTS** or **26.04 LTS** (no other releases)
+- A VPS or VM with **full virtualization** (KVM, VMware, Hyper-V, Xen HVM) or a bare-metal server. Not shared-kernel virtualization (OpenVZ, LXC) and not container runtimes, including the desktop ones that emulate a Linux machine (Docker Desktop, Podman, OrbStack, WSL): Cipi sets up the firewall, fail2ban, swap and kernel parameters, which needs a kernel of its own. The installer stops there and says which environment it found.
 - Root access
 - Ports **22**, **80**, **443** open
 

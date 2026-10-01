@@ -209,6 +209,8 @@ _cmp_check_intrusion() {
           for j in ${jails//,/ }; do echo; fail2ban-client status "$j" 2>/dev/null; done
         } > "$(_cmp_ev fail2ban-status.txt)" 2>/dev/null || true
         cp /etc/fail2ban/jail.local "$(_cmp_ev jail.local)" 2>/dev/null || true
+        # cipi firewall attempts: overrides jail.local's sshd maxretry.
+        cp /etc/fail2ban/jail.d/cipi-attempts.local "$(_cmp_ev jail.d-cipi-attempts.local)" 2>/dev/null || true
         if [[ ",${jails}," == *",sshd,"* ]]; then
             summary="fail2ban active, jails: ${jails//,/, }"
         else

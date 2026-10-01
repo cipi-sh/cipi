@@ -74,11 +74,68 @@ step_msg() {
 
 # ── CHECKS ────────────────────────────────────────────────────
 
+# Prints the kind of shared-kernel environment this is (docker, lxc, openvz,
+# wsl, …) and nothing on bare metal or a full VM (KVM, VMware, Hyper-V, Xen).
+# systemd-detect-virt knows best, but a container image often ships without
+# systemd: the files and kernel names below cover those.
+detect_container() {
+    local v=""
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
+        v=$(systemd-detect-virt --container 2>/dev/null || true)
+        if [ "$v" = "none" ]; then v=""; fi
+    fi
+    if [ -z "$v" ]; then
+        if [ -f /.dockerenv ]; then
+            v="docker"
+        elif [ -f /run/.containerenv ]; then
+            v="podman"
+        elif grep -qi 'microsoft' /proc/sys/kernel/osrelease 2>/dev/null; then
+            v="wsl"
+        elif grep -qi 'orbstack' /proc/sys/kernel/osrelease 2>/dev/null; then
+            v="orbstack"
+        elif [ -d /proc/vz ] && [ ! -d /proc/bc ]; then
+            v="openvz"
+        elif [ -r /proc/1/environ ]; then
+            v=$(tr '\0' '\n' < /proc/1/environ 2>/dev/null | sed -n 's/^container=//p' | head -1 || true)
+        fi
+    fi
+    echo "$v"
+}
+
 check_requirements() {
     step_msg "Checking requirements..."
 
     if [ "$(id -u)" != "0" ]; then
         echo -e "${RED}Error: run as root (sudo)${NC}"
+        exit 1
+    fi
+
+    # Before the OS check: no Ubuntu release makes a container a server.
+    local virt virt_name
+    virt=$(detect_container)
+    if [ -n "$virt" ]; then
+        case "$virt" in
+            openvz)             virt_name="an OpenVZ / Virtuozzo container" ;;
+            lxc|lxc-libvirt)    virt_name="an LXC container (LXD, Incus, Proxmox CT)" ;;
+            docker)             virt_name="a Docker container" ;;
+            podman)             virt_name="a Podman container" ;;
+            wsl)                virt_name="WSL (Windows Subsystem for Linux)" ;;
+            orbstack)           virt_name="an OrbStack machine" ;;
+            systemd-nspawn)     virt_name="a systemd-nspawn container" ;;
+            *)                  virt_name="a container (${virt})" ;;
+        esac
+        echo -e "${RED}Error: Cipi cannot be installed here: this is ${virt_name}, not a full server.${NC}"
+        echo ""
+        echo "Cipi needs a kernel of its own. It sets up the firewall (UFW), fail2ban, swap,"
+        echo "kernel parameters and systemd services, and an environment that shares the"
+        echo "host's kernel does not allow that."
+        echo ""
+        echo "Not supported: shared-kernel virtualization (OpenVZ, LXC) and container"
+        echo "runtimes, including the desktop ones that emulate a Linux machine (Docker"
+        echo "Desktop, Podman, OrbStack, WSL)."
+        echo ""
+        echo -e "Use a VPS or VM with full virtualization (${BOLD}KVM, VMware, Hyper-V, Xen HVM${NC})"
+        echo "or a bare-metal server, with Ubuntu 24.04 LTS or 26.04 LTS."
         exit 1
     fi
 
@@ -94,9 +151,10 @@ check_requirements() {
         exit 1
     fi
 
-    version_check=$(echo "$VERSION_ID >= 24.04" | bc 2>/dev/null || echo 0)
-    if [ "$version_check" -ne 1 ]; then
-        echo -e "${RED}Error: requires Ubuntu 24.04+ (found: $VERSION_ID)${NC}"
+    # sort -V, not bc: bc is installed later by this script, and on an image
+    # without it every release failed this check, 24.04 included.
+    if [ "$(printf '%s\n' "24.04" "${VERSION_ID:-0}" | sort -V | head -1)" != "24.04" ]; then
+        echo -e "${RED}Error: requires Ubuntu 24.04+ (found: ${VERSION_ID:-unknown})${NC}"
         exit 1
     fi
 
@@ -1123,8 +1181,11 @@ CRONEOF
     # ── GDPR-compliant log rotation ──
 
     # Application logs (Laravel, PHP-FPM, workers, deploy) — 12 months
+    # *[!0-9].log leaves out files that end in a date (laravel-2026-01-31.log):
+    # those belong to Laravel's `daily` channel, which names and prunes them
+    # itself. Rotating them too left a .log.1 per day that never expired.
     cat > /etc/logrotate.d/cipi-app-logs <<'EOF'
-/home/*/shared/storage/logs/*.log
+/home/*/shared/storage/logs/*[!0-9].log
 /home/*/logs/php-fpm-*.log
 /home/*/logs/worker-*.log
 /home/*/logs/deploy.log

@@ -15,6 +15,7 @@ app_delete|Apps|App deleted
 app_suspend|Apps|App suspended
 app_unsuspend|Apps|App unsuspended
 app_ssh_password_reset|Apps|App SSH password reset
+app_ssh_access|Apps|App user SSH access enabled or disabled
 app_db_password_reset|Apps|App DB password reset
 alias_add|Domains|Alias added
 alias_remove|Domains|Alias removed
@@ -36,6 +37,7 @@ deploy_snapshot_fail|Deploy|Pre-deploy DB snapshot failed
 health_fail|Health|HTTP healthcheck failed (periodic, after 3 failures)
 deploy_health_fail|Health|Post-deploy healthcheck failed
 monitor_disk|Monitor|Disk usage over threshold
+monitor_app_disk|Monitor|App near or over its disk limit
 monitor_ssl|Monitor|SSL certificate expiring
 monitor_services|Monitor|System service not running
 monitor_workers|Monitor|Queue worker / Horizon not running

@@ -153,6 +153,7 @@ app_create() {
     # 1. Linux user
     step "Creating user..."
     useradd -m -s /bin/bash -G www-data,cipi-apps "$app_user"
+    app_ssh_apply_default "$app_user"
     echo "${app_user}:${user_pass}" | chpasswd
     chmod 750 "$home"
     usermod -aG "$app_user" www-data
@@ -567,6 +568,9 @@ SUDO
     [[ "$app_type" == "custom" ]] && echo -e "  Docroot:    ${CYAN}/${docroot:-}${NC}"
     echo ""
     echo -e "  ${BOLD}SSH${NC}         ${CYAN}${app_user}${NC} / ${CYAN}${user_pass}${NC}"
+    if id -nG "$app_user" 2>/dev/null | tr ' ' '\n' | grep -qx cipi-nossh; then
+        echo -e "              ${YELLOW}SSH/SFTP from outside is disabled for new apps${NC} ${DIM}— cipi ssh apps enable ${app_user}${NC}"
+    fi
     if [[ "$app_type" == "laravel" ]]; then
         echo -e "  ${BOLD}Database${NC}    ${CYAN}${app_user}${NC} / ${CYAN}${db_pass}${NC}  ${DIM}($(db_engine_label "$db_engine"))${NC}"
         echo ""
@@ -3880,10 +3884,9 @@ _app_disk_limit_set() {
 
     # shellcheck source=/dev/null
     source "${CIPI_LIB}/disk.sh"
-    local engine pg_sizes="" files_kb db_kb kb pct
-    engine=$(app_get "$app" engine); [[ -z "$engine" ]] && engine="mariadb"
-    [[ "$engine" == "pgsql" ]] && pg_sizes=$(_disk_pgsql_sizes)
-    read -r files_kb db_kb <<< "$(_disk_app_usage "$app" "$engine" "$pg_sizes")"
+    local engine files_kb db_kb kb pct
+    engine=$(app_get "$app" engine)
+    read -r files_kb db_kb <<< "$(_disk_app_usage "$app" "$engine" "$(_disk_sql_sizes)")"
     kb=$((files_kb + db_kb))
     pct=$(_disk_limit_pct "$kb" "$gb")
     if awk -v kb="$kb" -v gb="$gb" 'BEGIN { exit !(kb > gb * 1048576) }'; then

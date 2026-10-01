@@ -1,6 +1,6 @@
 #!/bin/bash
 #############################################
-# Cipi Migration 5.4.2
+# Cipi Migration 5.5.0
 #
 # Laravel app logs: one file, rotated once.
 #
@@ -17,6 +17,8 @@
 #     Laravel does by itself (one file per day, pruned by LOG_DAILY_DAYS).
 #  2. Every Laravel app: LOG_CHANNEL=daily becomes single in shared/.env, and
 #     so does a `daily` inside LOG_STACK. Other channels are left as they are.
+#     Done as the app user, through a copy that replaces the .env in one
+#     rename: the file is never truncated, and root writes nothing there.
 #  3. Where the .env changed, so that nothing keeps the old channel in memory:
 #     rebuilds the config cache if the current release has one, sends SIGTERM
 #     to the app's running Supervisor programs (queue workers, Horizon, Octane,
@@ -42,7 +44,7 @@ export CIPI_LOG="${CIPI_LOG:-/var/log/cipi}"
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'
 CYAN=$'\033[0;36m'; DIM=$'\033[2m'; NC=$'\033[0m'; BOLD=$'\033[1m'
 
-echo "Migration 5.4.2 — Laravel logs: one file, rotated once..."
+echo "Migration 5.5.0 — Laravel logs: one file, rotated once..."
 
 # shellcheck source=/dev/null
 source "${CIPI_LIB}/common.sh"
@@ -92,7 +94,13 @@ while IFS='|' read -r app php_ver octane; do
     id "$app" &>/dev/null || continue
     home="/home/${app}"
 
-    laravel_env_single_log "${home}/shared/.env" || continue
+    if ! laravel_app_env_single_log "$app"; then
+        # Nothing to change, or the app user cannot rewrite its own .env.
+        if grep -qE "^LOG_CHANNEL=[\"']?daily" "${home}/shared/.env" 2>/dev/null; then
+            echo "  WARNING: ${app}: .env still has LOG_CHANNEL=daily and could not be rewritten — run: cipi app fix-permissions ${app}"
+        fi
+        continue
+    fi
     switched+="${app} "
     echo "  ${app}: .env now logs to laravel.log (single)"
 
@@ -169,4 +177,4 @@ while IFS='|' read -r app _ _; do
     ensure_app_logs_permissions "$app" || true
 done <<< "$apps"
 
-echo "Migration 5.4.2 complete"
+echo "Migration 5.5.0 complete"

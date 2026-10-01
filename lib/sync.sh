@@ -520,6 +520,7 @@ _sync_create_app() {
     step "User..."
     local user_pass; user_pass=$(generate_password 40)
     useradd -m -s /bin/bash -G www-data,cipi-apps "$app"
+    app_ssh_apply_default "$app"
     echo "${app}:${user_pass}" | chpasswd
     chmod 750 "$home"
     usermod -aG "$app" www-data
@@ -600,8 +601,6 @@ BASH
         else
             sed -i "/^DB_HOST=/a DB_PORT=${db_port}" "${home}/shared/.env"
         fi
-        # A source server not yet on 5.4.2 still exports LOG_CHANNEL=daily.
-        laravel_env_single_log "${home}/shared/.env" || true
         success ".env (restored, DB credentials updated)"
     else
         warn "No .env in archive"
@@ -618,7 +617,9 @@ BASH
 
     # 9. Ownership
     chown -R "${app}:${app}" "$home"
-    # Dated Laravel logs that came with the storage go into laravel.log.
+    # A source server not yet on 5.5.0 still exports LOG_CHANNEL=daily, and
+    # dated Laravel logs that came with the storage go into laravel.log.
+    laravel_app_env_single_log "$app" || true
     laravel_logs_unify "$app" >/dev/null || true
     ensure_app_logs_permissions "$app"
 
@@ -779,9 +780,9 @@ _sync_update_app() {
         [[ -n "$local_db_host" ]] && sed -i "s|^DB_HOST=.*|DB_HOST=${local_db_host}|" "${home}/shared/.env"
         [[ -n "$local_db_port" ]] && sed -i "s|^DB_PORT=.*|DB_PORT=${local_db_port}|" "${home}/shared/.env"
         [[ -n "$local_db_conn" ]] && sed -i "s|^DB_CONNECTION=.*|DB_CONNECTION=${local_db_conn}|" "${home}/shared/.env"
-        laravel_env_single_log "${home}/shared/.env" || true
         chown "${app}:${app}" "${home}/shared/.env"
         chmod 640 "${home}/shared/.env"
+        laravel_app_env_single_log "$app" || true
         success ".env (synced, local DB credentials preserved)"
     fi
 

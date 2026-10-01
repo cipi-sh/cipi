@@ -15,6 +15,7 @@ app_delete|Apps|App deleted
 app_suspend|Apps|App suspended
 app_unsuspend|Apps|App unsuspended
 app_ssh_password_reset|Apps|App SSH password reset
+app_ssh_access|Apps|App user SSH access enabled or disabled
 app_db_password_reset|Apps|App DB password reset
 alias_add|Domains|Alias added
 alias_remove|Domains|Alias removed

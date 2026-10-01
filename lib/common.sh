@@ -642,12 +642,25 @@ ensure_app_logs_permissions() {
 # laravel-<date>.log — the file `cipi app logs` and the panel then showed.
 #
 # Points an .env at `single`: LOG_CHANNEL=daily, and the `daily` member of
-# LOG_STACK. Any other channel is left as it is. The file is rewritten in place,
-# so owner and mode stay. Returns 0 when it was changed, 1 when it was not.
+# LOG_STACK. Any other channel is left as it is. Returns 0 when it was changed,
+# 1 when it was not.
+#
+# The .env is never truncated in place: a write that fails half-way (a full
+# disk) would leave the app without its keys. The new content goes into a copy
+# next to it (same owner and mode), which then replaces it in one rename; if
+# anything fails the .env is left exactly as it was.
+#
+# On an app's .env call laravel_app_env_single_log, which runs this as the app
+# user.
 laravel_env_single_log() {
     local envf="${1:-}"
     [[ -f "$envf" ]] || return 1
-    local tmp line val p out changed=1
+    # A linked .env stays a link: the file it points at is the one replaced.
+    if [[ -L "$envf" ]]; then
+        envf=$(readlink -f "$envf" 2>/dev/null) || return 1
+        [[ -f "$envf" ]] || return 1
+    fi
+    local tmp new line val p out changed=1
     local -a parts
     tmp=$(mktemp) || return 1
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -673,10 +686,32 @@ laravel_env_single_log() {
         printf '%s\n' "$line" >> "$tmp"
     done < "$envf"
     if [[ $changed -eq 0 ]]; then
-        cat "$tmp" > "$envf" || changed=1
+        if new=$(mktemp "${envf}.XXXXXX" 2>/dev/null) && [[ -n "$new" ]]; then
+            if cp -p "$envf" "$new" 2>/dev/null && cat "$tmp" > "$new" 2>/dev/null \
+               && mv -f "$new" "$envf" 2>/dev/null; then
+                :
+            else
+                rm -f "$new"
+                changed=1
+            fi
+        else
+            changed=1
+        fi
     fi
     rm -f "$tmp"
     return $changed
+}
+
+# laravel_app_env_single_log <app> — the same on an app's shared/.env, as the
+# app user. Root does not write in a directory an app controls: a link planted
+# there would aim the write at any file on the server.
+laravel_app_env_single_log() {
+    local app="${1:-}"
+    [[ -z "$app" || "$app" == "cipi" ]] && return 1
+    local envf="/home/${app}/shared/.env"
+    [[ -f "$envf" ]] || return 1
+    id "$app" &>/dev/null || return 1
+    (cd / && sudo -u "$app" bash -c "$(declare -f laravel_env_single_log); laravel_env_single_log \"\$1\"" _ "$envf")
 }
 
 # Folds what the `daily` channel and logrotate left in a Laravel logs directory
@@ -749,6 +784,18 @@ laravel_logs_unify() {
     id "$app" &>/dev/null || return 0
     # cd /: root's working directory may be one the app user cannot read.
     (cd / && sudo -u "$app" bash -c "$(declare -f _laravel_logs_unify_dir); _laravel_logs_unify_dir \"\$@\"" _ "$dir" "$@")
+}
+
+# A new app user follows the last `cipi ssh apps enable|disable --all`: after a
+# disable --all it starts without SSH/SFTP access from outside (group cipi-nossh).
+app_ssh_apply_default() {
+    local user="${1:-}"
+    [[ -n "$user" ]] || return 0
+    local d
+    d=$(vault_read server.json 2>/dev/null | jq -r '.app_ssh_default // "enabled"' 2>/dev/null || true)
+    [[ "$d" == "disabled" ]] || return 0
+    getent group cipi-nossh >/dev/null 2>&1 || return 0
+    usermod -aG cipi-nossh "$user" 2>/dev/null || true
 }
 
 # Restore the permission model `cipi app create` left behind. Do NOT chown -R

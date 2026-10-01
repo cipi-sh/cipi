@@ -116,6 +116,18 @@ cipi ban unban <IP>
 
 The new value is checked with `fail2ban-client -t` and then applied with a fail2ban reload; a configuration fail2ban refuses is rolled back. It is stored in `/etc/fail2ban/jail.d/cipi-attempts.local`, so Cipi updates do not reset it.
 
+**App users can be kept out of SSH.** Every app has its own Linux user, which can log in over SSH and SFTP with a password. Where nobody needs that, turn it off, for one app or for all of them:
+
+```bash
+cipi ssh apps                     # every app user: access enabled or disabled
+cipi ssh apps disable shop        # no SSH/SFTP from outside for shop
+cipi ssh apps enable shop
+cipi ssh apps disable --all       # every app user, and the apps created from now on
+cipi ssh apps enable --all        # everyone back, whatever the single settings were
+```
+
+Disabled means no login from another machine. Deploys are not affected: Deployer reaches the app user over `ssh localhost`, which stays allowed. The `cipi` user is never touched by these commands. By default every app user has access.
+
 Optional, off until you turn them on — `setup.sh` / `self-update` never install them:
 
 ```bash
@@ -339,6 +351,18 @@ Clone an app for staging with **`cipi app clone <src> --domain=…`**.
 
 Add multiple domains or subdomains to any app. A domain can be a **wildcard** (`*.example.com`), as the app's primary domain or as an alias — multi-tenant apps get one vhost for every tenant. Manage www/apex aliases and canonical redirects with **`cipi www`**. A single SAN certificate covers all of them — HTTP-01 by default, or **DNS-01 via Cloudflare** for wildcards (`cipi ssl install --dns=cloudflare --wildcard`). Auto-renew handles the rest.
 
+**Domains in different Cloudflare accounts.** A wildcard certificate needs an API token of the Cloudflare account that holds the zone. One token is enough when every zone is in the same account; when your clients each have their own, give every account a name:
+
+```bash
+cipi ssl dns set --token=<TOKEN>                    # the default account
+cipi ssl dns set --name=client-a --token=<TOKEN>    # another account, any number of them
+cipi ssl dns list                                   # accounts and the certificates on each
+cipi ssl install shop --dns=cloudflare --wildcard --account=client-a
+cipi ssl dns remove client-a                        # refused while a certificate still renews with it
+```
+
+Each certificate renews with the token of the account it was issued with, and reissuing an app without `--account` keeps the account it had. `cipi ssl dns set` on an existing name replaces its token, which is how a token is rotated. Tokens are stored root-only and are never shown. `cipi ssl status` says which account every DNS-01 certificate uses.
+
 ### ↪️ Redirects & prefix proxies
 
 Redirects and reverse proxies are written into the app's nginx vhost, so they cost nothing at runtime and never reach PHP. Every change runs `nginx -t` and is reverted if nginx refuses it.
@@ -388,7 +412,8 @@ cipi notifications channel add ntfy phone --url=https://ntfy.sh/my-topic --prior
 
 ```bash
 cipi disk            # the server, then every app
-cipi disk --json     # the same figures for scripts
+cipi disk db         # databases, in MB
+cipi disk --json     # the same figures for scripts (also: cipi disk db --json)
 ```
 
 ```
@@ -399,15 +424,38 @@ cipi disk --json     # the same figures for scripts
   Apps (3) — % of the 100.00 GB on /
   APP                           FILES     DATABASE        TOTAL    DISK  LIMIT
   shop                        2.00 GB      1.00 GB      3.00 GB    3.0%  10 GB (30%)
-  blog                        0.50 GB      0.50 GB      1.00 GB    1.0%  —
+  blog                        0.50 GB     120.4 MB      0.62 GB    0.6%  —
   front                       0.10 GB      0.00 GB      0.10 GB    0.1%  —
-  All apps                                              4.10 GB    4.1%
-  Everything else                                      35.90 GB   35.9%
+  All apps                                              3.72 GB    3.7%
+  Everything else                                      36.28 GB   36.3%
 ```
 
-**Files** is the app's home (releases, shared storage, logs) and **Database** is its database as it sits on disk. **Everything else** is what remains of the used space: system, packages, logs, local backups, other databases. Sizes are measured when you run the command, so a server with large apps takes a few seconds.
+**Files** is the app's home (releases, shared storage, logs). **Database** is the app's database: the one named after the app and, if `shared/.env` points at another one, that one too. Sizes below 0.01 GB are shown in MB, so a small database does not read as zero. **Everything else** is what remains of the used space: system, packages, logs, local backups, other databases. Sizes are measured when you run the command, so a server with large apps takes a few seconds.
 
-**A soft limit per app.** No app has a limit until you give it one. A limit is a number of GB for files and database together, and it is a notification threshold: nothing is blocked and the app keeps working when it is passed.
+**Every database, engine by engine.** `cipi disk db` goes through every engine installed on the server and prints sizes in MB:
+
+```
+  MariaDB
+  DATABASE                                               SIZE
+  blog                                                 2.0 MB
+  shop                                               200.0 MB
+  On disk, whole engine                              500.0 MB
+
+  Valkey
+  DATABASE                                     KEYS      SIZE
+  db0                                          1204         —
+  Memory in use                                       12.3 MB
+  On disk, whole engine                                3.0 MB
+
+  Meilisearch
+  INDEX                                   DOCUMENTS      SIZE
+  shop-products                               12000    8.4 MB
+  On disk, whole engine                               45.0 MB
+```
+
+MariaDB and PostgreSQL give one size per database. Valkey only knows how many keys each of its databases holds, and Meilisearch how many documents each index has (plus the size of an index's documents on recent versions): for those two the size in MB is the engine's, in memory and on disk. An engine that is not installed is left out.
+
+**A soft limit per app.** No app has a limit until you give it one. A limit is a number of GB for files and database together (the TOTAL column), and it is a notification threshold: nothing is blocked and the app keeps working when it is passed.
 
 ```bash
 cipi app limits shop --disk=10      # alert when shop reaches 10 GB

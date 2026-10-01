@@ -137,7 +137,8 @@ _mon_check_disk() {
 # Soft per-app disk limits (cipi app limits <app> --disk=GB; none by default).
 # Nothing is blocked: an app at `warn`% of its limit, or over it, raises an
 # alert. Each app has its own alert state, so a second app going over is not
-# hidden behind the first one. Measuring is a `du` of the whole home, so it is
+# hidden behind the first one. The limit is on files and database together, the
+# TOTAL of `cipi disk`. Measuring is a `du` of the whole home, so it is
 # done at most every `minutes` and only for apps that have a limit; a manual
 # `cipi monitor` measures afresh.
 _mon_check_app_disk() {
@@ -168,23 +169,26 @@ _mon_check_app_disk() {
 
     # shellcheck source=/dev/null
     source "${CIPI_LIB}/disk.sh"
-    local pg_sizes=""
-    if grep -q '^[^|]*|pgsql|' <<< "$limited"; then
-        pg_sizes=$(_disk_pgsql_sizes)
-    fi
 
     # cache lines: <app>|<epoch>|<files KiB>|<database KiB>
     local now old new="" total=0 near="" over="" worst=ok
     now=$(date +%s)
     old=$(cat "$cache" 2>/dev/null || true)
+    # The database servers are asked only when an app is due for a measurement.
+    local sql_sizes="" sql_asked=false
     local app engine limit ts files_kb db_kb kb pct st summary detail
     while IFS='|' read -r app engine limit; do
         [[ -n "$app" ]] || continue
         total=$((total + 1))
         IFS='|' read -r _ ts files_kb db_kb <<< "$(grep "^${app}|" <<< "$old" | head -1)"
-        if [[ "${_MON_FRESH:-false}" == "true" || ! "${ts:-}" =~ ^[0-9]+$ || $(( now - ts )) -ge $(( minutes * 60 )) \
-              || ! "${files_kb:-}" =~ ^[0-9]+$ || ! "${db_kb:-}" =~ ^[0-9]+$ ]]; then
-            read -r files_kb db_kb <<< "$(_disk_app_usage "$app" "$engine" "$pg_sizes")"
+        if [[ "${_MON_FRESH:-false}" == "true" || ! "${ts:-}" =~ ^[0-9]+$ \
+              || ! "${files_kb:-}" =~ ^[0-9]+$ || ! "${db_kb:-}" =~ ^[0-9]+$ \
+              || $(( now - ts )) -ge $(( minutes * 60 )) ]]; then
+            if [[ "$sql_asked" == false ]]; then
+                sql_sizes=$(_disk_sql_sizes)
+                sql_asked=true
+            fi
+            read -r files_kb db_kb <<< "$(_disk_app_usage "$app" "$engine" "$sql_sizes")"
             ts=$now
         fi
         new+="${app}|${ts}|${files_kb}|${db_kb}"$'\n'
@@ -197,7 +201,7 @@ _mon_check_app_disk() {
             st=warn; [[ "$worst" == "ok" ]] && worst=warn; near="${near} ${app} (${pct}%)"
         fi
         summary="${app} uses $(_disk_gb "$kb") GB of its ${limit} GB limit (${pct}%)"
-        detail="Files: $(_disk_gb "$files_kb") GB\nDatabase: $(_disk_gb "$db_kb") GB\n\nNothing is blocked: the limit only raises this alert.\nEvery app: cipi disk\nChange the limit: cipi app limits ${app} --disk=<GB>|none"
+        detail="Files: $(_disk_h "$files_kb")\nDatabase: $(_disk_h "$db_kb")\n\nNothing is blocked: the limit only raises this alert.\nEvery app: cipi disk\nChange the limit: cipi app limits ${app} --disk=<GB>|none"
         _mon_apply_state "app_disk_${app}" "$st" "$summary" "$detail" "${_MON_DO_ALERT:-false}" \
             "Disk limit of ${app}" "monitor_app_disk"
     done <<< "$limited"

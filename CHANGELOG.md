@@ -4,7 +4,7 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
-## [5.4.2] — 2026-10-01
+## [5.5.0] — 2026-10-01
 
 ### Fixed — Laravel app logs were rotated twice and never expired
 
@@ -37,16 +37,27 @@ Servers keep the default of 3 until the command is used: the migration does not 
 
 `cipi status` printed one line for `/`, and `cipi monitor` only says that the disk is filling up. Neither says which app takes the space.
 
-- **`cipi disk`** prints every local filesystem (size, used, free in GB, use %) and then every app, largest first: **files** (the app's home: releases, shared storage, logs), **database**, **total** in GB, and the **percentage of the disk** that holds `/home`. Two closing rows give all apps together and everything else (system, packages, logs, local backups, other databases).
-- The database figure is the space on disk: the app's directory in `/var/lib/mysql` for MariaDB, `pg_database_size` for PostgreSQL. Custom and Node apps have no database and show 0.
+- **`cipi disk`** prints every local filesystem (size, used, free, use %) and then every app, largest first: **files** (the app's home: releases, shared storage, logs), **database**, **total**, and the **percentage of the disk** that holds `/home`. Two closing rows give all apps together and everything else (system, packages, logs, local backups, other databases).
+- The database figure covers the database named after the app and, when `shared/.env` points at another one, the one in `DB_DATABASE`. The size is what the database server reports (`information_schema` for MariaDB, `pg_database_size` for PostgreSQL); for MariaDB it is compared with the database's directory in the server's data dir and the larger of the two is used. If the server does not answer, the directory alone is measured. Custom and Node apps have no database and show 0.
+- Sizes below 0.01 GB are printed in MB (`4.2 MB`), so a small database does not read as `0.00 GB`. `--json` carries the exact `files_kb`, `database_kb` and `total_kb` next to the rounded GB.
 - **`cipi disk --json`** returns the same figures for scripts.
 - Sizes are measured with `du` when the command runs: nothing is stored, and a server with large apps takes a few seconds. Read-only, root CLI. `cipi help server` and tab-completion know it.
+
+### Added — `cipi disk db`: every database, in MB
+
+Next to the per-app figure there is a listing of the databases themselves, per engine, for every engine installed on the server. It shows what the app table cannot: databases that belong to no app, and the engines that are not SQL.
+
+- **MariaDB** — one row per database. The size is the larger of what the server reports (`information_schema`) and the database's directory in the server's data dir, since the files include space the server has not handed back. Empty databases are listed too. These are the same figures the DATABASE column of `cipi disk` uses.
+- **PostgreSQL** — one row per database (`pg_database_size`).
+- **Valkey** — one row per logical database (`db0`, `db1`, …) with its number of keys. Valkey does not know the size of a single database, so the size is the instance's: memory in use and files on disk. The password reaches `valkey-cli` through the environment, not the command line.
+- **Meilisearch** — one row per index with its number of documents, and the size of its documents where the installed version reports it. The total is the `data.ms` directory.
+- Every engine closes with its size on disk as a whole (data directory, logs included). An engine that is installed but does not answer gets a note and still shows that total; an engine that is not installed is left out. `cipi disk db --json` returns the same figures.
 
 ### Added — soft disk limit per app, with an alert
 
 No app has a limit unless one is set: the default is unlimited, on new and existing servers alike.
 
-- **`cipi app limits <app> --disk=<GB>`** (e.g. `10`, `2.5`) sets a limit for the app's files and database together; **`--disk=none`** removes it. The command reports what the app uses now and warns if it is already over. Setting only `--disk` does not rebuild the FPM pool or restart workers.
+- **`cipi app limits <app> --disk=<GB>`** (e.g. `10`, `2.5`) sets a limit for the app's files and database together, the TOTAL of `cipi disk`; **`--disk=none`** removes it. The command reports what the app uses now and warns if it is already over. Setting only `--disk` does not rebuild the FPM pool or restart workers.
 - **It is soft.** Nothing is blocked when the limit is passed and the app keeps working. The limit is a threshold for a notification.
 - **New monitor check `app_disk`**, on by default like the others. An app at **90%** of its limit raises a warning, an app over it a critical alert, and a recovery follows when it is back under, with the usual reminder every 4 hours in between. Each app has its own alert state, so a second app going over is not hidden behind the first. Trigger `monitor_app_disk`, through email and every configured channel.
 - **Cost.** Only apps with a limit are measured, and a measurement is reused for 30 minutes, so the 5-minute cron does not walk the homes every time. A manual `cipi monitor` measures afresh. `cipi monitor set app_disk --warn=90 --minutes=30` changes both; `cipi monitor disable app_disk` turns the check off.
@@ -66,6 +77,30 @@ Completion has been installed since 5.2.0, but in three everyday situations `<Ta
 
 New servers get all of this from `setup.sh`. Existing servers get it from the next `cipi self-update`, which already rewrites the completion files on every run: no migration step, no package to install. A shell that is already open needs to be reopened.
 
+### Added — `cipi ssh apps`: SSH/SFTP access of app users, per app or for all
+
+Every app user can log in over SSH and SFTP with its password, and there was no way to turn that off short of editing `sshd_config` by hand.
+
+- **`cipi ssh apps`** lists every app user with its access, `enabled` or `disabled`, and what new apps get. `--json` for scripts.
+- **`cipi ssh apps disable <app>`** / **`enable <app>`** changes one app user.
+- **`cipi ssh apps disable --all`** / **`enable --all`** changes every app user, whatever the single settings were, and sets what apps created afterwards get (`cipi app create`, `cipi sync import`). After a `disable --all`, single users can still be enabled one by one.
+- **Disabled means no login from another machine.** Logins from the server itself stay allowed, because Deployer reaches the app user over `ssh localhost`: deploys, webhooks and rollbacks keep working. Sessions already open stay open until they close. The `cipi` user and `root` are refused by the command.
+- **How.** The state is membership of the group `cipi-nossh`. One rule at the end of `/etc/ssh/sshd_config` (`Match Group cipi-nossh Address *,!127.0.0.1,!::1` → `DenyUsers *`) denies that group from every non-local address. It is added the first time a user is disabled: on a copy that `sshd -t` validates before it replaces the live file, followed by a reload, not a restart; a rejected copy changes nothing. After that, enabling or disabling a user is only a group change, with no rewrite and no reload.
+- After a `disable` the command asks sshd itself (`sshd -T -C`) whether the rule applies to the user from outside and not from localhost, and warns if it does not.
+- Default: every app user has access, on new and existing servers. Nothing changes until the command is used. Changes are logged and notified (trigger `app_ssh_access`). CLI only (root).
+
+### Added — several Cloudflare accounts for DNS-01 certificates
+
+`cipi ssl dns set` stored one Cloudflare token, in one file, for the whole server. A wildcard certificate needs a token of the account that holds its zone, so a server hosting domains of clients with their own Cloudflare accounts could serve only one of them. Setting a second token overwrote the first, and the certificates issued with the first then stopped renewing.
+
+- **`cipi ssl dns set --name=NAME --token=TOKEN`** adds a named account, any number of them. Without `--name` it is the `default` account, in the same file as before (`/etc/cipi/cloudflare.ini`): servers with one token need to change nothing. Named accounts are stored next to it, one file each in `/etc/cipi/cloudflare/`, root-only. Running it again on an existing name replaces the token (rotation).
+- **`cipi ssl install <app> --dns=cloudflare --account=NAME [--wildcard]`** issues with that account. Without `--account` the app keeps the account its certificate was last issued with, else `default`. The account is stored on the app and named in the log and the notification. An account that is not configured is refused before certbot runs, with the list of the ones that are.
+- **Renewals need nothing.** certbot records the credentials file in each certificate's renewal config, so every certificate renews with the token of its own account.
+- **`cipi ssl dns list`** shows every account with the certificates that renew with it (`--json` too). Tokens are never printed. **`cipi ssl status`** adds the account next to each DNS-01 certificate.
+- **`cipi ssl dns remove <NAME>`** removes an account, and refuses while a certificate still renews with it: without its token that certificate would fail to renew, silently, until it expired.
+- Account names are lowercase letters, digits, `-` and `_`. The credentials file is created with a umask that keeps the token unreadable by others even while it is written; before, it was world-readable for an instant inside `/etc/cipi`.
+- When issuance fails the error now says which account was used and that it must hold the zone.
+
 ### Fixed — installer: a container was reported as a wrong Ubuntu version
 
 `setup.sh` compared the Ubuntu release with `bc`, which the same script installs only later. On an image without `bc` — container images above all — the comparison failed for every release, and the installer stopped with `requires Ubuntu 24.04+ (found: 24.04)`. In a container that hid the real reason: Cipi is not supported on shared-kernel virtualization.
@@ -76,10 +111,10 @@ New servers get all of this from `setup.sh`. Existing servers get it from the ne
 
 ### Migration
 
-`lib/migrations/5.4.2.sh`, for every Laravel app (custom and Node apps are not touched):
+`lib/migrations/5.5.0.sh`, for every Laravel app (custom and Node apps are not touched):
 
 1. Rewrites `/etc/logrotate.d/cipi-app-logs`.
-2. `shared/.env`: `LOG_CHANNEL=daily` becomes `single`, and so does a `daily` inside `LOG_STACK`. Any other channel (`stack`, `stderr`, `slack`, …) is left as it is. The file is rewritten in place, so owner and mode stay.
+2. `shared/.env`: `LOG_CHANNEL=daily` becomes `single`, and so does a `daily` inside `LOG_STACK`. Any other channel (`stack`, `stderr`, `slack`, …) is left as it is. The rewrite runs as the app user and goes through a copy that replaces the `.env` in one rename, with the same owner and mode: the file is never truncated in place, so a write that fails (a full disk) leaves it exactly as it was. An `.env` the app user cannot rewrite is reported with a warning.
 3. Where the `.env` changed, so that no process keeps the old channel in memory:
    - `artisan config:cache` as the app user, if the current release has a cached config. Other `.env` edits that were waiting for a deploy become active with it.
    - SIGTERM to the app's **running** Supervisor programs (queue workers, Horizon, Octane, Reverb). They finish the job in hand and Supervisor starts them again; stopped programs stay stopped. Octane and Reverb drop their connections for the few seconds of the restart, as on a deploy.

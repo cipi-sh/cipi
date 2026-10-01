@@ -103,7 +103,7 @@ _cipi_complete() {
         help)        COMPREPLY=( $(compgen -W "$topics" -- "$cur") ); return ;;
         completion)  COMPREPLY=( $(compgen -W "bash zsh --print" -- "$cur") ); return ;;
         self-update) sub="--check" ;;
-        disk)        sub="--json" ;;
+        disk)        sub="db --json" ;;
 
         service)
             case $pos in
@@ -242,7 +242,11 @@ _cipi_complete() {
                 1) sub="install dns force renew status" ;;
                 2) case "$w1" in
                        install|force) sub="$(_cipi_apps)" ;;
-                       dns)           sub="set" ;;
+                       dns)           sub="set list remove" ;;
+                   esac ;;
+                *) case "$w1" in
+                       install) sub="--dns=cloudflare --account= --wildcard" ;;
+                       dns)     case "$w2" in set) sub="--name= --token=" ;; esac ;;
                    esac ;;
             esac ;;
 
@@ -344,7 +348,12 @@ _cipi_complete() {
                    esac ;;
             esac ;;
         sync)      [[ $pos -eq 1 ]] && sub="export import push list pubkey trust" ;;
-        ssh)       [[ $pos -eq 1 ]] && sub="list add remove" ;;
+        ssh)
+            case $pos in
+                1) sub="list add remove rename apps" ;;
+                2) case "$w1" in apps) sub="enable disable --json" ;; esac ;;
+                3) case "$w1" in apps) sub="$(_cipi_apps) --all" ;; esac ;;
+            esac ;;
 
         smtp|mail|email)          [[ $pos -eq 1 ]] && sub="configure status test disable enable delete" ;;
         notifications|notify|triggers)
@@ -478,9 +487,12 @@ _completion_rc_loader() {
     if [[ -f "$rc" ]] && grep -qF "$_CIPI_COMPLETION_MARKER" "$rc" 2>/dev/null; then
         return 1
     fi
+    local existed=false
+    [[ -e "$rc" || -L "$rc" ]] && existed=true
     { echo ""; echo "$_CIPI_COMPLETION_MARKER"; echo "$line"; } >> "$rc" 2>/dev/null || return 2
-    if [[ -n "$user" && "$user" != "root" ]]; then
-        chown "$user" "$rc" 2>/dev/null || true
+    # Only a file created just now changes hands, and never through a link.
+    if [[ "$existed" == false && -n "$user" && "$user" != "root" ]]; then
+        chown -h "$user" "$rc" 2>/dev/null || true
     fi
     return 0
 }

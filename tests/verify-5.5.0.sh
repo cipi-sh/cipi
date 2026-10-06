@@ -967,8 +967,13 @@ sl() {   # ssl_command <args…> against the test directory
         app_set() { jq --arg a "$1" --arg k "$2" --arg v "$3" ".[\$a][\$k] = \$v" "${CIPI_CONFIG}/apps.json" > "$W/apps.new" && cat "$W/apps.new" > "${CIPI_CONFIG}/apps.json"; }
         chown() { :; }
         parse_args() { for a in "$@"; do case "$a" in --*=*) k="${a%%=*}"; k="${k#--}"; printf -v "ARG_${k//-/_}" "%s" "${a#*=}" ;; --*) k="${a#--}"; printf -v "ARG_${k//-/_}" "%s" true ;; esac; done; }
-        eval "$(sed -n "/^domain_cert_name()/,/^}/p; /^domain_is_wildcard()/,/^}/p" "$1")"
+        app_unset() { jq --arg a "$1" --arg k "$2" "del(.[\$a][\$k])" "${CIPI_CONFIG}/apps.json" > "$W/apps.new" && cat "$W/apps.new" > "${CIPI_CONFIG}/apps.json"; }
+        certbot_ensure_reload_hook() { :; }
+        eval "$(grep -E "^(domain_cert_name|domain_is_wildcard)\(\)" "$1")"
+        eval "$(sed -n "/^cert_names_for()/,/^}/p" "$1")"
         source "$0"; shift
+        # 5.5.1: the vhost is rewritten by the generator in app.sh (tested in verify-5.5.1.sh).
+        _ssl_apply_vhost() { :; }
         "$@"' "${W}/ssl.sh" "${LIB}/common.sh" "$@" 2>&1
 }
 out=$(sl ssl_command dns list); rc=$?

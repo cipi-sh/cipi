@@ -239,7 +239,9 @@ grep -q '_app_reverb_enable "\$name"' "${LIB}/app.sh" \
     && pass "clone gives the new app its own Reverb" || fail "clone does not enable Reverb on the clone"
 
 # ── 9. SSL and domain changes re-derive the public endpoint ────
-[[ $(grep -c '_reverb_sync_env "\$app"' "${LIB}/ssl.sh") -eq 2 ]] \
+# 5.5.1: both install paths end in _ssl_installed, which re-syncs Reverb.
+[[ $(grep -c '_ssl_installed "\$app"' "${LIB}/ssl.sh") -eq 2 ]] \
+    && sed -n '/^_ssl_installed()/,/^}/p' "${LIB}/ssl.sh" | grep -q '_reverb_sync_env "\$app"' \
     && pass "both SSL install paths re-sync Reverb (ws:// → wss://)" \
     || fail "an SSL install path does not re-sync Reverb"
 grep -q '_reverb_sync_env "\$app"' "${LIB}/app.sh" \

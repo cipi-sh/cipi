@@ -604,7 +604,7 @@ source "${LIB}/yml.sh"
 node_is_installed() { [[ "\$1" == 22 ]]; }
 _ensure_nginx_octane_map() { :; }; _nginx_reapply_ssl() { :; }; reload_nginx() { :; }
 node_app_cleanup() { echo cleanup >> "${NS}/calls"; }
-for fn in _yml_node_sync_cmd _sync_node_build_script _node_recipe_config_write _create_nginx_vhost _node_nginx_vhost _node_upstream_ensure; do
+for fn in _yml_node_sync_cmd _sync_node_build_script _node_recipe_config_write _create_nginx_vhost _create_nginx_vhost_http _nginx_vhost_tls _node_nginx_vhost _node_upstream_ensure; do
     eval "\$(declare -f \$fn | sed -e 's|/home/|${NS}/home/|g' -e 's|/etc/nginx/sites-available/|${NS}/sites/|g' -e 's|/etc/nginx/conf.d/|${NS}/|g')"
 done
 EOF
@@ -722,7 +722,7 @@ cat > "${TMP}/nx/apps.json" <<'EOF'
  "ssr":{"domain":"ssr.test","aliases":[],"php":"8.4","custom":true,"runtime":"node","node_mode":"ssr","node_version":"22","node_start":"node build","node_ports":[3100,3101]}}
 EOF
 VH="${NH} vault_read() { cat '${TMP}/nx/apps.json'; }; _ensure_nginx_octane_map() { :; }; source '${LIB}/routes.sh';
-eval \"\$(declare -f _create_nginx_vhost | sed 's|/etc/nginx/sites-available/|${TMP}/nx/sites/|g; s|/etc/nginx/cipi-basicauth/|${TMP}/nx/ba/|g')\";
+eval \"\$(declare -f _create_nginx_vhost _create_nginx_vhost_http _nginx_vhost_tls | sed 's|/etc/nginx/sites-available/|${TMP}/nx/sites/|g; s|/etc/nginx/cipi-basicauth/|${TMP}/nx/ba/|g')\";
 eval \"\$(declare -f _node_nginx_vhost | sed 's|/etc/nginx/sites-available/|${TMP}/nx/sites/|g')\";
 eval \"\$(declare -f _node_upstream_ensure | sed 's|/etc/nginx/conf.d/|${TMP}/nx/confd/|g')\";"
 bash -c "${VH} _create_nginx_vhost web web.test 8.4; _create_nginx_vhost ssr ssr.test 8.4" >/dev/null 2>&1

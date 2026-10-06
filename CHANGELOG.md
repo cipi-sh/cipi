@@ -4,6 +4,72 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.5.1] — 2026-10-07
+
+### Fixed — wildcard certificates were issued but never installed
+
+`cipi ssl install <app> --dns=cloudflare --wildcard` obtained the certificate and then stopped with:
+
+```
+Could not install certificate
+Missing command line flag or config entry for this setting:
+Which server blocks would you like to modify?
+[ERROR] Certificate issued but nginx install failed.
+```
+
+Cipi put a certificate into a vhost with `certbot install --nginx`. For a wildcard name (`*.example.com`) certbot's nginx installer **always** asks which server blocks to modify, whatever the vhost contains, and `--non-interactive` cannot answer that question. So every certificate holding a wildcard — `--wildcard`, or an app with a `*.example.com` alias — failed at that step. The same call ran after every vhost regeneration (alias, www, basic auth, redirects, proxies, Octane, Reverb, suspend, PHP), silently (`|| true`), so the app could end up with a valid certificate on disk and no HTTPS at all. Behind the Cloudflare proxy that is the classic trap: HTTPS works only with SSL mode **Flexible**, and Flexible loops forever as soon as an HTTPS redirect is in place.
+
+**Cipi now writes the HTTPS server block itself.** certbot only issues and renews certificates (`certbot certonly`); it never edits an app vhost again.
+
+- `_create_nginx_vhost` writes the plain-HTTP vhost as before, then — when the app has a certificate — its HTTPS form: every server block moves to `:443` with `ssl_certificate`, `ssl_certificate_key` and `include /etc/nginx/snippets/cipi-ssl.conf` (TLS 1.2/1.3, Mozilla intermediate ciphers), and one `:80` block answers **every** name of the vhost with `301 https://$host$request_uri`. ACME challenges stay reachable on `:80`. Every regeneration therefore keeps HTTPS by itself, and nothing is put back afterwards.
+- Tenants of a wildcard app are redirected to HTTPS too. certbot's own redirect block listed only the names it had been given and answered `404` to every other host, i.e. every tenant.
+- Apps published through the Cloudflare tunnel keep serving on `:80` (cloudflared talks HTTP to the origin): their blocks listen on `:80` and `:443`, without a redirect, as before. `force_https: "false"` does the same.
+- **Cloudflare Origin CA** (`cipi zt origin-cert`) goes through the same path, so it works on an app that never had HTTPS. Before, the certificate was only saved, with a note to re-run the command after a `:443` block appeared — and the next vhost regeneration dropped it again.
+- `cipi ssl force <app>` sets `force_https` and rewrites the vhost; no certbot call.
+
+### Fixed — certificate names Let's Encrypt refused
+
+- An app with a wildcard alias issued over DNS-01 sent the wildcard **and** the names it covers (`*.example.com` + `www.example.com`), which Let's Encrypt rejects as redundant. The list is now built once (`cert_names_for`): primary and aliases, plus `*.<apex>` for `--wildcard`, without the names a wildcard of the list already covers. A name two labels down (`a.b.example.com`) stays, since a certificate wildcard covers one label only.
+- The names reach certbot as an array: `*.example.com` can no longer meet pathname expansion.
+- More than 100 names is refused before certbot runs, with a hint that one wildcard alias covers every subdomain.
+- `--wildcard` is remembered (`ssl_wildcard` on the app), so a later reissue keeps `*.<apex>`; `--no-wildcard` drops it. `--wildcard` without DNS-01 is now an error instead of being ignored.
+- When the certificate covers `*.<apex>` but the app does not serve it, the install says so: the certificate does not route anything, `cipi alias add <app> '*.<apex>'` does.
+
+### Fixed — a DNS-01 certificate is reissued over DNS-01
+
+`cipi ssl install <app>` without `--dns` always used HTTP-01. On an app whose certificate was issued over DNS-01 — `cipi alias add` itself suggested running it — certbot replaced the names of the lineage, dropping the wildcard, and its renewals moved from the Cloudflare token to port 80. It now reissues over DNS-01 with the account the certificate was issued with, and says so. `--http` goes back to HTTP-01 on purpose. The panel API and MCP, which call `cipi ssl install <app>` without flags, get the same behaviour.
+
+### Fixed — renewals
+
+- **nginx reloads after every renewal.** certbot.timer (twice a day, from the Ubuntu package) renews certificates without the post-hook of Cipi's weekly cron, so after it renewed a DNS-01 certificate nothing reloaded nginx, which kept serving the old certificate until it expired. A deploy hook, `/etc/letsencrypt/renewal-hooks/deploy/cipi-reload-nginx` (`nginx -t -q && systemctl reload nginx`), now runs after every renewed certificate, however the renewal was started.
+- **The weekly cron no longer passes `--nginx`** to `certbot renew`. On the command line it overrides what each certificate was issued with, so a DNS-01 wildcard would have been renewed over HTTP-01 — which cannot validate a wildcard — whenever the cron, and not the timer, got to it first. Every certificate now renews the way it was issued.
+
+### Added — `cipi ssl status` per app
+
+After the certificate list, every app with what it is served with — Let's Encrypt HTTP-01, Let's Encrypt DNS-01 with the Cloudflare account, Cloudflare Origin CA, or HTTP only — and the names it serves that its certificate does **not** cover. A browser shows those as not secure, and Cloudflare in Full (strict) answers 526 for them. `cipi alias add` and `cipi www add` say whether the new name is already covered, or which command adds it (HTTP-01, DNS-01 for a wildcard, Origin CA).
+
+### Fixed — `cipi app list` showed every PHP-FPM app as Octane
+
+The list is read with `IFS=$'\t'`, and tab is IFS whitespace: the empty Octane column was folded into the next one, so every app without Octane read `-` as its Octane server. It was listed with runtime `octane` and a red dot (the status check looked for a `<app>-octane` Supervisor program). Only the list was wrong — the apps ran on PHP-FPM. Empty columns are now emitted as `-`.
+
+### Changed — `cipi app create` says to add the deploy key before deploying
+
+When the Git provider is not configured with a token, the summary prints the deploy key and then `Next: … cipi deploy <app>`, and the first deploy fails because the repository does not know the key yet. The key is now flagged as a required step before the first deploy, with where to add it on GitHub and GitLab.
+
+### Migration
+
+`lib/migrations/5.5.1.sh`:
+
+1. Writes the certbot deploy hook that reloads nginx.
+2. Removes `--nginx` from the `certbot renew` line of root's crontab.
+3. Writes `/etc/nginx/snippets/cipi-ssl.conf`.
+4. Apps whose certificate renews over DNS-01 (its renewal config names a Cloudflare credentials file) but are not recorded as DNS-01 — the install stopped at the `certbot install` step — get `ssl_dns_provider` and `ssl_dns_account`; a certificate issued with `--wildcard` gets `ssl_wildcard`. The next `cipi ssl install` then keeps DNS-01 and the wildcard.
+5. Rewrites, with the HTTPS block written by Cipi, the vhost of every app that has a certificate and: a wildcard name on it, a wildcard name among its domains, a Cloudflare Origin CA certificate, or no HTTPS in the vhost at all. One app at a time, with `nginx -t` after each: the previous file is kept in `/var/lib/cipi/vhost-backup-5.5.1` and put back if nginx refuses the new one. Other apps keep their certbot-written vhost until it is next regenerated (any alias, www, basic auth, redirect… change), which switches it.
+
+No certificate is requested or renewed, nothing is deployed.
+
+---
+
 ## [5.5.0] — 2026-10-01
 
 ### Fixed — Laravel app logs were rotated twice and never expired

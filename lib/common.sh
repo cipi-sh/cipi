@@ -127,6 +127,208 @@ domain_cert_name() { local d="$1"; printf '%s' "${d#\*.}"; }
 # provider refuses it as a webhook URL: "www" stands in for the tenant.
 domain_url_host() { local d="$1"; [[ "$d" == \*.* ]] && d="www.${d#\*.}"; printf '%s' "$d"; }
 
+# Names a certificate needs so that it covers every name in the list, one per
+# line. Let's Encrypt refuses an order where a name is already covered by a
+# wildcard of the same order ("www.example.com is redundant with a wildcard
+# domain in the same request"), so a name one label below a wildcard of the
+# list is dropped. Deeper names stay: "*.example.com" does not cover
+# "a.b.example.com" in a certificate (it does in nginx, which is why the
+# list can hold both). Order is kept, duplicates go.
+cert_names_for() {
+    local -a names=() wild=()
+    local n w covered
+    for n in "$@"; do
+        [[ -n "$n" ]] || continue
+        domain_is_wildcard "$n" && wild+=("${n#\*.}")
+    done
+    for n in "$@"; do
+        [[ -n "$n" ]] || continue
+        if ! domain_is_wildcard "$n"; then
+            covered=false
+            for w in ${wild[@]+"${wild[@]}"}; do
+                # one label, then the wildcard's base: "www" + ".example.com"
+                if [[ "$n" == *".${w}" ]]; then
+                    local label="${n%".${w}"}"
+                    [[ "$label" != *.* ]] && { covered=true; break; }
+                fi
+            done
+            [[ "$covered" == true ]] && continue
+        fi
+        local seen=false x
+        for x in ${names[@]+"${names[@]}"}; do [[ "$x" == "$n" ]] && { seen=true; break; }; done
+        [[ "$seen" == true ]] || names+=("$n")
+    done
+    [[ ${#names[@]} -gt 0 ]] && printf '%s\n' "${names[@]}"
+    return 0
+}
+
+# ── App HTTPS (written by Cipi, not by certbot) ──────────────
+#
+# certbot issues and renews certificates; it never edits an app vhost. Its
+# nginx installer cannot be driven non-interactively for a wildcard name
+# (it always asks "Which server blocks would you like to modify?"), it knows
+# nothing of a Cloudflare Origin CA certificate, and its HTTP → HTTPS block
+# answers 404 to every host it was not told about — every tenant of a
+# wildcard app. So _create_nginx_vhost writes the plain-HTTP vhost and then
+# turns it into its HTTPS form here, from whatever certificate the app has.
+
+[[ -z "${CIPI_LE_LIVE:-}" ]]           && readonly CIPI_LE_LIVE="/etc/letsencrypt/live"
+[[ -z "${CIPI_ORIGIN_CERT_DIR:-}" ]]   && readonly CIPI_ORIGIN_CERT_DIR="/etc/ssl/cipi-origin"
+[[ -z "${CIPI_NGINX_SSL_SNIPPET:-}" ]] && readonly CIPI_NGINX_SSL_SNIPPET="/etc/nginx/snippets/cipi-ssl.conf"
+[[ -z "${CIPI_CERTBOT_RELOAD_HOOK:-}" ]] && readonly CIPI_CERTBOT_RELOAD_HOOK="/etc/letsencrypt/renewal-hooks/deploy/cipi-reload-nginx"
+
+# Certificate and key an app is served with, as "cert<TAB>key"; status 1 when it
+# has none. A Cloudflare Origin CA certificate (cipi zt origin-cert) is used
+# while the app is flagged for it, otherwise the Let's Encrypt lineage named
+# after the primary domain (the bare name for a wildcard primary).
+app_tls_files() {
+    local app="$1" d live
+    if [[ "$(app_get "$app" ssl_origin_ca)" == "true" \
+          && -s "${CIPI_ORIGIN_CERT_DIR}/${app}/cert.pem" && -s "${CIPI_ORIGIN_CERT_DIR}/${app}/key.pem" ]]; then
+        printf '%s\t%s\n' "${CIPI_ORIGIN_CERT_DIR}/${app}/cert.pem" "${CIPI_ORIGIN_CERT_DIR}/${app}/key.pem"
+        return 0
+    fi
+    d=$(app_get "$app" domain)
+    [[ -n "$d" ]] || return 1
+    live="${CIPI_LE_LIVE}/$(domain_cert_name "$d")"
+    if [[ -e "${live}/fullchain.pem" && -e "${live}/privkey.pem" ]]; then
+        printf '%s\t%s\n' "${live}/fullchain.pem" "${live}/privkey.pem"
+        return 0
+    fi
+    return 1
+}
+
+app_has_tls() { app_tls_files "$1" >/dev/null; }
+
+# The app is published through the Cloudflare tunnel (cipi zt hostname add):
+# cloudflared talks plain HTTP to :80, so :80 must keep serving the app.
+app_on_cf_tunnel() {
+    vault_read zt.json 2>/dev/null | jq -e --arg a "$1" '.hostnames[$a] != null' >/dev/null 2>&1
+}
+
+# Names a certificate holds (DNS SANs), one per line.
+cert_file_names() {
+    openssl x509 -in "$1" -noout -text 2>/dev/null \
+        | grep -o 'DNS:[^,[:space:]]*' | sed 's/^DNS://' || true
+}
+
+# True when one of the certificate names (stdin, one per line) is valid for
+# <name>: the same name, or a wildcard one label above it.
+cert_names_cover() {
+    local name="$1" c
+    while IFS= read -r c; do
+        [[ -n "$c" ]] || continue
+        [[ "$c" == "$name" ]] && return 0
+        if domain_is_wildcard "$c" && ! domain_is_wildcard "$name" && [[ "$name" == *".${c#\*.}" ]]; then
+            local label="${name%".${c#\*.}"}"
+            [[ "$label" != *.* ]] && return 0
+        fi
+    done
+    return 1
+}
+
+# TLS settings shared by every app vhost (Mozilla "intermediate", ECDHE only so
+# no dhparam file is needed). Rewritten only when its content changes.
+nginx_ensure_ssl_snippet() {
+    local want
+    want='# Managed by Cipi — TLS settings of every app vhost. Rewritten on update.
+ssl_session_cache shared:cipi_ssl:10m;
+ssl_session_timeout 1d;
+ssl_session_tickets off;
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_prefer_server_ciphers off;
+ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;'
+    [[ -f "$CIPI_NGINX_SSL_SNIPPET" && "$(cat "$CIPI_NGINX_SSL_SNIPPET" 2>/dev/null)" == "$want" ]] && return 0
+    mkdir -p "$(dirname "$CIPI_NGINX_SSL_SNIPPET")" 2>/dev/null || return 1
+    printf '%s\n' "$want" > "${CIPI_NGINX_SSL_SNIPPET}.tmp" 2>/dev/null \
+        && chmod 644 "${CIPI_NGINX_SSL_SNIPPET}.tmp" \
+        && mv -f "${CIPI_NGINX_SSL_SNIPPET}.tmp" "$CIPI_NGINX_SSL_SNIPPET"
+}
+
+# certbot.timer (twice a day) and the weekly cron both renew certificates, and
+# neither touches an app vhost — the live/ paths stay the same. A renewed
+# certificate is served only once nginx reloads; certbot runs every file in
+# renewal-hooks/deploy after each successful renewal, however it was started.
+certbot_ensure_reload_hook() {
+    local want
+    want='#!/bin/sh
+# Managed by Cipi — certbot runs this after every renewed certificate, so that
+# nginx serves it. A failing config test is reported by certbot, not hidden.
+nginx -t -q && exec systemctl reload nginx'
+    [[ -f "$CIPI_CERTBOT_RELOAD_HOOK" && "$(cat "$CIPI_CERTBOT_RELOAD_HOOK" 2>/dev/null)" == "$want" ]] && return 0
+    mkdir -p "$(dirname "$CIPI_CERTBOT_RELOAD_HOOK")" 2>/dev/null || return 1
+    printf '%s\n' "$want" > "${CIPI_CERTBOT_RELOAD_HOOK}.tmp" 2>/dev/null \
+        && chmod 755 "${CIPI_CERTBOT_RELOAD_HOOK}.tmp" \
+        && mv -f "${CIPI_CERTBOT_RELOAD_HOOK}.tmp" "$CIPI_CERTBOT_RELOAD_HOOK"
+}
+
+# Turn the plain-HTTP vhost written by _create_nginx_vhost into its HTTPS form.
+#   redirect  every server block moves to :443, and one :80 block answers every
+#             name of the file — tenants of a wildcard included — with a 301 to
+#             https://$host. ACME challenges stay reachable on :80.
+#   plain     every server block listens on :80 and :443 (Cloudflare tunnel).
+# Each server block Cipi writes opens with "    listen 80;" + "    listen [::]:80;".
+# A file that does not look like that (edited by hand, already HTTPS) is left
+# alone: status 1.
+nginx_vhost_apply_tls() {   # <vhost> <cert> <key> <redirect|plain> [log dir]
+    local f="$1" cert="$2" key="$3" mode="$4" logdir="${5:-}" blocks
+    [[ -f "$f" && -n "$cert" && -n "$key" ]] || return 1
+    [[ "$mode" == "redirect" || "$mode" == "plain" ]] || return 1
+    blocks=$(grep -c '^server {$' "$f" 2>/dev/null || true)
+    [[ "${blocks:-0}" -ge 1 ]] || return 1
+    [[ "$(grep -c '^    listen 80;$' "$f")" == "$blocks" \
+       && "$(grep -c '^    listen \[::\]:80;$' "$f")" == "$blocks" ]] || return 1
+    grep -qE '^[[:space:]]*(listen[[:space:]]+(\[::\]:)?443|ssl_certificate)' "$f" && return 1
+
+    local tmp="${f}.cipi-tls"
+    awk -v cert="$cert" -v key="$key" -v mode="$mode" -v snip="$CIPI_NGINX_SSL_SNIPPET" -v logdir="$logdir" '
+        /^    listen 80;$/ { if (mode == "plain") print; next }
+        /^    listen \[::\]:80;$/ {
+            if (mode == "plain") print
+            print "    listen 443 ssl;"
+            print "    listen [::]:443 ssl;"
+            print "    ssl_certificate " cert ";"
+            print "    ssl_certificate_key " key ";"
+            print "    include " snip ";"
+            next
+        }
+        /^    server_name / {
+            line = $0
+            sub(/^    server_name[ ]+/, "", line); sub(/;[ ]*$/, "", line)
+            n = split(line, parts, /[ ]+/)
+            for (i = 1; i <= n; i++) if (parts[i] != "" && !(parts[i] in seen)) {
+                seen[parts[i]] = 1
+                names = names (names == "" ? "" : " ") parts[i]
+            }
+        }
+        { print }
+        END {
+            if (mode != "redirect") exit
+            print ""
+            print "# Written by Cipi with the certificate: HTTP → HTTPS for every name above."
+            print "server {"
+            print "    listen 80;"
+            print "    listen [::]:80;"
+            print "    server_name " names ";"
+            if (logdir != "") {
+                print "    access_log " logdir "/nginx-access.log;"
+                print "    error_log " logdir "/nginx-error.log;"
+            }
+            print "    location ^~ /.well-known/acme-challenge/ {"
+            print "        default_type \"text/plain\";"
+            print "        root /var/www/html;"
+            print "        try_files $uri =404;"
+            print "    }"
+            print "    location / {"
+            print "        return 301 https://$host$request_uri;"
+            print "    }"
+            print "}"
+        }' "$f" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    [[ -s "$tmp" ]] || { rm -f "$tmp"; return 1; }
+    chmod 644 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$f"
+}
+
 # Git branch name. Restricted to a safe charset so it can never break out of
 # the single-quoted PHP string literal it's substituted into when generating
 # deploy.php (lib/app.sh _create_deployer_config_from_template / app_edit).

@@ -349,7 +349,17 @@ Clone an app for staging with **`cipi app clone <src> --domain=…`**.
 
 ### 🌐 Aliases, www & SSL
 
-Add multiple domains or subdomains to any app. A domain can be a **wildcard** (`*.example.com`), as the app's primary domain or as an alias — multi-tenant apps get one vhost for every tenant. Manage www/apex aliases and canonical redirects with **`cipi www`**. A single SAN certificate covers all of them — HTTP-01 by default, or **DNS-01 via Cloudflare** for wildcards (`cipi ssl install --dns=cloudflare --wildcard`). Auto-renew handles the rest.
+Add multiple domains or subdomains to any app. A domain can be a **wildcard** (`*.example.com`), as the app's primary domain or as an alias — multi-tenant apps get one vhost for every tenant. Manage www/apex aliases and canonical redirects with **`cipi www`**. A single SAN certificate covers all of them — HTTP-01 by default, or **DNS-01 via Cloudflare** for wildcards. Auto-renew handles the rest.
+
+**Wildcard / multi-tenant in three commands** (DNS of the zone on Cloudflare — proxied or not — and a `*` record pointing at the server):
+
+```bash
+cipi alias add myapp '*.myapp.com'               # routes every subdomain to the app (quote it)
+cipi ssl dns set --token=<CLOUDFLARE_API_TOKEN>  # once per server: Zone → DNS → Edit
+cipi ssl install myapp --dns=cloudflare          # one certificate: myapp.com + *.myapp.com
+```
+
+Cipi writes the HTTPS server block itself; certbot only issues and renews the certificate. Every subdomain is redirected from HTTP to HTTPS, renewals reload nginx, and a DNS-01 certificate is always reissued over DNS-01. Behind the Cloudflare proxy set SSL/TLS to **Full (strict)** — never Flexible, which loops on the HTTPS redirect. Without Cloudflare DNS, a wildcard certificate cannot be issued by Cipi: list the subdomains as aliases instead (HTTP-01). The full decision guide — with and without Cloudflare, Origin CA, tunnel — is in the [docs](https://cipi.sh/docs/advanced#wildcard-domains). `cipi ssl status` shows, per app, what is served with which certificate and which names it does not cover.
 
 **Domains in different Cloudflare accounts.** A wildcard certificate needs an API token of the Cloudflare account that holds the zone. One token is enough when every zone is in the same account; when your clients each have their own, give every account a name:
 

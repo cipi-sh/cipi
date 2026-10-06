@@ -245,7 +245,7 @@ _cipi_complete() {
                        dns)           sub="set list remove" ;;
                    esac ;;
                 *) case "$w1" in
-                       install) sub="--dns=cloudflare --account= --wildcard" ;;
+                       install) sub="--dns=cloudflare --account= --wildcard --no-wildcard --http" ;;
                        dns)     case "$w2" in set) sub="--name= --token=" ;; esac ;;
                    esac ;;
             esac ;;

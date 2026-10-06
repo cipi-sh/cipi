@@ -1291,24 +1291,6 @@ _zt_unlock_ssh() {
 
 # ── Origin CA ────────────────────────────────────────────────
 
-_zt_vhost_install_origin() {
-    local app="$1" cert="$2" key="$3"
-    local vhost="/etc/nginx/sites-available/${app}"
-    [[ -f "$vhost" ]] || { error "Nginx vhost for '${app}' not found"; return 1; }
-    if grep -qE '^\s*ssl_certificate\s' "$vhost"; then
-        sed -i -E "s|^(\s*)ssl_certificate\s+.*|\1ssl_certificate ${cert};|" "$vhost"
-        sed -i -E "s|^(\s*)ssl_certificate_key\s+.*|\1ssl_certificate_key ${key};|" "$vhost"
-        return 0
-    fi
-    # Tunnel ingress is http://127.0.0.1:80 — Origin CA is for Full Strict
-    # orange-cloud (:443). Do not clone the vhost; custom/Octane layouts differ.
-    warn "No ssl_certificate in the vhost yet — Origin CA saved at ${cert}"
-    echo "  The tunnel talks HTTP to :80 and does not need it. After a :443 block exists"
-    echo "  (cipi ssl install, or Cloudflare connecting to origin 443), re-run:"
-    echo "    cipi zt origin-cert ${app}"
-    return 0
-}
-
 _zt_origin_cert() {
     parse_args "$@"
     _zt_require_token || exit 1
@@ -1356,10 +1338,13 @@ _zt_origin_cert() {
     echo "$resp" | jq -r '.result.certificate' > "$cert"
     [[ -s "$cert" ]] || { error "Origin CA returned an empty certificate"; exit 1; }
     chmod 644 "$cert"
-    _zt_vhost_install_origin "$app" "$cert" "$key" || exit 1
-    reload_nginx || exit 1
+    # The vhost is rewritten with it (_create_nginx_vhost → nginx_vhost_apply_tls),
+    # :443 included, whether or not the app had HTTPS before.
     app_set "$app" ssl_origin_ca "true"
     app_set "$app" force_https "true"
+    declare -f _create_nginx_vhost >/dev/null 2>&1 || source "${CIPI_LIB}/app.sh"
+    _create_nginx_vhost "$app" "$d" "$(app_get "$app" php)"
+    reload_nginx || exit 1
     local st
     st=$(_zt_state)
     st=$(echo "$st" | jq --arg a "$app" '
@@ -1367,5 +1352,7 @@ _zt_origin_cert() {
     _zt_state_write "$st"
     log_action "ZT ORIGIN CERT ${app}"
     success "Cloudflare Origin CA installed for ${d}"
+    echo -e "  ${DIM}Names: $(echo "$hosts_json" | jq -r 'join(" ")')${NC}"
+    echo -e "  ${DIM}Trusted by Cloudflare only: keep these records proxied (orange cloud), SSL/TLS mode Full (strict).${NC}"
     echo -e "  ${DIM}cipi ssl install HTTP-01 will refuse this app. Tunnel can keep talking HTTP to :80.${NC}"
 }

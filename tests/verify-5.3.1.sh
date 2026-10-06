@@ -177,7 +177,7 @@ ensure_apps_json_api_access() { :; }
 _ensure_nginx_octane_map() { :; }
 cipi_notify() { :; }; log_action() { :; }; curl() { return 0; }
 source "${RT}"
-eval "\$(declare -f _create_nginx_vhost | sed 's|/etc/nginx/sites-available/|${TMP}/sites/|g')"
+eval "\$(declare -f _create_nginx_vhost _create_nginx_vhost_http _nginx_vhost_tls | sed 's|/etc/nginx/sites-available/|${TMP}/sites/|g')"
 EOF
 H="source '${TMP}/h.sh';"
 

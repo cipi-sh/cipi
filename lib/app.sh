@@ -583,8 +583,9 @@ SUDO
             if [[ -n "${GIT_PROVIDER:-}" && -n "${GIT_DEPLOY_KEY_ID:-}" ]]; then
                 echo -e "  ${BOLD}Git${NC}         ${GREEN}${GIT_PROVIDER} deploy key ✓${NC}"
             else
-                echo -e "  ${BOLD}Deploy Key${NC}  (add to your Git provider)"
+                echo -e "  ${BOLD}Deploy Key${NC}  ${YELLOW}add it to the repository before the first deploy — the deploy fails without it${NC}"
                 echo -e "  ${CYAN}${deploy_key}${NC}"
+                echo -e "  ${DIM}GitHub: Settings → Deploy keys · GitLab: Settings → Repository → Deploy keys (read access is enough)${NC}"
                 [[ -z "${GIT_PROVIDER:-}" ]] && echo -e "  ${DIM}Tip: cipi git status — save a provider token to auto-configure next time${NC}"
             fi
             echo ""
@@ -602,8 +603,9 @@ SUDO
             echo -e "  ${BOLD}Git${NC}         ${GREEN}${GIT_PROVIDER} auto-configured ✓${NC}"
             echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${url_host}/cipi/webhook${NC}"
         else
-            echo -e "  ${BOLD}Deploy Key${NC}  (add to your Git provider)"
+            echo -e "  ${BOLD}Deploy Key${NC}  ${YELLOW}add it to the repository before the first deploy — the deploy fails without it${NC}"
             echo -e "  ${CYAN}${deploy_key}${NC}"
+            echo -e "  ${DIM}GitHub: Settings → Deploy keys · GitLab: Settings → Repository → Deploy keys (read access is enough)${NC}"
             echo ""
             echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${url_host}/cipi/webhook${NC}  ${DIM}(push events)${NC}"
             echo -e "  ${BOLD}Secret${NC}      ${CYAN}${webhook_token}${NC}"
@@ -618,8 +620,9 @@ SUDO
             echo -e "  ${BOLD}Git${NC}         ${GREEN}${GIT_PROVIDER} auto-configured ✓${NC}"
             echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${url_host}/cipi/webhook${NC}"
         else
-            echo -e "  ${BOLD}Deploy Key${NC}  (add to your Git provider)"
+            echo -e "  ${BOLD}Deploy Key${NC}  ${YELLOW}add it to the repository before the first deploy — the deploy fails without it${NC}"
             echo -e "  ${CYAN}${deploy_key}${NC}"
+            echo -e "  ${DIM}GitHub: Settings → Deploy keys · GitLab: Settings → Repository → Deploy keys (read access is enough)${NC}"
             echo ""
             echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${url_host}/cipi/webhook${NC}"
             echo -e "  ${BOLD}Token${NC}       ${CYAN}${webhook_token}${NC}"
@@ -661,8 +664,12 @@ app_list() {
     fi
     printf "\n${BOLD}%-14s %-28s %-6s %-10s %s${NC}\n" "APP" "DOMAIN" "PHP" "RUNTIME" "CREATED"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "$_aj" | jq -r 'to_entries[]|"\(.key)\t\(.value.domain)\t\(.value.php)\t\(.value.created_at)\t\(.value.suspended // "false")\t\(.value.octane // "")\t\(if .value.runtime == "node" then "node-" + .value.node_mode else "-" end)"' \
+    # Every field is emitted non-empty: tab is IFS whitespace, so `read` would
+    # fold an empty column into the next one — an app without Octane then read
+    # "-" as its Octane server and was listed as octane, with a red dot.
+    echo "$_aj" | jq -r 'to_entries[]|"\(.key)\t\(.value.domain // "-")\t\(.value.php // "-")\t\(.value.created_at // "-")\t\(.value.suspended // "false")\t\(if ((.value.octane // "") | tostring) == "" then "-" else .value.octane end)\t\(if .value.runtime == "node" then "node-" + .value.node_mode else "-" end)"' \
         | while IFS=$'\t' read -r a d p c s o nd; do
+        [[ "$o" == "-" ]] && o=""
         local st="${GREEN}●${NC}"
         if [[ "$nd" == "node-ssr" ]]; then
             supervisorctl status "${a}-node-blue" "${a}-node-green" 2>/dev/null | grep -q RUNNING || st="${RED}●${NC}"
@@ -872,9 +879,10 @@ _app_change_domain() {
         git_update_webhook_domain "$app" "$(domain_url_host "$new_domain")" "$repo"
     fi
 
-    if [[ "$had_ssl" == true ]] && domain_is_wildcard "$new_domain"; then
+    if [[ "$had_ssl" == true ]] && domain_is_wildcard "$new_domain" && [[ -z "$(app_get "$app" ssl_dns_provider)" ]]; then
         # HTTP-01 cannot validate a wildcard, so reissuing here would only fail:
-        # the old certificate is left in place until DNS-01 replaces it.
+        # the old certificate is left in place until DNS-01 replaces it. An app
+        # already on DNS-01 is reissued below, the same way.
         warn "'${new_domain}' is a wildcard — reissue over DNS-01: cipi ssl install ${app} --dns=cloudflare"
     elif [[ "$had_ssl" == true ]]; then
         step "Reissuing SSL certificate..."
@@ -1772,7 +1780,24 @@ alias_add() {
         "A domain alias was added.\n\nServer: $(hostname)\nApp: ${app}\nAlias: ${dom}\nPrimary: $(app_get "$app" domain)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         alias_add
     success "'${dom}' added to '${app}'"
-    info "Run: cipi ssl install ${app}  (to update certificate)"
+    _alias_cert_hint "$app" "$dom"
+}
+
+# What the certificate needs once a name is added: nothing, a reissue, or
+# DNS-01 (a wildcard cannot be validated over HTTP-01).
+_alias_cert_hint() {
+    local app="$1" dom="$2" files
+    if files=$(app_tls_files "$app") && cert_file_names "${files%%$'\t'*}" | cert_names_cover "$dom"; then
+        info "'${dom}' is already covered by the certificate of '${app}'"
+        return 0
+    fi
+    if [[ "$(app_get "$app" ssl_origin_ca)" == "true" ]]; then
+        info "Certificate: cipi zt origin-cert ${app}  (reissues the Origin CA certificate with '${dom}')"
+    elif domain_is_wildcard "$dom" && [[ -z "$(app_get "$app" ssl_dns_provider)" ]]; then
+        info "Certificate: cipi ssl install ${app} --dns=cloudflare  (a wildcard needs DNS-01 — see: cipi help ssl)"
+    else
+        info "Certificate: cipi ssl install ${app}  (adds '${dom}' to it)"
+    fi
 }
 
 alias_remove() {
@@ -1883,7 +1908,7 @@ www_add() {
         "A www/apex alias was added.\n\nServer: $(hostname)\nApp: ${app}\nAlias: ${other}\nPrimary: ${primary}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         www_add
     success "'${other}' added to '${app}'"
-    info "Run: cipi ssl install ${app}  (to update certificate)"
+    _alias_cert_hint "$app" "$other"
 }
 
 www_force_to_root() {
@@ -2194,7 +2219,8 @@ EOF
 # quotes, '$', ';', braces or whitespace — so they are rendered verbatim here.
 # Every block is a `location = ` or `location ^~ `, which nginx picks before
 # the regex locations (\.php$, dotfiles), so order in the file does not matter.
-# certbot clones them into :443 with the rest of the server block.
+# With a certificate the whole server block, these included, moves to :443
+# (nginx_vhost_apply_tls).
 
 # Regex-escape a validated path (only '.' and '+' of its charset are special).
 _routes_regex_escape() {
@@ -2287,7 +2313,7 @@ _nginx_proxy_location_blocks() {
 # generic static suspension page served with HTTP 503. State lives in apps.json
 # ("suspended": "true") and _create_nginx_vhost renders the suspended vhost when
 # the flag is set, so suspension survives vhost regeneration (alias/PHP edits)
-# and certbot clones it into the :443 block — HTTPS is covered too. The page is
+# and with a certificate the block is served on :443 — HTTPS is covered too. The page is
 # shared by all apps and created on demand below.
 [[ -z "${SUSPENDED_DIR:-}" ]] && readonly SUSPENDED_DIR="/var/www/cipi-suspended"
 
@@ -2357,7 +2383,38 @@ HTML
     chmod 755 "$SUSPENDED_DIR"
 }
 
+# Write the app vhost: the plain-HTTP form, then — when the app has a
+# certificate — its HTTPS form (nginx_vhost_apply_tls, lib/common.sh). Every
+# regeneration (alias, www, basic auth, redirects, Octane, Reverb, suspend…)
+# therefore keeps HTTPS by itself, wildcard and Origin CA certificates too.
 _create_nginx_vhost() {
+    local rc=0
+    _create_nginx_vhost_http "$@" || rc=$?
+    [[ $rc -eq 0 ]] || return $rc
+    _nginx_vhost_tls "$1"
+}
+
+# HTTPS for the vhost just written, from the app's certificate. No certificate:
+# the vhost stays HTTP-only. HTTP is redirected to HTTPS unless the app opted
+# out (force_https "false") or is published through the Cloudflare tunnel.
+_nginx_vhost_tls() {
+    local app="$1" vhost="/etc/nginx/sites-available/${1}" files cert key mode="redirect"
+    files=$(app_tls_files "$app") || return 0
+    IFS=$'\t' read -r cert key <<< "$files"
+    if [[ "$(app_get "$app" force_https)" == "false" ]] || app_on_cf_tunnel "$app"; then
+        mode="plain"
+    fi
+    if ! nginx_ensure_ssl_snippet; then
+        warn "Could not write ${CIPI_NGINX_SSL_SNIPPET} — '${app}' is served over HTTP only"
+        return 0
+    fi
+    if ! nginx_vhost_apply_tls "$vhost" "$cert" "$key" "$mode" "/home/${app}/logs"; then
+        warn "Could not add HTTPS to ${vhost} — '${app}' is served over HTTP only"
+    fi
+    return 0
+}
+
+_create_nginx_vhost_http() {
     local app="$1" domain="$2" v="$3"
     local names aliases_raw vhost_type docroot
     if [[ $# -ge 4 ]]; then
@@ -2381,7 +2438,7 @@ _create_nginx_vhost() {
     # Suspended app (cipi app suspend <app>): override the vhost with a generic
     # static page returned as HTTP 503 for every request. The ACME challenge path
     # is kept reachable so SSL issuance/renewal keeps working while suspended.
-    # certbot clones these blocks into the :443 server, so HTTPS is suspended too.
+    # With a certificate this block is served on :443, so HTTPS is suspended too.
     if [[ "$(app_get "$app" suspended)" == "true" ]]; then
         _ensure_suspended_page
         cat > "/etc/nginx/sites-available/${app}" <<EOF
@@ -2412,8 +2469,8 @@ EOF
     # HTTP basic auth (cipi basicauth enable <app>). Injected into the app's
     # location blocks — NOT at server level — so that certbot's auto-generated
     # ACME challenge location (exact match, inherits from server) stays public
-    # and SSL issue/renewal keeps working. certbot clones these location blocks
-    # into the :443 server, so HTTPS is protected too.
+    # and SSL issue/renewal keeps working. With a certificate the block, these
+    # locations included, is served on :443, so HTTPS is protected too.
     local auth_block=""
     if [[ "$(app_get "$app" basic_auth)" == "true" ]] && [[ -f "/etc/nginx/cipi-basicauth/${app}.htpasswd" ]]; then
         auth_block="        auth_basic \"Restricted\";
@@ -2465,8 +2522,8 @@ EOF
 
     # WWW canonical redirect (cipi www force-to-root|force-from-root). Emits a
     # dedicated server block for the non-canonical host; the app block keeps the
-    # remaining names. ACME stays public on the redirect host. certbot install
-    # clones both blocks into :443 so HTTPS inherits the same redirect.
+    # remaining names. ACME stays public on the redirect host. With a
+    # certificate both blocks move to :443, so HTTPS inherits the same redirect.
     local www_redirect_block="" www_mode
     www_mode=$(app_get "$app" www_redirect)
     if [[ "$www_mode" == "to-root" || "$www_mode" == "from-root" ]]; then
@@ -2485,7 +2542,7 @@ EOF
             names="$canonical"
         fi
         redir_scheme="http"
-        [[ -d "/etc/letsencrypt/live/$(domain_cert_name "$domain")" ]] && redir_scheme="https"
+        app_has_tls "$app" && redir_scheme="https"
         www_redirect_block=$(cat <<EOF
 server {
     listen 80;
@@ -2502,9 +2559,11 @@ server {
         return 301 ${redir_scheme}://${canonical}\$request_uri;
     }
 }
-
 EOF
 )
+        # $(…) drops trailing newlines: without these the app block would open
+        # on the same line ("}server {"), which nginx reads but nothing else does.
+        www_redirect_block+=$'\n\n'
     fi
 
     if [[ "$(app_get "$app" runtime)" == "node" ]]; then
@@ -3080,20 +3139,11 @@ auth_delete() {
 
 _basicauth_file() { echo "${BASICAUTH_DIR}/${1}.htpasswd"; }
 
-# Reinstall an already-issued Let's Encrypt cert into the (re)generated vhost.
-# Uses `certbot install` (no ACME round-trip, so no rate-limit risk) so that
-# toggling basic auth never drops HTTPS. Falls back to a plain reload when the
-# app has no certificate yet.
+# After a vhost regeneration. _create_nginx_vhost already wrote the HTTPS side
+# from the app's certificate, so nothing has to be put back: test and reload.
+# Status 1 when nginx refuses the configuration (callers revert on it).
 _nginx_reapply_ssl() {
-    local app="$1" d
-    d=$(app_get "$app" domain)
-    local cert; cert=$(domain_cert_name "$d")
-    if [[ -n "$d" ]] && [[ -d "/etc/letsencrypt/live/${cert}" ]] && command -v certbot &>/dev/null; then
-        certbot install --nginx --cert-name "${cert}" --non-interactive --redirect >/dev/null 2>&1 || true
-        reload_nginx
-    else
-        reload_nginx
-    fi
+    reload_nginx
 }
 
 # Add or replace a single user in the app's htpasswd file. Hash via
@@ -3391,12 +3441,9 @@ app_reset_db_password() {
 
 # ── CONVERT FPM ↔ Octane ──────────────────────────────────────
 
+# Kept for its callers: the regenerated vhost already carries HTTPS.
 _reapply_ssl_if_present() {
-    local app="$1" d
-    d=$(app_get "$app" domain)
-    local cert; cert=$(domain_cert_name "$d")
-    [[ -n "$d" && -d "/etc/letsencrypt/live/${cert}" ]] || return 0
-    certbot install --nginx --cert-name "$cert" --non-interactive --redirect 2>&1 || true
+    app_has_tls "$1" || return 0
     if nginx -t &>/dev/null; then
         systemctl reload nginx 2>/dev/null || true
     fi

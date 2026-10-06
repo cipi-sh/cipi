@@ -222,8 +222,8 @@ show_help_topic() {
             _help_cmd "cipi alias add <app> <domain>"  "Add alias"
             _help_cmd "cipi alias remove <app> <domain>" "Remove alias"
             _help_cmd "cipi alias list <app>"          "List aliases"
-            _help_note "A domain may be a wildcard (*.example.com), as primary or as alias."
-            _help_note "Wildcard certificates are DNS-01 only: cipi ssl install <app> --dns=cloudflare"
+            _help_note "A domain may be a wildcard (*.example.com), as primary or as alias — quote it."
+            _help_note "Wildcard certificates are DNS-01 only: cipi ssl install <app> --dns=cloudflare (cipi help ssl)"
             _help_note "See also: cipi help www"
             echo ""
             ;;
@@ -578,14 +578,18 @@ show_help_topic() {
         ssl|cert|certs|certificate)
             _help_topic_header "SSL"
             echo ""
-            _help_cmd "cipi ssl install <app>"         "SSL certificate  ${DIM}[--dns=cloudflare [--account=NAME] [--wildcard]]${NC}"
+            _help_cmd "cipi ssl install <app>"         "SSL certificate  ${DIM}[--dns=cloudflare [--account=NAME] [--wildcard|--no-wildcard]] [--http]${NC}"
             _help_cmd "cipi ssl dns set"               "Cloudflare account for DNS-01  ${DIM}[--name=NAME] --token=${NC}"
             _help_cmd "cipi ssl dns list"              "Accounts and the certificates on each"
             _help_cmd "cipi ssl dns remove <NAME>"     "Remove an account no certificate uses"
             _help_cmd "cipi ssl force <app>"           "Force HTTP → HTTPS redirect"
             _help_cmd "cipi ssl renew"                 "Renew all certs"
-            _help_cmd "cipi ssl status"                "List certificates"
-            _help_note "A wildcard domain (*.example.com) needs --dns=cloudflare — HTTP-01 cannot validate it."
+            _help_cmd "cipi ssl status"                "Certificates, and per app what is served and what is not covered"
+            _help_note "Wildcard (multi-tenant): cipi alias add <app> '*.example.com' routes the subdomains,"
+            _help_note "cipi ssl install <app> --dns=cloudflare covers them — HTTP-01 cannot validate a wildcard."
+            _help_note "A DNS-01 certificate is reissued over DNS-01 (--http goes back to HTTP-01)."
+            _help_note "Behind the Cloudflare proxy: SSL/TLS mode Full (strict), never Flexible (redirect loop)."
+            _help_note "Guide: https://cipi.sh/docs/advanced#wildcard-domains"
             echo ""
             ;;
 

@@ -157,8 +157,9 @@ grep -q '_ssl_zt_lock_http' "${LIB}/ssl.sh" \
     && pass "ssl.sh checks zt lock http" || fail "ssl.sh ignores lock http"
 grep -q 'ssl_origin_ca' "${LIB}/ssl.sh" \
     && pass "HTTP-01 refuses Origin CA apps" || fail "HTTP-01 can overwrite Origin CA"
-grep -q '_ssl_certbot_redirect_flag' "${LIB}/ssl.sh" \
-    && pass "tunneled apps skip certbot --redirect" || fail "no --no-redirect for tunneled apps"
+# 5.5.1: Cipi writes the HTTPS vhost; a tunneled app keeps :80 serving (no redirect).
+sed -n '/^_nginx_vhost_tls()/,/^}/p' "${LIB}/app.sh" | grep -q 'app_on_cf_tunnel "\$app"' \
+    && pass "tunneled apps get no HTTP → HTTPS redirect" || fail "no --no-redirect for tunneled apps"
 grep -q 'cipi zt enable' "${LIB}/crowdsec.sh" \
     && pass "CrowdSec real_ip error points at cipi zt enable" || fail "CrowdSec error omits zt"
 

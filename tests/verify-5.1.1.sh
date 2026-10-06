@@ -120,7 +120,7 @@ vhost_out=$(bash -c '
     _ensure_nginx_octane_map() { :; }
     source lib/app.sh
     tmp=$(mktemp -d); mkdir -p "${tmp}/etc/nginx/sites-available"
-    declare -f _create_nginx_vhost | sed "s#/etc/nginx/#${tmp}/etc/nginx/#g" > "${tmp}/v.sh"
+    declare -f _create_nginx_vhost _create_nginx_vhost_http _nginx_vhost_tls | sed "s#/etc/nginx/#${tmp}/etc/nginx/#g" > "${tmp}/v.sh"
     source "${tmp}/v.sh"
     _create_nginx_vhost w "*.web.example.com" 8.5
     cat "${tmp}/etc/nginx/sites-available/w"

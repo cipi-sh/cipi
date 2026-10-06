@@ -7,17 +7,7 @@ _ssl_zt_lock_http() {
     vault_read zt.json 2>/dev/null | jq -e '.lock_http == true' >/dev/null 2>&1
 }
 
-_ssl_app_on_tunnel() {
-    vault_read zt.json 2>/dev/null | jq -e --arg a "$1" '.hostnames[$a] != null' >/dev/null 2>&1
-}
-
-_ssl_certbot_redirect_flag() {
-    if _ssl_app_on_tunnel "$1"; then
-        echo "--no-redirect"
-    else
-        echo "--redirect"
-    fi
-}
+_ssl_app_on_tunnel() { app_on_cf_tunnel "$1"; }
 
 ssl_command() {
     local sub="${1:-}"; shift||true
@@ -221,9 +211,88 @@ _ssl_dns_remove() {
     success "Cloudflare account '${name}' removed"
 }
 
+# ── Install ──────────────────────────────────────────────────
+#
+# certbot only issues the certificate (certonly): HTTP-01 through its nginx
+# authenticator, DNS-01 through Cloudflare. The vhost is then rewritten by
+# Cipi with that certificate (_create_nginx_vhost → nginx_vhost_apply_tls),
+# so wildcard names, tenants and Origin CA certificates all take the same
+# path. `certbot install` is never used on an app vhost.
+
+# Names for the app's certificate: primary and aliases, plus "*.<apex>" when a
+# wildcard certificate is asked for, minus what a wildcard of the list already
+# covers (Let's Encrypt refuses such an order). One per line.
+#   <wildcard>  true: add "*.<apex>"; "http": leave every wildcard out (HTTP-01
+#               cannot validate one), and with it nothing counts as covered.
+_ssl_app_cert_names() {
+    local app="$1" wildcard="${2:-}" d apex a
+    d=$(app_get "$app" domain)
+    local -a all=()
+    # --wildcard: the apex and "*.<apex>" first (the apex names the certificate),
+    # as it always did — whether or not the app serves the apex itself.
+    if [[ "$wildcard" == "true" ]]; then
+        apex=$(domain_cert_name "$d")
+        [[ "$apex" == www.* ]] && apex="${apex#www.}"
+        all+=("$apex" "*.${apex}")
+    fi
+    while IFS= read -r a; do
+        [[ -n "$a" ]] || continue
+        [[ "$wildcard" == "http" ]] && domain_is_wildcard "$a" && continue
+        all+=("$a")
+    done < <(echo "$d"; vault_read apps.json | jq -r --arg a "$app" --arg d "$d" '.[$a].aliases // [] | map(select(. != $d)) | .[]' 2>/dev/null || true)
+    [[ ${#all[@]} -gt 0 ]] || return 0
+    cert_names_for "${all[@]}"
+}
+
+# Rewrite the app vhost — with its certificate now — and reload nginx.
+_ssl_apply_vhost() {
+    local app="$1"
+    declare -f _create_nginx_vhost >/dev/null 2>&1 || source "${CIPI_LIB}/app.sh"
+    _create_nginx_vhost "$app" "$(app_get "$app" domain)" "$(app_get "$app" php)"
+    if ! grep -qE '^[[:space:]]*ssl_certificate[[:space:]]' "/etc/nginx/sites-available/${app}" 2>/dev/null; then
+        error "The vhost of '${app}' could not be switched to HTTPS: /etc/nginx/sites-available/${app}"
+        return 1
+    fi
+    reload_nginx
+}
+
+# What every successful install does after the vhost serves the certificate.
+#   <how>      logged ("http-01", "dns-01 provider=… account=…")
+#   <details>  extra notification lines, already "\n"-separated
+_ssl_installed() {
+    local app="$1" d="$2" how="$3" details="${4:-}" kind=""
+    [[ "$how" == dns-01* ]] && kind=" (DNS-01)"
+    sed -i "s|^APP_URL=http://|APP_URL=https://|" "/home/${app}/shared/.env" 2>/dev/null || true
+    # A certificate turns ws:// into wss:// for a Reverb app: without this
+    # the browser blocks the socket as mixed content while nginx is already
+    # serving it over TLS, and nothing shows up in the Reverb log.
+    if [[ -n "$(app_get "$app" reverb)" ]]; then
+        declare -f _reverb_sync_env >/dev/null 2>&1 || source "${CIPI_LIB}/app.sh"
+        _reverb_sync_env "$app"
+    fi
+    log_action "SSL INSTALLED: $app ${how}"
+    cipi_notify \
+        "Cipi SSL installed${kind}: ${d} (${app}) on $(hostname)" \
+        "An SSL certificate was installed.\n\nServer: $(hostname)\nApp: ${app}\nDomain: ${d}\n${details}Time: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        ssl_install
+}
+
+# Names the app serves that its certificate does not cover, one per line.
+_ssl_uncovered_names() {
+    local app="$1" files cert d n
+    files=$(app_tls_files "$app") || return 0
+    cert="${files%%$'\t'*}"
+    local names; names=$(cert_file_names "$cert")
+    d=$(app_get "$app" domain)
+    while IFS= read -r n; do
+        [[ -n "$n" ]] || continue
+        cert_names_cover "$n" <<< "$names" || echo "$n"
+    done < <(echo "$d"; vault_read apps.json | jq -r --arg a "$app" --arg d "$d" '.[$a].aliases // [] | map(select(. != $d)) | .[]' 2>/dev/null || true)
+}
+
 _ssl_install() {
     local app="${1:-}"; shift || true
-    [[ -z "$app" ]] && { error "Usage: cipi ssl install <app> [--dns=cloudflare [--account=NAME] [--wildcard]]"; exit 1; }
+    [[ -z "$app" ]] && { error "Usage: cipi ssl install <app> [--dns=cloudflare [--account=NAME] [--wildcard|--no-wildcard]] [--http]"; exit 1; }
     app_exists "$app" || { error "App '$app' not found"; exit 1; }
     parse_args "$@"
     local d; d=$(app_get "$app" domain)
@@ -241,25 +310,28 @@ _ssl_install() {
         exit 1
     fi
 
-    local dns_provider="${ARG_dns:-}"
-    local wildcard="${ARG_wildcard:-}"
+    local dns_provider="${ARG_dns:-}" wildcard=""
+    if [[ "${ARG_wildcard:-}" == "true" && "${ARG_no_wildcard:-}" == "true" ]]; then
+        error "--wildcard and --no-wildcard exclude each other"; exit 1
+    fi
+    [[ "${ARG_wildcard:-}" == "true" ]] && wildcard="true"
+    [[ "${ARG_no_wildcard:-}" == "true" ]] && wildcard="false"
+    if [[ "${ARG_http:-}" == "true" && -n "$dns_provider" ]]; then
+        error "--http and --dns exclude each other"; exit 1
+    fi
     if [[ -n "${ARG_account:-}" && -z "$dns_provider" ]]; then
         error "--account selects a Cloudflare account for DNS-01: add --dns=cloudflare"
         exit 1
     fi
 
-    if [[ -z "$dns_provider" ]]; then
-        if [[ "$(app_get "$app" ssl_origin_ca)" == "true" ]]; then
-            error "App '${app}' uses a Cloudflare Origin CA certificate (cipi zt origin-cert)."
-            echo -e "  ${DIM}HTTP-01 would overwrite it. Keep Origin CA, or: cipi ssl install ${app} --dns=cloudflare${NC}"
-            exit 1
-        fi
-        if _ssl_zt_lock_http; then
-            error "HTTP-01 cannot work while cipi zt lock http is on (Let's Encrypt does not come from Cloudflare IPs)."
-            echo -e "  ${DIM}cipi ssl install ${app} --dns=cloudflare${NC}"
-            echo -e "  ${DIM}cipi zt origin-cert ${app}${NC}"
-            echo -e "  ${DIM}cipi zt unlock http${NC}  (only if you really want HTTP-01 again)"
-            exit 1
+    # A certificate issued over DNS-01 is reissued over DNS-01. Over HTTP-01
+    # certbot would replace its names — a wildcard is dropped — and its
+    # renewals would leave the Cloudflare token for port 80.
+    if [[ -z "$dns_provider" && "${ARG_http:-}" != "true" ]]; then
+        local stored; stored=$(app_get "$app" ssl_dns_provider)
+        if [[ -n "$stored" ]]; then
+            dns_provider="$stored"
+            info "'${app}' has a DNS-01 certificate (${stored}, account $(app_get "$app" ssl_dns_account | grep . || echo default)) — reissuing it over DNS-01. To go back to HTTP-01: --http"
         fi
     fi
 
@@ -268,76 +340,74 @@ _ssl_install() {
         return $?
     fi
 
+    if [[ "$wildcard" == "true" ]]; then
+        error "--wildcard needs DNS-01: Let's Encrypt validates a wildcard name over DNS only."
+        echo -e "  ${DIM}cipi ssl install ${app} --dns=cloudflare --wildcard   (see: cipi help ssl)${NC}"
+        exit 1
+    fi
+    if [[ "$(app_get "$app" ssl_origin_ca)" == "true" ]]; then
+        error "App '${app}' uses a Cloudflare Origin CA certificate (cipi zt origin-cert)."
+        echo -e "  ${DIM}HTTP-01 would replace it. Keep Origin CA, or: cipi ssl install ${app} --dns=cloudflare${NC}"
+        exit 1
+    fi
+    if _ssl_zt_lock_http; then
+        error "HTTP-01 cannot work while cipi zt lock http is on (Let's Encrypt does not come from Cloudflare IPs)."
+        echo -e "  ${DIM}cipi ssl install ${app} --dns=cloudflare${NC}"
+        echo -e "  ${DIM}cipi zt origin-cert ${app}${NC}"
+        echo -e "  ${DIM}cipi zt unlock http${NC}  (only if you really want HTTP-01 again)"
+        exit 1
+    fi
+
     # Let's Encrypt issues a wildcard certificate over DNS-01 only. Sending
     # "*.example.com" to the HTTP-01 challenge fails the *whole* order, so the
     # primary is refused up front and a wildcard alias is left out of this
     # certificate instead of taking the other domains down with it.
     if domain_is_wildcard "$d"; then
         error "'${d}' is a wildcard domain — HTTP-01 cannot validate it."
-        echo -e "  ${DIM}cipi ssl dns set --provider=cloudflare --token=<TOKEN>${NC}"
+        echo -e "  ${DIM}cipi ssl dns set --token=<CLOUDFLARE_API_TOKEN>${NC}"
         echo -e "  ${DIM}cipi ssl install ${app} --dns=cloudflare${NC}"
         exit 1
     fi
 
-    local domains="-d ${d}"
-    local aliases skipped=""
-    # Exclude primary domain from aliases to avoid duplicates
-    aliases=$(vault_read apps.json | jq -r --arg a "$app" --arg d "$d" '.[$a].aliases // [] | map(select(. != $d)) | .[]' 2>/dev/null || true)
-    while read -r a; do
-        [[ -n "$a" ]] || continue
-        if domain_is_wildcard "$a"; then
-            skipped="${skipped} ${a}"
-            continue
-        fi
-        domains+=" -d ${a}"
-    done <<< "${aliases:-}"
+    local -a dargs=() hnames=()
+    local n skipped
+    while IFS= read -r n; do
+        [[ -n "$n" ]] || continue
+        hnames+=("$n")
+        dargs+=(-d "$n")
+    done < <(_ssl_app_cert_names "$app" http)
+    skipped=$(vault_read apps.json | jq -r --arg a "$app" '.[$a].aliases // [] | map(select(startswith("*."))) | map(" " + .) | join("")' 2>/dev/null || true)
     if [[ -n "$skipped" ]]; then
-        warn "Skipping wildcard alias(es):${skipped} — they need DNS-01 (cipi ssl install ${app} --dns=cloudflare)"
+        warn "Left out of this certificate:${skipped} — a wildcard name is validated over DNS-01 only."
+        echo -e "  ${DIM}Its subdomains are served without a valid certificate until: cipi ssl install ${app} --dns=cloudflare${NC}"
     fi
 
+    local cert; cert=$(domain_cert_name "$d")
     echo ""
-    step "Installing SSL for ${d}$([ -n "${aliases}" ] && echo " + aliases")..."
+    step "Requesting a Let's Encrypt certificate (HTTP-01) for ${d}$([[ ${#dargs[@]} -gt 2 ]] && echo " + $(( ${#dargs[@]} / 2 - 1 )) alias(es)")..."
     echo ""
 
-    if certbot --nginx $domains \
-        --cert-name "$(domain_cert_name "$d")" \
+    if ! certbot certonly --nginx "${dargs[@]}" \
+        --cert-name "$cert" \
         --expand \
         --non-interactive \
         --agree-tos \
-        --register-unsafely-without-email \
-        $(_ssl_certbot_redirect_flag "$app") 2>&1; then
-
-        # Force nginx test + reload after certbot modifies the vhost
-        if nginx -t 2>&1; then
-            systemctl reload nginx 2>/dev/null || true
-        else
-            error "Nginx config test failed after certbot modification. Check: nginx -t"
-            exit 1
-        fi
-
-        sed -i "s|^APP_URL=http://|APP_URL=https://|" "/home/${app}/shared/.env" 2>/dev/null || true
-        app_set "$app" force_https "true"
-        app_unset "$app" ssl_dns_provider 2>/dev/null || true
-        # A certificate turns ws:// into wss:// for a Reverb app: without this
-        # the browser blocks the socket as mixed content while nginx is already
-        # serving it over TLS, and nothing shows up in the Reverb log.
-        if [[ -n "$(app_get "$app" reverb)" ]]; then
-            declare -f _reverb_sync_env >/dev/null 2>&1 || source "${CIPI_LIB}/app.sh"
-            _reverb_sync_env "$app"
-        fi
-
-        log_action "SSL INSTALLED: $app"
-        cipi_notify \
-            "Cipi SSL installed: ${d} (${app}) on $(hostname)" \
-            "An SSL certificate was installed.\n\nServer: $(hostname)\nApp: ${app}\nDomain: ${d}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
-            ssl_install
+        --register-unsafely-without-email 2>&1; then
         echo ""
-        success "SSL installed for ${d}"
-    else
-        echo ""
-        error "SSL failed. Check: DNS points to this server, port 80 is open, domain is correct."
+        error "SSL failed. Check: DNS of every name points to this server, port 80 is open, domain is correct."
+        echo -e "  ${DIM}Behind the Cloudflare proxy, DNS-01 avoids all of that: cipi ssl install ${app} --dns=cloudflare${NC}"
         exit 1
     fi
+
+    app_set "$app" force_https "true"
+    app_unset "$app" ssl_dns_provider 2>/dev/null || true
+    app_unset "$app" ssl_dns_account 2>/dev/null || true
+    app_unset "$app" ssl_wildcard 2>/dev/null || true
+    certbot_ensure_reload_hook || true
+    _ssl_apply_vhost "$app" || exit 1
+    _ssl_installed "$app" "$d" "http-01 names=${hnames[*]}" "Names: ${hnames[*]}\n"
+    echo ""
+    success "SSL installed for ${d}"
 }
 
 _ssl_install_dns01() {
@@ -363,35 +433,35 @@ _ssl_install_dns01() {
         error "certbot not found"; exit 1
     fi
 
-    # Apex for wildcard: drop the wildcard label and a leading www. so
-    # "*.apex" is built once, whether or not the primary is already a wildcard.
-    local apex; apex=$(domain_cert_name "$d")
-    [[ "$apex" == www.* ]] && apex="${apex#www.}"
+    # --wildcard / --no-wildcard, else what the certificate had last time.
+    [[ -z "$wildcard" ]] && wildcard=$(app_get "$app" ssl_wildcard)
+    [[ "$wildcard" == "true" ]] || wildcard="false"
+
     # certbot rejects "*" in a lineage name and stores a wildcard cert under the
     # bare domain, so the whole app must address it by that name.
     local cert; cert=$(domain_cert_name "$d")
-
-    local domains="-d ${d}"
-    if [[ "$wildcard" == "true" ]]; then
-        domains="-d ${apex} -d *.${apex}"
-        # Cert name stays on primary app domain for certbot install compatibility
-    else
-        local aliases
-        aliases=$(vault_read apps.json | jq -r --arg a "$app" --arg d "$d" '.[$a].aliases // [] | map(select(. != $d)) | .[]' 2>/dev/null || true)
-        while read -r a; do
-            [[ -n "$a" ]] && domains+=" -d ${a}"
-        done <<< "${aliases:-}"
+    # An array: "*.example.com" must never meet pathname expansion.
+    local -a dargs=() names=()
+    local n
+    while IFS= read -r n; do
+        [[ -n "$n" ]] || continue
+        names+=("$n")
+        dargs+=(-d "$n")
+    done < <(_ssl_app_cert_names "$app" "$wildcard")
+    if [[ ${#names[@]} -gt 100 ]]; then
+        error "${#names[@]} names — a Let's Encrypt certificate holds 100 at most. A wildcard alias covers every subdomain in one name."
+        exit 1
     fi
 
     echo ""
-    step "Installing SSL via DNS-01 (${provider}, account ${account}) for ${d}${wildcard:+ (wildcard)}..."
+    step "Requesting a Let's Encrypt certificate (DNS-01, ${provider} account ${account}) for: ${names[*]}"
     echo ""
 
     if ! certbot certonly \
         --dns-cloudflare \
         --dns-cloudflare-credentials "$creds" \
         --dns-cloudflare-propagation-seconds 30 \
-        $domains \
+        "${dargs[@]}" \
         --cert-name "${cert}" \
         --non-interactive \
         --agree-tos \
@@ -402,58 +472,47 @@ _ssl_install_dns01() {
         exit 1
     fi
 
-    if ! certbot install --nginx --cert-name "${cert}" --non-interactive $(_ssl_certbot_redirect_flag "$app") 2>&1; then
-        error "Certificate issued but nginx install failed. Check: nginx -t"
-        error "The certificate is saved under /etc/letsencrypt/live/${cert} — reapply with: cipi ssl force ${app}"
-        exit 1
-    fi
-
-    if nginx -t 2>&1; then
-        systemctl reload nginx 2>/dev/null || true
-    else
-        error "Nginx config test failed after certbot install. Check: nginx -t"
-        exit 1
-    fi
-
-    sed -i "s|^APP_URL=http://|APP_URL=https://|" "/home/${app}/shared/.env" 2>/dev/null || true
     app_set "$app" force_https "true"
     app_set "$app" ssl_dns_provider "$provider"
     app_set "$app" ssl_dns_account "$account"
-    # Same as HTTP-01 above: move a Reverb app's clients onto wss://.
-    if [[ -n "$(app_get "$app" reverb)" ]]; then
-        declare -f _reverb_sync_env >/dev/null 2>&1 || source "${CIPI_LIB}/app.sh"
-        _reverb_sync_env "$app"
-    fi
+    if [[ "$wildcard" == "true" ]]; then app_set "$app" ssl_wildcard "true"; else app_unset "$app" ssl_wildcard 2>/dev/null || true; fi
+    # Let's Encrypt takes over from a Cloudflare Origin CA certificate.
+    app_unset "$app" ssl_origin_ca 2>/dev/null || true
+    certbot_ensure_reload_hook || true
+    _ssl_apply_vhost "$app" || exit 1
+    _ssl_installed "$app" "$d" "dns-01 provider=${provider} account=${account} wildcard=${wildcard} names=${names[*]}" \
+        "Provider: ${provider}\nAccount: ${account}\nWildcard: ${wildcard}\nNames: ${names[*]}\n"
 
-    log_action "SSL INSTALLED DNS-01: $app provider=$provider account=$account wildcard=${wildcard:-false}"
-    cipi_notify \
-        "Cipi SSL installed (DNS-01): ${d} (${app}) on $(hostname)" \
-        "An SSL certificate was installed via DNS-01.\n\nServer: $(hostname)\nApp: ${app}\nDomain: ${d}\nProvider: ${provider}\nAccount: ${account}\nWildcard: ${wildcard:-false}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
-        ssl_install
     echo ""
     success "SSL installed for ${d} via DNS-01 (${provider}, account ${account})"
+    echo -e "  ${DIM}Certificate names: ${names[*]}${NC}"
+    # A wildcard certificate does not route anything by itself: nginx sends a
+    # subdomain to this app only when "*.<apex>" is one of its names.
+    local wname
+    for wname in "${names[@]}"; do
+        domain_is_wildcard "$wname" || continue
+        if [[ "$wname" != "$d" ]] && ! vault_read apps.json | jq -e --arg a "$app" --arg w "$wname" '(.[$a].aliases // []) | index($w) != null' >/dev/null 2>&1; then
+            info "The certificate covers ${wname}, but those subdomains are not routed to '${app}'."
+            echo -e "  ${DIM}To serve them here (multi-tenant): cipi alias add ${app} '${wname}'${NC}"
+        fi
+    done
 }
 
 # Re-apply HTTP → HTTPS redirect for an app that already has a certificate.
-# Useful after vhost regeneration (alias/www/basicauth) when the Certbot
-# redirect block was overwritten. No new ACME issuance — no rate-limit risk.
+# Rewrites the vhost with it; no ACME round-trip, so no rate-limit risk.
 _ssl_force() {
     local app="${1:-}"; [[ -z "$app" ]] && { error "Usage: cipi ssl force <app>"; exit 1; }
     app_exists "$app" || { error "App '$app' not found"; exit 1; }
     local d; d=$(app_get "$app" domain)
     [[ -z "$d" ]] && { error "No domain for app '$app'"; exit 1; }
 
-    local cert; cert=$(domain_cert_name "$d")
-    if [[ ! -d "/etc/letsencrypt/live/${cert}" ]]; then
+    if ! app_has_tls "$app"; then
         error "No SSL certificate for '${d}'. Run: cipi ssl install ${app}"
         exit 1
     fi
     if [[ ! -f "/etc/nginx/sites-available/${app}" ]]; then
         error "Nginx vhost for '${app}' not found."
         exit 1
-    fi
-    if ! command -v certbot &>/dev/null; then
-        error "certbot not found"; exit 1
     fi
 
     if _ssl_app_on_tunnel "$app"; then
@@ -463,18 +522,12 @@ _ssl_force() {
     fi
 
     step "Forcing HTTP → HTTPS redirect for ${d}..."
-    if ! certbot install --nginx --cert-name "${cert}" --non-interactive --redirect 2>&1; then
+    app_set "$app" force_https "true"
+    if ! _ssl_apply_vhost "$app"; then
         error "Failed to apply HTTPS redirect. Check: nginx -t"
         exit 1
     fi
-    if nginx -t 2>&1; then
-        systemctl reload nginx 2>/dev/null || true
-    else
-        error "Nginx config test failed after redirect. Check: nginx -t"
-        exit 1
-    fi
 
-    app_set "$app" force_https "true"
     log_action "SSL FORCE HTTPS: $app"
     cipi_notify \
         "Cipi SSL force HTTPS: ${d} (${app}) on $(hostname)" \
@@ -502,7 +555,9 @@ _ssl_renew() {
 _ssl_status() {
     echo -e "\n${BOLD}SSL certificates${NC}"
     if [[ ! -d /etc/letsencrypt/live ]]; then
-        info "No certificates"
+        info "No Let's Encrypt certificates"
+        echo ""
+        _ssl_status_apps
         return
     fi
     local name
@@ -521,5 +576,37 @@ _ssl_status() {
         fi
         printf "  %-40s %s%b\n" "$cn" "$expiry" "$via"
     done
+    echo ""
+    _ssl_status_apps
+}
+
+# Per app: what its HTTPS is served with, and the names it serves that the
+# certificate does not cover (a browser shows those as not secure, and behind
+# the Cloudflare proxy "Full (strict)" answers 526 for them).
+_ssl_status_apps() {
+    local apps app files src uncovered
+    apps=$(vault_read apps.json 2>/dev/null | jq -r 'keys[]' 2>/dev/null || true)
+    [[ -n "$apps" ]] || return 0
+    echo -e "${BOLD}Apps${NC}"
+    while IFS= read -r app; do
+        [[ -n "$app" ]] || continue
+        if ! files=$(app_tls_files "$app"); then
+            printf "  %-20s ${DIM}%s${NC}\n" "$app" "HTTP only — cipi ssl install ${app}"
+            continue
+        fi
+        if [[ "$(app_get "$app" ssl_origin_ca)" == "true" && "$files" == "${CIPI_ORIGIN_CERT_DIR}/"* ]]; then
+            src="Cloudflare Origin CA (proxied traffic only)"
+        elif [[ -n "$(app_get "$app" ssl_dns_provider)" ]]; then
+            src="Let's Encrypt, DNS-01 $(app_get "$app" ssl_dns_provider):$(app_get "$app" ssl_dns_account | grep . || echo default)"
+        else
+            src="Let's Encrypt, HTTP-01"
+        fi
+        uncovered=$(_ssl_uncovered_names "$app" | tr '\n' ' ')
+        if [[ -n "$uncovered" ]]; then
+            printf "  %-20s %s  ${YELLOW}not covered: %s${NC}\n" "$app" "$src" "${uncovered% }"
+        else
+            printf "  %-20s %s  ${GREEN}✓${NC}\n" "$app" "$src"
+        fi
+    done <<< "$apps"
     echo ""
 }

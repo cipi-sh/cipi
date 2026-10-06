@@ -64,7 +64,7 @@ _render_vhost() {
         _ensure_nginx_octane_map() { :; }
         source lib/app.sh
         tmp=$(mktemp -d); mkdir -p "${tmp}/etc/nginx/sites-available"
-        declare -f _nginx_cipi_yml_deny_block _nginx_reverb_location_block _create_nginx_vhost \
+        declare -f _nginx_cipi_yml_deny_block _nginx_reverb_location_block _create_nginx_vhost _create_nginx_vhost_http _nginx_vhost_tls \
             | sed "s#/etc/nginx/#${tmp}/etc/nginx/#g" > "${tmp}/v.sh"
         source "${tmp}/v.sh"
         if [[ "$kind" == custom ]]; then

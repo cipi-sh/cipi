@@ -917,6 +917,18 @@ install_certbot() {
 
     _cipi_apt_install -y -qq certbot python3-certbot-nginx
 
+    # certbot only issues and renews; Cipi writes the HTTPS vhost itself. A
+    # renewed certificate is served once nginx reloads, and certbot runs this
+    # hook after every renewal — certbot.timer and the weekly cron alike.
+    mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+    cat > /etc/letsencrypt/renewal-hooks/deploy/cipi-reload-nginx <<'HOOKEOF'
+#!/bin/sh
+# Managed by Cipi — certbot runs this after every renewed certificate, so that
+# nginx serves it. A failing config test is reported by certbot, not hidden.
+nginx -t -q && exec systemctl reload nginx
+HOOKEOF
+    chmod 755 /etc/letsencrypt/renewal-hooks/deploy/cipi-reload-nginx
+
     echo -e "${GREEN}✓ Certbot${NC}"
 }
 
@@ -1166,8 +1178,9 @@ AUEOF
 50 3 * * * /usr/local/bin/cipi-cron-notify self-update /usr/local/bin/cipi self-update >> /var/log/cipi/cipi.log 2>&1
 # PHP security patch check (Sunday 3:30 AM)
 30 3 * * 0 /usr/local/bin/cipi-cron-notify php-upgrade /usr/local/bin/cipi php upgrade >> /var/log/cipi/php-upgrade.log 2>&1
-# SSL renewal (Sunday 4 AM)
-10 4 * * 0 /usr/local/bin/cipi-cron-notify ssl-renew certbot renew --nginx --non-interactive --post-hook "systemctl reload nginx" >> /var/log/cipi/certbot.log 2>&1
+# SSL renewal (Sunday 4 AM) — no --nginx: each certificate renews the way it
+# was issued (HTTP-01 via nginx, DNS-01 via Cloudflare for wildcards)
+10 4 * * 0 /usr/local/bin/cipi-cron-notify ssl-renew certbot renew --non-interactive --post-hook "systemctl reload nginx" >> /var/log/cipi/certbot.log 2>&1
 # Security updates — unattended-upgrades handles this daily via APT::Periodic
 # Stack patches (nginx / MariaDB / PostgreSQL / Valkey): no cron — run
 #   cipi nginx upgrade / cipi db upgrade / cipi service upgrade valkey

@@ -515,9 +515,22 @@ When you need to manage apps programmatically or integrate with external pipelin
 
 ### 🖥️ Web GUI (optional)
 
-Multi-server control panel for operators who prefer a browser over SSH. Register N Cipi servers with API tokens, switch between them from any page, and manage apps, databases, deploys, SSL, aliases, and logs with Livewire UI and async job overlays. Install with **`cipi gui <domain>`** — requires **`cipi api`** on each managed server. Session login with optional Google Authenticator 2FA.
+A self-hosted control panel for operators who prefer a browser over SSH. One login manages any number of Cipi servers through their REST API: register each server with a token, then switch between them from the header on any page.
 
-[GitHub](https://github.com/cipi-sh/gui)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://cipi.sh/img/gui/dashboard-light.webp">
+  <img alt="Cipi control panel: dashboard with three connected servers" src="https://cipi.sh/img/gui/dashboard.webp">
+</picture>
+
+- **Apps** — create Laravel (PHP-FPM or Octane), Node (SPA, static, SSR) and custom PHP apps; deploy, roll back and unlock; the deploy audit ledger and the `deploy.php` pipeline; domains, SSL, www ↔ apex, whole-app and path redirects, prefix proxies; `.env` with masked secrets, Composer `auth.json`, Artisan and whitelisted commands; basic auth, healthchecks, Meilisearch; logs with live refresh.
+- **Databases** — MariaDB and PostgreSQL: create, back up, restore, rotate passwords.
+- **Server** — overview, PHP versions, Node runtimes, database engines, services, healthchecks, monitor, email notifications, SSH keys, packages, Cloudflare Zero Trust and the API IP whitelist.
+- **Jobs** — long operations run on the server; the panel shows their output and lists one-time credentials (SSH and database passwords, deploy key, webhook token) with copy buttons.
+- **Security** — session login with TOTP 2FA, tokens encrypted at rest, nothing installed on the managed servers besides `cipi api`.
+
+Install with **`cipi gui <domain>`** (then `cipi gui ssl`) — requires **`cipi api`** on each managed server. What is CLI-only by design (installing software, `cipi disk`, `cipi ssh apps`, firewall thresholds, dropping databases) stays on the CLI.
+
+[Docs and screenshots](https://cipi.sh/docs/gui#gui-tour) · [GitHub](https://github.com/cipi-sh/gui)
 
 ### 🔁 Sync Between Servers
 

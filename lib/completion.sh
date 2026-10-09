@@ -315,7 +315,10 @@ _cipi_complete() {
             case $pos in
                 1) sub="generate example validate plan apply auto post-deploy" ;;
                 2) sub="$(_cipi_apps)" ;;
-                3) case "$w1" in auto) sub="on off status" ;; esac ;;
+                3) case "$w1" in
+                       auto) sub="on off status" ;;
+                       generate|dump) sub="--save --force" ;;
+                   esac ;;
             esac ;;
 
         nginx)

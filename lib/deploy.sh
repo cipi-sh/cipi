@@ -245,9 +245,11 @@ _deploy_run() {
             /usr/local/bin/cipi-scan-manifest "$app" >/dev/null 2>&1 || true
         fi
         [[ $post_rc -ne 0 ]] && warn "Post-deploy steps failed — see the deploy log."
+        local yml_mail=""
+        [[ -n "${_DEPLOY_YML_LINE:-}" ]] && yml_mail="cipi.yml: ${_DEPLOY_YML_LINE}\n"
         cipi_notify \
             "Cipi deploy succeeded: ${app} release ${rel_after:-?} on $(hostname)" \
-            "Deploy completed successfully.\n\n$(_deploy_release_details "$app" "$rel_after" "$branch_disp" "$secs")Previous release: ${rel_before:-none}\nPost-deploy: ${post_line}\nHealthcheck: ${health_line}\n" \
+            "Deploy completed successfully.\n\n$(_deploy_release_details "$app" "$rel_after" "$branch_disp" "$secs")Previous release: ${rel_before:-none}\nPost-deploy: ${post_line}\n${yml_mail}Healthcheck: ${health_line}\n" \
             deploy_success
         [[ $post_rc -ne 0 ]] && return "$post_rc"
     else
@@ -453,14 +455,33 @@ _deploy_run_post_deploy() {
     return "$rc"
 }
 
+_deploy_yml_line() {
+    # $1 = deploy log  $2 = first line of this apply (older deploys share the file)
+    local lf="$1" mark="${2:-1}" raw
+    raw=$(tail -n +"$mark" "$lf" 2>/dev/null | grep 'cipi.yml-result:' | tail -1 | sed 's/.*cipi.yml-result: //' || true)
+    case "$raw" in
+        applied=*) echo "applied ${raw#applied=} change(s)" ;;
+        unchanged) echo "already matches" ;;
+        no-file)   echo "no cipi.yml in this release" ;;
+        blocked)   echo "NOT applied — the plan was blocked (see the deploy log)" ;;
+        invalid)   echo "NOT applied — cipi.yml failed validation (see the deploy log)" ;;
+        disabled)  echo "NOT applied — auto-apply is not enabled" ;;
+        failed=*)  echo "NOT applied cleanly (${raw}) — see the deploy log" ;;
+        "")        echo "" ;;
+        *)         echo "$raw" ;;
+    esac
+}
+
 _deploy_apply_yml() {
     local app="$1"
+    _DEPLOY_YML_LINE=""
     [[ "$(app_get "$app" yml_auto)" == "true" ]] || return 0
 
     local lf; lf=$(deploy_log_file "$app")
     echo ""
     step "Applying cipi.yml..."
     printf '[%(%Y-%m-%d %H:%M:%S)T] ===== cipi.yml apply =====\n' -1 >> "$lf" 2>/dev/null || true
+    local mark; mark=$(wc -l < "$lf" 2>/dev/null || echo 0)
 
     local rc=0 had_e=0
     [[ $- == *e* ]] && had_e=1
@@ -472,6 +493,14 @@ _deploy_apply_yml() {
     if [[ $rc -ne 0 ]]; then
         warn "cipi.yml was not applied — the deploy itself succeeded."
         warn "Details: ${lf}   Retry: cipi yml apply ${app}"
+    fi
+    _DEPLOY_YML_LINE=$(_deploy_yml_line "$lf" "$((mark + 1))")
+    if [[ -z "$_DEPLOY_YML_LINE" ]]; then
+        if [[ $rc -ne 0 ]]; then
+            _DEPLOY_YML_LINE="NOT applied — see ${lf}"
+        else
+            _DEPLOY_YML_LINE="ok"
+        fi
     fi
     chown "${app}:www-data" "$lf" 2>/dev/null || true
     return 0

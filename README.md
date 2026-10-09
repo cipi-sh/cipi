@@ -182,8 +182,9 @@ none, because it still looks configured.
 An app can carry a `cipi.yml` in its repository describing the state it expects:
 domain aliases, the www redirect, HTTP basic auth, redirects and prefix proxies,
 Meilisearch for Scout, PHP version, settings and limits, its extra databases, its queue workers, its healthcheck,
-its deploy recipe options (`keep_releases`, the artisan hooks, the pre-deploy
-snapshot), the forced HTTPS redirect, the `.env` variables it requires (names
+its deploy recipe options (`keep_releases`, the artisan hooks, `predeploy_snapshot`,
+and `node_build` — the asset build, which runs before the release goes live),
+the forced HTTPS redirect, the `.env` variables it requires (names
 only, never values), its scheduled commands (`crons`),
 its backup strategy, and **post-deploy steps** (`deploy.post`).
 `cipi yml plan` shows exactly what would change and `cipi yml apply` applies it.
@@ -193,16 +194,17 @@ Server reconciliation (aliases, PHP, workers, databases, …) is **opt-in**:
 (from `cipi deploy` or the Git webhook). A release without the file is a no-op.
 
 **`deploy.post` is different** — it runs after every successful deploy as soon
-as the section is in the committed file, with no auto switch. Steps use
+as the section is in the committed file, with no auto switch, and only once
+the release is already live. It is not where the asset build goes. Steps use
 allowlisted runners only (`artisan`, `npm`, `composer`, `php`, `node`, …); no
 shell, no pipes. After Deployer, optional `cipi yml apply`, then `deploy.post`,
 then the post-deploy healthcheck.
 
 ```yaml
 deploy:
-  post:
-    - artisan cache:clear
-    - npm run build
+  node_build: "npm ci && npm run build"   # before the release goes live
+  # post:
+  #   - artisan cache:clear               # after the release is live
   # post_on_failure: abort   # default warn — log + email, release stays live
 ```
 
@@ -230,11 +232,13 @@ crons:
 deploy:
   keep_releases: 3             # cipi app deploy-config, from the repository
   migrate: false
-  snapshot: true               # DB snapshot before each deploy
+  predeploy_snapshot: true     # DB snapshot before each deploy
+  node_build: "npm ci && npm run build"
 ```
 
 ```bash
-cipi yml generate myapp > cipi.yml   # start from the server
+cipi yml generate myapp --save       # writes /home/myapp/cipi.yml
+cipi yml generate myapp > cipi.yml   # or print it
 cipi yml example myapp > cipi.yml    # or a commented template
 cipi yml plan myapp                  # server diff + "After deploy" steps
 cipi yml post-deploy myapp           # run deploy.post now (test)
@@ -252,6 +256,10 @@ go through the same allowlisted runners as `deploy.post` — never a free-form
 shell line — and only replace the crontab entries the file manages, tagged
 `# cipi-yml`. `app.limits` values outside the CLI's bounds block the plan instead
 of being clamped, and `ssl.force_https` can only ever be turned on from the file.
+A `backup:` section is the list of profiles this file owns: one it no longer
+names is removed from the schedule (the archives stay until `cipi backup prune`).
+A profile added with `cipi backup profile add` is not touched unless the file
+names it. `deploy.snapshot` is still read; the name to write is `predeploy_snapshot`.
 
 ### ⚛️ Node Frontends: SPA, Static and SSR
 
@@ -465,6 +473,8 @@ cipi disk --json     # the same figures for scripts (also: cipi disk db --json)
 
 MariaDB and PostgreSQL give one size per database. Valkey only knows how many keys each of its databases holds, and Meilisearch how many documents each index has (plus the size of an index's documents on recent versions): for those two the size in MB is the engine's, in memory and on disk. An engine that is not installed is left out.
 
+**The same figures over the API.** With [cipi/api](https://github.com/cipi-sh/api) 1.33+ on the server (Cipi 5.5.2+ for the sudoers entry), `GET /api/disk` and `GET /api/disk/dbs` return what `cipi disk --json` and `cipi disk db --json` print, read-only, behind the token ability `disk-view` — `cipi-cli disk`, the GUI's Server → Disk tab and the MCP tools `DiskUsage` / `DiskDatabases` use them.
+
 **A soft limit per app.** No app has a limit until you give it one. A limit is a number of GB for files and database together (the TOTAL column), and it is a notification threshold: nothing is blocked and the app keeps working when it is passed.
 
 ```bash
@@ -528,7 +538,7 @@ A self-hosted control panel for operators who prefer a browser over SSH. One log
 - **Jobs** — long operations run on the server; the panel shows their output and lists one-time credentials (SSH and database passwords, deploy key, webhook token) with copy buttons.
 - **Security** — session login with TOTP 2FA, tokens encrypted at rest, nothing installed on the managed servers besides `cipi api`.
 
-Install with **`cipi gui <domain>`** (then `cipi gui ssl`) — requires **`cipi api`** on each managed server. What is CLI-only by design (installing software, `cipi disk`, `cipi ssh apps`, firewall thresholds, dropping databases) stays on the CLI.
+Install with **`cipi gui <domain>`** (then `cipi gui ssl`) — requires **`cipi api`** on each managed server. What is CLI-only by design (installing software, `cipi ssh apps`, firewall thresholds, dropping databases) stays on the CLI.
 
 [Docs and screenshots](https://cipi.sh/docs/gui#gui-tour) · [GitHub](https://github.com/cipi-sh/gui)
 

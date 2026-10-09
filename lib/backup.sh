@@ -50,6 +50,20 @@ _bk_cfg()       { vault_read backup.json 2>/dev/null || echo '{}'; }
 _bk_cfg_write() { vault_write backup.json; }
 _bk_configured() { [[ -f "${CIPI_CONFIG}/backup.json" ]]; }
 
+# Local-only backup.json, for `cipi yml apply` when the file declares profiles
+# and backup was never configured. No prompt and no `default` profile: the
+# file is about to create its own, and a server-wide profile would copy every
+# app. Same shape as `cipi backup configure` with an empty bucket.
+_bk_init_local() {
+    _bk_configured && return 0
+    local cl="${BACKUP_DEFAULT_LOCAL}"
+    mkdir -p "$cl" || return 1
+    chmod 700 "$cl" 2>/dev/null || true
+    jq -n --arg l "$cl" \
+        '{aws_key:"",aws_secret:"",bucket:"",region:"eu-central-1",endpoint_url:"",tmpdir:"/var/tmp",local_dir:$l,profiles:{}}' \
+        | _bk_cfg_write
+}
+
 _bk_require_config() {
     _bk_configured || { error "Backup not configured. Run: cipi backup configure"; exit 1; }
 }
@@ -404,6 +418,22 @@ _bk_profile_toggle() {
     log_action "BACKUP PROFILE $([[ "$on" == "true" ]] && echo ENABLE || echo DISABLE): $p"
 }
 
+# Drop a profile from backup.json and from root's crontab. Archives stay:
+# `cipi backup prune` ages them out with the remaining profiles. Idempotent
+# when the profile is already gone, so `cipi yml apply` can call it without
+# the interactive confirm of `cipi backup profile remove`.
+_bk_profile_delete() {
+    local p="$1"
+    [[ -n "$p" ]] || return 1
+    _bk_configured || return 1
+    if _bk_profile_exists "$p"; then
+        _bk_cfg | jq --arg p "$p" 'del(.profiles[$p])' | _bk_cfg_write || return 1
+        _bk_state_write "$(_bk_state | jq --arg p "$p" 'del(.[$p])')" || return 1
+        _bk_write_cron || return 1
+    fi
+    return 0
+}
+
 _bk_profile_remove() {
     local p="${1:-}"
     [[ -z "$p" ]] && { error "Usage: cipi backup profile remove <name>"; exit 1; }
@@ -413,9 +443,7 @@ _bk_profile_remove() {
         warn "Removing the profile does not delete the archives it already wrote."
         confirm "Remove backup profile '${p}'?" || { info "Cancelled"; return 0; }
     fi
-    _bk_cfg | jq --arg p "$p" 'del(.profiles[$p])' | _bk_cfg_write
-    _bk_state_write "$(_bk_state | jq --arg p "$p" 'del(.[$p])')"
-    _bk_write_cron
+    _bk_profile_delete "$p" || return 1
     success "Profile '${p}' removed"
     log_action "BACKUP PROFILE REMOVE: $p"
 }
@@ -1099,6 +1127,23 @@ _bk_delete_run() {
 
 _bk_orphan_retention_days() {
     _bk_profiles_json | jq -r '[.[] | ((.retention.days // 0) + (.retention.weeks // 0) * 7)] | max // 0' 2>/dev/null || echo 0
+}
+
+# One clause for a cipi.yml plan line. $1 is the profile about to be removed,
+# so its own retention is not counted: after the apply it is gone, and prune
+# uses whatever remains. Count-only retention (keep: N) never ages archives out.
+_bk_orphan_note() {
+    local except="${1:-}" days
+    days=$(_bk_profiles_json | jq -r --arg x "$except" \
+        '[to_entries[] | select(.key != $x) | ((.value.retention.days // 0) + ((.value.retention.weeks // 0) * 7))] | max // 0' \
+        2>/dev/null || echo 0)
+    [[ "$days" =~ ^[0-9]+$ ]] || days=0
+    if [[ "$days" -gt 0 ]]; then
+        printf 'archives kept, pruned after %s days\n' "$days"
+    else
+        printf 'archives kept until a remaining profile sets keep_days or keep_weeks\n'
+    fi
+    return 0
 }
 
 _bk_date_epoch() {

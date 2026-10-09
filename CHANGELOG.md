@@ -4,6 +4,42 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.5.2] — 2026-10-09
+
+### Changed — `cipi disk` is available to the panel API
+
+`cipi disk` and `cipi disk db` were the only host insights still CLI-only. The panel API ([cipi/api](https://github.com/cipi-sh/api) ≥ 1.33.0) now serves the same figures, read-only: `GET /api/disk` (the filesystem `/home` is on, then every app with files, database, total, percentage of the disk, soft limit and whether it is over) and `GET /api/disk/dbs` (every database of every installed engine, in MB), both behind the new token ability `disk-view`. `cipi-cli disk` and the Server → Disk tab of the GUI read them. Sizes are still measured when asked, so a request on a server with large apps takes a few seconds.
+
+Nothing changes in what `cipi disk` prints or measures. Setting a limit (`cipi app limits <app> --disk=`) was already in the API (1.32.0).
+
+### Fixed — `cipi.yml` uses the same deploy names as `cipi app deploy-config`
+
+The file said `deploy.snapshot`. The command prints and stores `predeploy_snapshot`. The file now uses `predeploy_snapshot`. A file that still says `snapshot` is read as before.
+
+`deploy.node_build` is the asset build (`cipi app deploy-config --node-build`, for example `npm ci && npm run build`). It runs inside the deploy, after `composer install` and before the release goes live. `deploy.post` runs only after the release is already serving, so it was the wrong place for that build, and `cipi yml generate` was suggesting `npm run build` there. Generate and `cipi yml example` now show `node_build`. `false` removes the build. A Node app declares its build as `node.build`; putting `deploy.node_build` on a Node app blocks the plan.
+
+### Fixed — `cipi yml apply` removes backup profiles the file dropped
+
+Renaming a profile in `cipi.yml` created the new one and left the old one on the schedule. Profiles this file created (recorded on the app as `backup_profiles`) that the file no longer names are removed. The archives stay; `cipi backup prune` ages them out with whatever retention the remaining profiles still have. A profile created with `cipi backup profile add` is left alone unless the file names it.
+
+A new profile that does not say `destinations` is written where a copy can actually land: S3 when a bucket is configured, this server otherwise. Before, the stored default was S3, and every run failed when there was no bucket.
+
+Declaring `backup:` when backup was never configured, with every profile staying on this server, initialises a local-only configuration (an empty bucket, no server-wide `default` profile) instead of refusing the plan.
+
+### Changed — `cipi yml generate` can write the file
+
+The command still prints the file, which is why `cipi yml generate myapp` left nothing on disk. `--save` writes `/home/<app>/cipi.yml` (outside the release, so the next deploy does not wipe it). `--save=PATH` writes that path. `--force` overwrites. Apply keeps reading the copy committed in the repository.
+
+### Fixed — a failed automatic `cipi.yml` apply shows up on the deploy
+
+With `cipi yml auto <app> on`, apply runs after a successful deploy. A blocked or invalid file was written to the deploy log, and a separate alert was sent only when notifications were configured, so the "deploy succeeded" mail said nothing about it. That mail (from `cipi deploy` and from the Git webhook) now carries one line: applied, already matches, no file in the release, or not applied and why. The deploy itself still succeeds — the code is live either way.
+
+### Migration
+
+`lib/migrations/5.5.2.sh` regenerates `/etc/sudoers.d/cipi-api` so `www-data` may run `cipi disk` and `cipi disk *` (`--json`, `db --json`). Nothing else changes on the server; nothing is deployed.
+
+---
+
 ## [5.5.1] — 2026-10-07
 
 ### Fixed — wildcard certificates were issued but never installed

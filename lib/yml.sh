@@ -16,9 +16,13 @@
 #     deleting apps and users stays a root-only, out-of-band operation.
 #   * Databases and backup profiles it declares must live in the app's own
 #     namespace, so one repository can never touch another app's data.
-#   * Nothing in the schema carries a free-form shell command — except
-#     `deploy.post`, which runs a fixed, allowlisted set of runners (artisan,
-#     npm, composer, …) with strictly validated arguments after each deploy.
+#   * Nothing in the schema carries a free-form shell command. `deploy.post`
+#     runs a fixed, allowlisted set of runners (artisan, npm, composer, …)
+#     with strictly validated arguments after each deploy, once the release
+#     is already live. `deploy.node_build` is the Laravel asset build (the
+#     same command as `cipi app deploy-config --node-build`): one of
+#     node/npm/npx/pnpm/yarn/bun, no pipes, redirects or substitutions, and
+#     it runs inside the recipe, before the release goes live.
 #   * The parser implements a small YAML subset and refuses anchors, aliases,
 #     tags, merge keys, block scalars and flow mappings outright.
 #   * Applying is opt-in per app (`cipi yml auto <app> on`) and otherwise
@@ -859,7 +863,8 @@ class Validator:
             return {}
         self.unknown_keys(m, {"post", "post_on_failure", "keep_releases", "migrate",
                               "optimize", "storage_link", "queue_restart",
-                              "horizon_terminate", "extra_artisan", "snapshot"}, "deploy")
+                              "horizon_terminate", "extra_artisan", "predeploy_snapshot",
+                              "snapshot", "node_build"}, "deploy")
         out = {"post_on_failure": "warn", "post": []}
 
         if "post_on_failure" in m:
@@ -870,19 +875,45 @@ class Validator:
                 else:
                     out["post_on_failure"] = s
 
-        # Recipe options, the same set as `cipi app deploy-config` plus the
-        # pre-deploy snapshot toggle. Only declared keys are reconciled.
+        # Recipe options, with the names `cipi app deploy-config` prints and
+        # takes as flags. Only declared keys are reconciled.
         if "keep_releases" in m:
             v = self.as_int(m["keep_releases"], "deploy.keep_releases",
                             KEEP_RELEASES_MIN, KEEP_RELEASES_MAX)
             if v is not None:
                 out["keep_releases"] = v
         for field in ("migrate", "optimize", "storage_link", "queue_restart",
-                      "horizon_terminate", "snapshot"):
+                      "horizon_terminate"):
             if field in m:
                 b = self.as_bool(m[field], "deploy." + field)
                 if b is not None:
                     out[field] = b
+        # 'snapshot' is the spelling of 5.1–5.5.1, still read; the data always
+        # carries predeploy_snapshot.
+        if "snapshot" in m and "predeploy_snapshot" in m:
+            self.err("deploy.snapshot", "use 'predeploy_snapshot' (its older name 'snapshot' is still read), not both")
+        else:
+            key = "predeploy_snapshot" if "predeploy_snapshot" in m else "snapshot"
+            if key in m:
+                b = self.as_bool(m[key], "deploy." + key)
+                if b is not None:
+                    out["predeploy_snapshot"] = b
+        # The asset build of a Laravel app (cipi app deploy-config --node-build):
+        # it runs inside the recipe, after composer install and before the
+        # release goes live. false or "" removes it.
+        if "node_build" in m:
+            nb = m["node_build"]
+            if nb is False or nb == "":
+                out["node_build"] = ""
+            else:
+                b = self.as_str(nb, "deploy.node_build")
+                if b is not None:
+                    bad = (len(b) > 200 or any(c in b for c in "|<>`") or "$(" in b
+                           or not NODE_BUILD_RE.match(b) or b.split(" ")[0] not in NODE_RUNNERS)
+                    if bad:
+                        self.err("deploy.node_build", "a command starting with node/npm/npx/pnpm/yarn/bun, no pipes, redirects or substitutions (or false for none)")
+                    else:
+                        out["node_build"] = b
         if "extra_artisan" in m:
             lst = self.expect_list(m["extra_artisan"], "deploy.extra_artisan")
             if lst is not None:
@@ -1624,8 +1655,10 @@ _yml_resolve() {
             echo "  Looked in: /home/${app}/current/cipi.yml, current/cipi.yaml, htdocs/cipi.yml, shared/cipi.yml"
             echo ""
             echo "  Start from what this server already has:"
-            echo "    cipi yml generate ${app} > cipi.yml"
-            echo "  Or from a blank template in this app's namespace:"
+            echo "    cipi yml generate ${app} --save"
+            echo "    # writes /home/${app}/cipi.yml — commit that file at the repo root"
+            echo "  Or print it:  cipi yml generate ${app} > cipi.yml"
+            echo "  Or a blank template in this app's namespace:"
             echo "    cipi yml example ${app} > cipi.yml"
             echo "  Then commit it to the repository and deploy."
             exit 1
@@ -1935,20 +1968,23 @@ _yml_build_plan() {
         fi
     fi
 
-    # ── deploy recipe options (cipi app deploy-config) and pre-deploy snapshot.
-    # Only declared keys are reconciled. Custom apps have no zero-downtime
-    # recipe, and a Node recipe has no artisan hooks — both are caught here so
+    # ── deploy recipe options (cipi app deploy-config): the same names, the
+    # pre-deploy snapshot and the asset build included. Only declared keys are
+    # reconciled. Custom apps have no zero-downtime recipe, and a Node recipe
+    # has no artisan hooks (its build is node.build) — both are caught here so
     # apply never regenerates a deploy.php that cannot exist.
     if echo "$_YML_DATA" | jq -e '.deploy | (has("keep_releases") or has("migrate") or has("optimize")
             or has("storage_link") or has("queue_restart") or has("horizon_terminate")
-            or has("extra_artisan") or has("snapshot"))' &>/dev/null; then
+            or has("extra_artisan") or has("predeploy_snapshot") or has("node_build"))' &>/dev/null; then
         local is_node_app=false
         [[ "$(app_get "$app" runtime)" == "node" ]] && is_node_app=true
         if [[ "$is_custom_app" == true ]]; then
             _YML_BLOCKERS+=("deploy recipe options are declared, but '${app}' is a custom app — it has no zero-downtime deploy.php recipe")
+        elif [[ "$is_node_app" == true ]] && echo "$_YML_DATA" | jq -e '.deploy | has("node_build")' &>/dev/null; then
+            _YML_BLOCKERS+=("deploy.node_build is the asset build of a Laravel app — '${app}' is a Node app: declare its build as node.build")
         elif [[ "$is_node_app" == true ]] && echo "$_YML_DATA" | jq -e '.deploy | (has("migrate") or has("optimize")
                 or has("storage_link") or has("queue_restart") or has("horizon_terminate") or has("extra_artisan"))' &>/dev/null; then
-            _YML_BLOCKERS+=("deploy.migrate/optimize/storage_link/queue_restart/horizon_terminate/extra_artisan are artisan hooks, but '${app}' is a Node app — only deploy.keep_releases and deploy.snapshot apply")
+            _YML_BLOCKERS+=("deploy.migrate/optimize/storage_link/queue_restart/horizon_terminate/extra_artisan are artisan hooks, but '${app}' is a Node app — only deploy.keep_releases and deploy.predeploy_snapshot apply")
         else
             local dc_pairs="" dc_want dc_cur dc_f
             dc_want=$(echo "$_YML_DATA" | jq -r '.deploy.keep_releases // empty')
@@ -1962,10 +1998,10 @@ _yml_build_plan() {
                 dc_cur=$(_deploy_cfg_bool "$app" "deploy_${dc_f}" true)
                 [[ "$dc_want" != "$dc_cur" ]] && dc_pairs="${dc_pairs}${dc_pairs:+;}${dc_f}=${dc_want}"
             done
-            dc_want=$(echo "$_YML_DATA" | jq -r 'if .deploy | has("snapshot") then (.deploy.snapshot|tostring) else "" end')
+            dc_want=$(echo "$_YML_DATA" | jq -r 'if .deploy | has("predeploy_snapshot") then (.deploy.predeploy_snapshot|tostring) else "" end')
             if [[ -n "$dc_want" ]]; then
                 dc_cur=$(_deploy_cfg_bool "$app" predeploy_snapshot false)
-                [[ "$dc_want" != "$dc_cur" ]] && dc_pairs="${dc_pairs}${dc_pairs:+;}snapshot=${dc_want}"
+                [[ "$dc_want" != "$dc_cur" ]] && dc_pairs="${dc_pairs}${dc_pairs:+;}predeploy_snapshot=${dc_want}"
             fi
             if echo "$_YML_DATA" | jq -e '.deploy | has("extra_artisan")' &>/dev/null; then
                 dc_want=$(echo "$_YML_DATA" | jq -c '.deploy.extra_artisan')
@@ -1974,6 +2010,19 @@ _yml_build_plan() {
                     && dc_pairs="${dc_pairs}${dc_pairs:+;}extra_artisan=$(jq -r 'join(",")' <<< "$dc_want")"
             fi
             [[ -n "$dc_pairs" ]] && _YML_ACTIONS+=("deploy-cfg|${dc_pairs}|deploy config: ${dc_pairs//;/, } (deploy.php regenerated)")
+            # Its own action: a build command may hold ';' and '=', the
+            # separators of the deploy-cfg pairs. Apply reads it from the data.
+            if echo "$_YML_DATA" | jq -e '.deploy | has("node_build")' &>/dev/null; then
+                dc_want=$(echo "$_YML_DATA" | jq -r '.deploy.node_build')
+                dc_cur=$(app_get "$app" node_build)
+                if [[ "$dc_want" != "$dc_cur" ]]; then
+                    if [[ -z "$dc_want" ]]; then
+                        _YML_ACTIONS+=("node-build||asset build: none (was: ${dc_cur}) — from the next deploy")
+                    else
+                        _YML_ACTIONS+=("node-build||asset build: ${dc_want} — from the next deploy")
+                    fi
+                fi
+            fi
         fi
     fi
 
@@ -2077,28 +2126,68 @@ _yml_build_plan() {
     fi
 
     # ── backup profiles
+    # The declared list is what this file wants: profiles it created earlier
+    # (the app's backup_profiles) and no longer declares are removed. Profiles
+    # made with `cipi backup profile add` are never touched unless declared.
     if echo "$_YML_DATA" | jq -e 'has("backup")' &>/dev/null; then
-        if ! _bk_configured; then
-            _YML_BLOCKERS+=("backup profiles are declared but backup is not configured — run: cipi backup configure")
-        else
-            local pname pjson
-            while IFS= read -r pname; do
-                [[ -n "$pname" ]] || continue
-                pjson=$(echo "$_YML_DATA" | jq -c --arg n "$pname" '.backup.profiles[] | select(.name == $n)')
-                local dests
-                dests=$(echo "$pjson" | jq -r '.destinations[]?' 2>/dev/null || true)
-                if grep -qx 's3' <<< "$dests" && ! _bk_has_s3; then
-                    _YML_BLOCKERS+=("backup profile '${pname}' targets s3 but no bucket is configured")
-                    continue
+        local pname dests needs_s3=false configured=true
+        _bk_configured || configured=false
+        while IFS= read -r pname; do
+            [[ -n "$pname" ]] || continue
+            dests=$(_yml_backup_destinations "$pname")
+            if grep -qx 's3' <<< "$dests"; then
+                needs_s3=true
+                if [[ "$configured" == true ]] && ! _bk_has_s3; then
+                    _YML_BLOCKERS+=("backup profile '${pname}' targets s3 but no bucket is configured — run: cipi backup configure, or use destinations: [local]")
                 fi
-                if _bk_profile_exists "$pname"; then
-                    _YML_ACTIONS+=("backup-profile|${pname}|update backup profile ${pname}")
-                else
-                    _YML_ACTIONS+=("backup-profile|${pname}|create backup profile ${pname}")
-                fi
-            done < <(echo "$_YML_DATA" | jq -r '.backup.profiles[]?.name')
+            fi
+        done < <(echo "$_YML_DATA" | jq -r '.backup.profiles[]?.name')
+
+        if [[ "$configured" != true ]]; then
+            if [[ "$needs_s3" == true ]]; then
+                _YML_BLOCKERS+=("backup profiles target s3 but backup is not configured — run: cipi backup configure (bucket and keys), or use destinations: [local]")
+            elif echo "$_YML_DATA" | jq -e '(.backup.profiles // []) | length > 0' &>/dev/null; then
+                # Nothing to choose for a copy on this server: the defaults of
+                # `cipi backup configure` with an empty bucket, no profile added.
+                _YML_ACTIONS+=("backup-init||backup: local copies only, in ${BACKUP_DEFAULT_LOCAL} (no S3 — cipi backup configure adds a bucket)")
+            fi
         fi
+
+        while IFS= read -r pname; do
+            [[ -n "$pname" ]] || continue
+            if _bk_profile_exists "$pname"; then
+                _YML_ACTIONS+=("backup-profile|${pname}|update backup profile ${pname}")
+            else
+                _YML_ACTIONS+=("backup-profile|${pname}|create backup profile ${pname} ($(_yml_backup_destinations "$pname" | paste -sd, -))")
+            fi
+        done < <(echo "$_YML_DATA" | jq -r '.backup.profiles[]?.name')
+
+        local owned
+        while IFS= read -r owned; do
+            [[ -n "$owned" ]] || continue
+            [[ "$owned" == "$app" || "$owned" == "${app}-"* ]] || continue
+            echo "$_YML_DATA" | jq -e --arg n "$owned" '(.backup.profiles // []) | any(.name == $n)' &>/dev/null && continue
+            if _bk_profile_exists "$owned"; then
+                _YML_ACTIONS+=("backup-profile-remove|${owned}|remove backup profile ${owned} (no longer in cipi.yml — $(_bk_orphan_note "$owned"))")
+            else
+                _YML_ACTIONS+=("backup-profile-forget|${owned}|drop ${owned} from this app's backup list (the profile is already gone)")
+            fi
+        done < <(vault_read apps.json | jq -r --arg a "$app" '(.[$a].backup_profiles // [])[]' 2>/dev/null || true)
     fi
+}
+
+# Where a declared profile writes, one destination per line: what the file
+# says, else what the profile already has, else S3 when a bucket is
+# configured and this server otherwise — never a destination that cannot work.
+_yml_backup_destinations() {
+    local pname="$1" d
+    d=$(echo "$_YML_DATA" | jq -r --arg n "$pname" '.backup.profiles[] | select(.name == $n) | .destinations[]?' 2>/dev/null || true)
+    [[ -z "$d" ]] && _bk_configured && _bk_profile_exists "$pname" \
+        && d=$(_bk_profile_json "$pname" | jq -r '.destinations[]?' 2>/dev/null || true)
+    if [[ -z "$d" ]]; then
+        if _bk_configured && _bk_has_s3; then d="s3"; else d="local"; fi
+    fi
+    printf '%s\n' "$d"
 }
 
 # The `every:` shorthand as one cron expression — the exact reverse of
@@ -2502,6 +2591,14 @@ _yml_url_belongs_to_app() {
     return 1
 }
 
+# One stable line on stdout when --auto is driving the apply, so the deploy
+# log (and the success mail) can say what happened without parsing colours.
+# $1 = true|false (the --auto flag)  $2 = result token
+_yml_auto_result() {
+    [[ "$1" == "true" ]] || return 0
+    echo "cipi.yml-result: $2"
+}
+
 # ── Apply ────────────────────────────────────────────────────
 
 _yml_apply_cmd() {
@@ -2521,10 +2618,12 @@ _yml_apply_cmd() {
         if [[ "$(app_get "$app" yml_auto)" != "true" ]]; then
             error "Automatic cipi.yml apply is not enabled for '${app}'"
             error "Turn it on with: cipi yml auto ${app} on"
+            _yml_auto_result true "disabled"
             exit 1
         fi
         if [[ -z "${ARG_file:-}" ]] && ! _yml_find_file "$app" >/dev/null; then
             info "No cipi.yml in the current release of '${app}' — nothing to reconcile"
+            _yml_auto_result true "no-file"
             return 0
         fi
     fi
@@ -2537,6 +2636,7 @@ _yml_apply_cmd() {
             "Cipi cipi.yml invalid: ${_YML_APP} on $(hostname)" \
             "The cipi.yml shipped with the latest release of '${_YML_APP}' failed validation and was not applied.\n\nServer: $(hostname)\nFile: ${_YML_FILE}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nRun: cipi yml validate ${_YML_APP}" \
             yml_fail
+        _yml_auto_result "$auto" "invalid"
         exit 1
     fi
 
@@ -2549,11 +2649,17 @@ _yml_apply_cmd() {
             "Cipi cipi.yml blocked: ${_YML_APP} on $(hostname)" \
             "cipi.yml for '${_YML_APP}' could not be applied.\n\nServer: $(hostname)\nBlocked by:\n$(printf '  - %s\n' "${_YML_BLOCKERS[@]}")\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
             yml_fail
+        _yml_auto_result "$auto" "blocked"
         exit 1
     fi
 
     if [[ ${#_YML_ACTIONS[@]} -eq 0 ]]; then
-        [[ "$auto" == "true" ]] || success "Nothing to do — the server already matches cipi.yml"
+        if [[ "$auto" == "true" ]]; then
+            info "cipi.yml already matches — nothing to reconcile"
+            _yml_auto_result true "unchanged"
+        else
+            success "Nothing to do — the server already matches cipi.yml"
+        fi
         return 0
     fi
 
@@ -2586,6 +2692,7 @@ _yml_apply_cmd() {
             "Cipi cipi.yml applied: ${_YML_APP} on $(hostname)" \
             "cipi.yml was applied.\n\nServer: $(hostname)\nApp: ${_YML_APP}\nFile: ${_YML_FILE}\nChanges: ${applied}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
             yml_apply
+        _yml_auto_result "$auto" "applied=${applied}"
         return 0
     fi
     error "Applied ${applied} change(s), ${failed} failed"
@@ -2594,6 +2701,7 @@ _yml_apply_cmd() {
         "Cipi cipi.yml partially applied: ${_YML_APP} on $(hostname)" \
         "cipi.yml was applied with errors.\n\nServer: $(hostname)\nApp: ${_YML_APP}\nApplied: ${applied}\nFailed: ${failed}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         yml_fail
+    _yml_auto_result "$auto" "failed=${failed} applied=${applied}"
     return 1
 }
 
@@ -2750,10 +2858,32 @@ _yml_apply_action() {
             step "nginx routes"
             _yml_apply_routes
             ;;
+        backup-init)
+            step "backup: local copies only"
+            _bk_init_local || return 1
+            log_action "BACKUP INIT LOCAL (cipi.yml): ${app}"
+            ;;
         backup-profile)
             local pname="${rest%%|*}"
             step "backup profile ${pname}"
             _yml_apply_backup_profile "$pname"
+            ;;
+        backup-profile-remove)
+            local pname="${rest%%|*}"
+            step "remove backup profile ${pname}"
+            # Only a profile this file created, in the app's own namespace.
+            [[ "$pname" == "$app" || "$pname" == "${app}-"* ]] || return 1
+            _bk_profile_delete "$pname" || return 1
+            app_set_json "$app" backup_profiles "$(vault_read apps.json \
+                | jq -c --arg a "$app" --arg p "$pname" '(.[$a].backup_profiles // []) - [$p]')"
+            log_action "BACKUP PROFILE REMOVE (cipi.yml): ${app} ${pname} (archives kept)"
+            ;;
+        backup-profile-forget)
+            local pname="${rest%%|*}"
+            [[ "$pname" == "$app" || "$pname" == "${app}-"* ]] || return 1
+            step "drop ${pname} from the backup list"
+            app_set_json "$app" backup_profiles "$(vault_read apps.json \
+                | jq -c --arg a "$app" --arg p "$pname" '(.[$a].backup_profiles // []) - [$p]')"
             ;;
         deploy-cfg)
             local pairs="${rest%%|*}" pair dk dv
@@ -2767,7 +2897,7 @@ _yml_apply_action() {
                     migrate|optimize|storage_link|queue_restart|horizon_terminate)
                         if [[ "$dv" == "false" ]]; then app_set "$app" "deploy_${dk}" "false"
                         else app_unset "$app" "deploy_${dk}"; fi ;;
-                    snapshot)
+                    predeploy_snapshot)
                         if [[ "$dv" == "true" ]]; then app_set "$app" predeploy_snapshot "true"
                         else app_unset "$app" predeploy_snapshot; fi ;;
                     extra_artisan)
@@ -2777,6 +2907,19 @@ _yml_apply_action() {
             done
             _create_deployer_config_for_app "$app"
             log_action "DEPLOY-CONFIG UPDATED (cipi.yml): ${app} ${pairs}"
+            ;;
+        node-build)
+            # Same checks and the same script as cipi app deploy-config --node-build.
+            local nb; nb=$(echo "$_YML_DATA" | jq -r '.deploy.node_build // ""')
+            step "asset build ${nb:-(none)}"
+            if [[ -z "$nb" ]]; then
+                app_unset "$app" node_build
+            else
+                _validate_node_build_cmd "$nb" || { error "  invalid build command: ${nb}"; return 1; }
+                app_set "$app" node_build "$nb"
+            fi
+            _sync_node_build_script "$app"
+            log_action "NODE BUILD (cipi.yml): ${app} ${nb:-none}"
             ;;
         limits)
             local pairs="${rest%%|*}" pair lk lv
@@ -2898,6 +3041,16 @@ _yml_apply_backup_profile() {
         base=$(_bk_default_profile_json)
     fi
 
+    # A new profile that does not say where it writes goes where it can:
+    # S3 when a bucket is configured, this server otherwise.
+    if ! _bk_profile_exists "$pname" && ! echo "$spec" | jq -e 'has("destinations")' &>/dev/null; then
+        if _bk_has_s3; then
+            base=$(echo "$base" | jq '.destinations = ["s3"]')
+        else
+            base=$(echo "$base" | jq '.destinations = ["local"]')
+        fi
+    fi
+
     local json="$base"
     json=$(echo "$json" | jq --argjson s "$spec" '
         .scope        = ($s.scope // .scope)
@@ -2931,10 +3084,16 @@ _yml_apply_backup_profile() {
 
     _bk_profile_save "$pname" "$json"
 
-    # Remember which profiles this app owns, so they can be cleaned up with it.
-    local owned; owned=$(vault_read apps.json | jq --arg a "$_YML_APP" '(.[$a].backup_profiles // [])')
-    app_set_json "$_YML_APP" backup_profiles \
-        "$(echo "$owned" | jq --arg p "$pname" '. + [$p] | unique')"
+    # Remember which profiles this file created, so they are removed with the
+    # app — or by a later apply that no longer declares them. Names whose
+    # profile is already gone (removed by hand) are dropped on the way.
+    local owned n kept="[]"
+    owned=$(vault_read apps.json | jq -c --arg a "$_YML_APP" --arg p "$pname" '(.[$a].backup_profiles // []) + [$p] | unique')
+    while IFS= read -r n; do
+        [[ -n "$n" ]] || continue
+        _bk_profile_exists "$n" && kept=$(jq -c --arg n "$n" '. + [$n]' <<< "$kept")
+    done < <(jq -r '.[]' <<< "$owned")
+    app_set_json "$_YML_APP" backup_profiles "$kept"
     return 0
 }
 
@@ -3235,7 +3394,9 @@ _yml_read_workers() {
 
 _yml_generate() {
     local app="${1:-}"; shift||true
-    [[ -z "$app" ]] && { error "Usage: cipi yml generate <app>"; exit 1; }
+    unset ARG_save ARG_force 2>/dev/null || true
+    parse_args "$@"
+    [[ -z "$app" || "$app" == --* ]] && { error "Usage: cipi yml generate <app> [--save[=PATH]] [--force]"; exit 1; }
     app_exists "$app" || { error "App '${app}' not found"; exit 1; }
     _yml_source_libs
 
@@ -3248,6 +3409,11 @@ _yml_generate() {
     {
         echo "# cipi.yml for '${app}' (${domain}) — generated on $(date '+%Y-%m-%d %H:%M:%S')"
         echo "# by: cipi yml generate ${app}"
+        echo "#"
+        echo "# This command prints the file. To write a copy on the server:"
+        echo "#     cipi yml generate ${app} --save          # /home/${app}/cipi.yml"
+        echo "#     cipi yml generate ${app} --save=PATH"
+        echo "# Apply reads the copy committed in the repository, not the file --save writes."
         echo "#"
         echo "# This is the app's configuration as it stands on $(hostname) right now."
         echo "# Commit it at the root of the repository, then check it back with:"
@@ -3547,11 +3713,13 @@ _yml_generate() {
         # ── deploy recipe options (cipi app deploy-config) + post-deploy steps
         echo ""
         if [[ "$custom" != "true" ]]; then
-            echo "# Deploy recipe options (cipi app deploy-config). Only declared keys are"
-            echo "# reconciled; 'snapshot' takes a database snapshot before each deploy."
+            local is_node_rt=false
+            [[ "$(app_get "$app" runtime)" == "node" ]] && is_node_rt=true
+            echo "# Deploy recipe options — the names and values of: cipi app deploy-config ${app}"
+            echo "# Only declared keys are reconciled, and they apply from the next deploy."
             echo "deploy:"
             echo "  keep_releases: $(_deploy_cfg_keep_releases "$app")"
-            if [[ "$(app_get "$app" runtime)" != "node" ]]; then
+            if [[ "$is_node_rt" != true ]]; then
                 echo "  migrate: $(_deploy_cfg_bool "$app" deploy_migrate true)"
                 echo "  optimize: $(_deploy_cfg_bool "$app" deploy_optimize true)"
                 echo "  storage_link: $(_deploy_cfg_bool "$app" deploy_storage_link true)"
@@ -3563,13 +3731,27 @@ _yml_generate() {
                     echo "  extra_artisan: $(_yml_flow $xa)"
                 fi
             fi
-            echo "  snapshot: $(_deploy_cfg_bool "$app" predeploy_snapshot false)"
-            echo "  # Post-deploy commands (run after every successful deploy):"
+            echo "  predeploy_snapshot: $(_deploy_cfg_bool "$app" predeploy_snapshot false)   # database snapshot before each deploy"
+            if [[ "$is_node_rt" != true ]]; then
+                local nbuild; nbuild=$(app_get "$app" node_build)
+                echo "  # Asset build (npm, Vite…): runs inside the deploy, after composer install"
+                echo "  # and before the release goes live. false = no build."
+                if [[ -n "$nbuild" ]]; then
+                    echo "  node_build: $(_yml_q "$nbuild")"
+                else
+                    echo "  node_build: false"
+                    echo "  # node_build: \"npm ci && npm run build\""
+                fi
+            fi
+            echo "  # Commands run after every successful deploy, once the release is live —"
+            echo "  # not the place for the asset build (see node_build). Allowlisted runners:"
+            echo "  # artisan, npm, npx, yarn, pnpm, composer, php, node."
             echo "  # post:"
             echo "  #   - artisan cache:clear"
-            echo "  #   - npm run build"
+            echo "  #   - artisan db:seed --class=ReferenceDataSeeder --force"
         else
-            echo "# Post-deploy commands (run after every successful deploy)."
+            echo "# Post-deploy commands (run after every successful deploy). A custom app"
+            echo "# has no deploy recipe, so this is also where its asset build goes."
             echo "# Uncomment and edit — or declare them here and commit:"
             echo "# deploy:"
             echo "#   post:"
@@ -3690,8 +3872,59 @@ _yml_generate() {
         warn "It is printed below anyway so nothing is lost."
     fi
 
+    if [[ -n "${ARG_save+x}" ]]; then
+        _yml_generate_save "$app" "$out"
+        return
+    fi
+
     cat "$out"
     rm -f "$out"
+}
+
+# Write the generated file. Default path is the app's home, outside any
+# release, so a later deploy does not wipe it. Apply still reads the copy
+# that was committed into the repository.
+_yml_generate_save() {
+    local app="$1" src="$2" dest="${ARG_save}" dir tmp
+    [[ "$dest" == "true" || -z "$dest" ]] && dest="/home/${app}/cipi.yml"
+    if [[ "$dest" == *$'\n'* ]]; then
+        error "Refusing to write ${dest}"
+        rm -f "$src"
+        exit 1
+    fi
+    case "$dest" in
+        ".."|"../"*|*"/../"*|*"/..")
+            error "Refusing to write ${dest}"
+            rm -f "$src"
+            exit 1
+            ;;
+    esac
+    dir=$(dirname "$dest")
+    if [[ ! -d "$dir" ]]; then
+        mkdir -p "$dir" || { error "Cannot create ${dir}"; rm -f "$src"; exit 1; }
+    fi
+    if [[ -d "$dest" ]]; then
+        error "${dest} is a directory"
+        rm -f "$src"
+        exit 1
+    fi
+    if [[ -e "$dest" && "${ARG_force:-}" != "true" ]]; then
+        error "Refusing to overwrite ${dest}"
+        error "Re-run with --force, or pick another path: --save=PATH"
+        rm -f "$src"
+        exit 1
+    fi
+    tmp=$(mktemp "${dir}/.cipi.yml.XXXXXX") || { error "Cannot write ${dest}"; rm -f "$src"; exit 1; }
+    cp "$src" "$tmp"
+    chmod 644 "$tmp"
+    if [[ "$dest" == "/home/${app}/cipi.yml" || "$dest" == "/home/${app}/"* ]]; then
+        chown "${app}:${app}" "$tmp" 2>/dev/null || true
+    fi
+    mv "$tmp" "$dest"
+    rm -f "$src"
+    success "Wrote ${dest}"
+    info "Commit it at the root of the repository. Apply reads that copy, not this file."
+    info "Then: cipi yml plan ${app}"
 }
 
 # `cipi yml example [app]` — a blank, commented template.
@@ -3724,7 +3957,8 @@ _yml_example() {
 # and backup profiles ${app} or ${app}-*. Everything else is rejected.
 #
 # Tip: to start from what the server already has, use
-#   cipi yml generate ${app} > cipi.yml
+#   cipi yml generate ${app} --save
+#   # or: cipi yml generate ${app} > cipi.yml
 
 version: 1
 
@@ -3801,9 +4035,11 @@ search: false
 
 # Deploy recipe options (the same set as \`cipi app deploy-config\`) and
 # commands to run after every successful deploy, from the live release
-# directory. Each post step uses an allowlisted runner — no shell, no pipes,
-# no free-form scripts. post runs on both 'cipi deploy' and the Git webhook
-# and does not require 'cipi yml auto'.
+# directory. node_build is the asset build: it runs inside the deploy, after
+# composer install and before the release goes live. Each post step uses an
+# allowlisted runner — no shell, no pipes, no free-form scripts — and runs
+# only once the release is already live. post runs on both 'cipi deploy' and
+# the Git webhook and does not require 'cipi yml auto'.
 deploy:
   # keep_releases: 5          # releases kept for rollback (1-20)
   # migrate: false            # skip artisan:migrate in the recipe
@@ -3812,11 +4048,11 @@ deploy:
   # queue_restart: true       # artisan:queue:restart after the symlink
   # horizon_terminate: true   # horizon:terminate before the symlink
   # extra_artisan: [ "view:clear" ]   # extra artisan commands in the recipe
-  # snapshot: true            # database snapshot before each deploy
+  # predeploy_snapshot: true  # database snapshot before each deploy
+  # node_build: "npm ci && npm run build"   # asset build, before the release goes live
   post:
     - artisan cache:clear
     - artisan scout:import --force
-    - npm run build
     - composer dump-autoload -o
   # post_on_failure: abort   # default warn — log + email, leave the release live
 

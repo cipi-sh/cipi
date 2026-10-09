@@ -297,7 +297,7 @@ bad $'crons:\n  - every: 1h\n    run: artisan tinker' "tinker is not allowed" "c
 
 echo "-- cipi.yml deploy config / limits / ssl / env / crons (plan)"
 out=$(plan "${TMP}/n1.yml")
-grep -q '^A|deploy-cfg|keep_releases=3;migrate=false;snapshot=true;extra_artisan=view:clear|' <<< "$out" \
+grep -q '^A|deploy-cfg|keep_releases=3;migrate=false;predeploy_snapshot=true;extra_artisan=view:clear|' <<< "$out" \
     && pass "deploy config diff planned as one action" || fail "deploy-cfg action wrong: ${out}"
 grep -q '^A|limits|memory_limit=512M;fpm_max_children=10|' <<< "$out" \
     && pass "limits diff planned" || fail "limits action wrong: ${out}"
@@ -378,11 +378,11 @@ printf '%s\n' "$ex" > "${TMP}/ex.yml"
 for k in 'www:' 'basic_auth:' 'redirects:' 'proxies:' 'search:'; do
     grep -q "^ *${k}" <<< "$ex" && pass "example has ${k}" || fail "example lacks ${k}"
 done
-for k in 'limits:' 'keep_releases:' 'snapshot:' 'ssl:' 'force_https:' 'env:' 'required:' 'crons:'; do
+for k in 'limits:' 'keep_releases:' 'predeploy_snapshot:' 'node_build:' 'ssl:' 'force_https:' 'env:' 'required:' 'crons:'; do
     grep -q "# *${k}" <<< "$ex" && pass "example documents ${k}" || fail "example lacks ${k}"
 done
 gen=$(sed -n '/^_yml_generate() {/,/^}/p' "${LIB}/yml.sh")
-for k in '  www: ' '  basic_auth:' 'redirect:' 'redirects:' 'proxies:' 'search: ' '  limits:' 'ssl:' 'crons:' '  keep_releases: ' '  snapshot: '; do
+for k in '  www: ' '  basic_auth:' 'redirect:' 'redirects:' 'proxies:' 'search: ' '  limits:' 'ssl:' 'crons:' '  keep_releases: ' '  predeploy_snapshot: ' '  node_build: '; do
     grep -qF "echo \"${k}" <<< "$gen" && pass "generate emits ${k# }" || fail "generate omits ${k# }"
 done
 grep -q 'password_hash' <<< "$gen" && fail "generate would export password hashes" || pass "generate emits user names only"

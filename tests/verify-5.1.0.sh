@@ -308,6 +308,9 @@ source LIBDIR/backup.sh
 source LIBDIR/yml.sh
 _yml_source_libs(){ :; }
 _bk_configured(){ return 0; }
+parse_args(){ :; }
+_deploy_cfg_bool(){ echo "${3:-true}"; }
+_deploy_cfg_keep_releases(){ echo 5; }
 _yml_read_workers(){ printf 'default\t3\t3\t3600\nemails\t1\t5\t300\n'; }
 _yml_generate iceberg > TMPDIR/gen.yml 2>TMPDIR/gen.err
 [[ -s TMPDIR/gen.err ]] && { cat TMPDIR/gen.err >&2; exit 40; }

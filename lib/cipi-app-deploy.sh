@@ -133,13 +133,34 @@ fi
 # root has explicitly opted this app in (`cipi yml auto <app> on`), which is
 # also what creates the single narrowly scoped sudoers rule below. Without that
 # file the app user cannot run this at all.
+YML_LINE=""
 if [[ -f "/etc/sudoers.d/cipi-${APP}-yml" ]]; then
     {
         printf '[%(%Y-%m-%d %H:%M:%S)T] ===== cipi.yml apply =====\n' -1
     } >> "$LOG" 2>/dev/null || true
-    sudo /usr/local/bin/cipi yml apply "$APP" --yes --auto >> "$LOG" 2>&1 || {
+    YML_MARK=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+    YML_RC=0
+    sudo /usr/local/bin/cipi yml apply "$APP" --yes --auto >> "$LOG" 2>&1 || YML_RC=$?
+    if [[ $YML_RC -ne 0 ]]; then
         printf '[%(%Y-%m-%d %H:%M:%S)T] cipi.yml apply failed — see above\n' -1 >> "$LOG" 2>/dev/null || true
-    }
+    fi
+    YML_RAW=$(tail -n +"$((YML_MARK + 1))" "$LOG" 2>/dev/null | grep 'cipi.yml-result:' | tail -1 | sed 's/.*cipi.yml-result: //' || true)
+    case "$YML_RAW" in
+        applied=*) YML_LINE="applied ${YML_RAW#applied=} change(s)" ;;
+        unchanged) YML_LINE="already matches" ;;
+        no-file)   YML_LINE="no cipi.yml in this release" ;;
+        blocked)   YML_LINE="NOT applied — the plan was blocked (see the deploy log)" ;;
+        invalid)   YML_LINE="NOT applied — cipi.yml failed validation (see the deploy log)" ;;
+        disabled)  YML_LINE="NOT applied — auto-apply is not enabled" ;;
+        failed=*)  YML_LINE="NOT applied cleanly (${YML_RAW}) — see the deploy log" ;;
+        *)
+            if [[ $YML_RC -ne 0 ]]; then
+                YML_LINE="NOT applied — see the deploy log"
+            else
+                YML_LINE="ok"
+            fi
+            ;;
+    esac
 fi
 
 # Allowlisted post-deploy steps from cipi.yml (npm run, artisan, …).
@@ -178,7 +199,8 @@ fi
 sudo /usr/local/bin/cipi-app-notify "$APP" deploy-ok 0 "$LOG" \
     "${DETAIL}
 Post-deploy: ${POST_LINE}
-Healthcheck: ${HEALTH_LINE}" 2>/dev/null || true
+${YML_LINE:+cipi.yml: ${YML_LINE}
+}Healthcheck: ${HEALTH_LINE}" 2>/dev/null || true
 
 # Integrity manifest for cipi scan: hash of this release (symlinks not followed).
 # Root-only writer, reached through the per-app sudoers entry — the manifest

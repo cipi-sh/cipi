@@ -107,9 +107,19 @@ vault_write() {
         echo "vault: cannot write $1 (read-only ${CIPI_CONFIG})" >&2
         return 1
     fi
-    local tmp; tmp=$(mktemp)
-    openssl enc -"${VAULT_CIPHER}" -salt -pbkdf2 -pass "file:${VAULT_KEY}" -out "$tmp"
-    mv "$tmp" "$file"
+    # Written next to the file and renamed over it: atomic, and never across
+    # filesystems. A temp under /tmp (tmpfs on recent Ubuntu and Debian, or a
+    # service's private /tmp) made mv remove the live file and copy — no
+    # apps.json at all until the copy ended. A failed encryption leaves nothing.
+    local tmp
+    tmp=$(mktemp "$(dirname "$file")/.$(basename "$file").XXXXXX") \
+        || { echo "vault: cannot create a temporary file in ${CIPI_CONFIG}" >&2; return 1; }
+    if ! openssl enc -"${VAULT_CIPHER}" -salt -pbkdf2 -pass "file:${VAULT_KEY}" -out "$tmp"; then
+        rm -f "$tmp"
+        echo "vault: encryption of $1 failed" >&2
+        return 1
+    fi
+    mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
     _cipi_safe_chmod "$perms" "$file"
 }
 
@@ -120,8 +130,14 @@ vault_seal() {
     [[ ! -f "$file" ]] && return 0
     jq empty "$file" 2>/dev/null || return 0
 
-    local tmp; tmp=$(mktemp)
-    openssl enc -"${VAULT_CIPHER}" -salt -pbkdf2 -pass "file:${VAULT_KEY}" -in "$file" -out "$tmp"
-    mv "$tmp" "$file"
+    local tmp
+    tmp=$(mktemp "$(dirname "$file")/.$(basename "$file").XXXXXX") \
+        || { echo "vault: cannot create a temporary file in ${CIPI_CONFIG}" >&2; return 1; }
+    if ! openssl enc -"${VAULT_CIPHER}" -salt -pbkdf2 -pass "file:${VAULT_KEY}" -in "$file" -out "$tmp"; then
+        rm -f "$tmp"
+        echo "vault: sealing $1 failed" >&2
+        return 1
+    fi
+    mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
     _cipi_safe_chmod 600 "$file"
 }

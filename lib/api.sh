@@ -1469,12 +1469,75 @@ api_token_revoke() {
 # Plain file (not vault): www-data must read it on every API/MCP request.
 # Missing file or "*" = allow all (default / safe for upgrades).
 
+# Default file (*) when missing. Best-effort: a read path must survive a
+# read-only /etc/cipi — readers treat a missing file as allow all, as the
+# API middleware does.
 _api_ipwl_ensure_file() {
-    mkdir -p "${CIPI_CONFIG}"
-    if [[ ! -f "${CIPI_API_IP_WHITELIST}" ]]; then
-        printf '%s\n' '*' > "${CIPI_API_IP_WHITELIST}"
-        chmod 644 "${CIPI_API_IP_WHITELIST}" 2>/dev/null || true
+    [[ -f "${CIPI_API_IP_WHITELIST}" ]] && return 0
+    _cipi_path_writable "$(dirname "${CIPI_API_IP_WHITELIST}")" || return 0
+    printf '%s\n' '*' > "${CIPI_API_IP_WHITELIST}" 2>/dev/null || return 0
+    chmod 644 "${CIPI_API_IP_WHITELIST}" 2>/dev/null || true
+}
+
+# True when this process does not share init's mount namespace: a systemd
+# unit sandboxed with ProtectSystem= / ReadOnlyPaths= (php-fpm hardened by
+# hand, for one) runs its children, sudo cipi included, in a namespace where
+# /etc is read-only for them alone. Linux only; unknown elsewhere → false.
+_api_ipwl_in_private_mount_ns() {
+    local mine init
+    mine=$(readlink /proc/self/ns/mnt 2>/dev/null) || return 1
+    init=$(readlink /proc/1/ns/mnt 2>/dev/null) || return 1
+    [[ -n "$mine" && -n "$init" && "$mine" != "$init" ]]
+}
+
+# The systemd unit this process runs under (from its cgroup), empty when unknown.
+_api_ipwl_caller_unit() {
+    local unit
+    unit=$(grep -oE '[^/]+\.service' /proc/self/cgroup 2>/dev/null | head -1) || true
+    echo "${unit:-}"
+}
+
+# One error for a whitelist write that cannot happen, naming the cause and the
+# next step. Two causes look the same from inside (EROFS): a root filesystem
+# the kernel remounted read-only after a disk error, or a caller in a mount
+# namespace of its own where /etc is read-only for that process only — the
+# directory looks fine from a shell on the same server.
+_api_ipwl_ro_error() {
+    local reason="${1:-}" dir mnt unit
+    dir=$(dirname "${CIPI_API_IP_WHITELIST}")
+    error "Cannot write ${CIPI_API_IP_WHITELIST}: ${dir} is read-only${reason:+ — ${reason}}"
+    if command -v findmnt >/dev/null 2>&1; then
+        mnt=$(findmnt -n -o SOURCE,TARGET,OPTIONS --target "$dir" 2>/dev/null | head -1) || true
+        [[ -n "$mnt" ]] && echo "  Mount: ${mnt}" >&2
     fi
+    [[ -n "${_CIPI_REMOUNT_ERR:-}" ]] && echo "  Remount read-write failed: ${_CIPI_REMOUNT_ERR}" >&2
+    if _api_ipwl_in_private_mount_ns; then
+        unit=$(_api_ipwl_caller_unit)
+        echo "  cipi runs in a mount namespace of its own${unit:+ (started by ${unit})}: /etc is read-only for this" >&2
+        echo "  process alone — systemd ProtectSystem= or ReadOnlyPaths= on that unit. The panel API runs cipi from" >&2
+        echo "  php-fpm, which must not sandbox /etc. Check: systemctl show ${unit:-<unit>} -p ProtectSystem -p ReadOnlyPaths" >&2
+        echo "  (drop-ins: /etc/systemd/system/${unit:-<unit>}.d/), or run this command from a shell on the server." >&2
+    else
+        echo "  The kernel remounts / read-only after a disk error (errors=remount-ro). Check:" >&2
+        echo "    dmesg | grep -iE 'remount|read-only|I/O error'    then    mount -o remount,rw /" >&2
+        echo "  and fsck on the next boot if it happens again. The whitelist was not changed." >&2
+    fi
+    return 1
+}
+
+# Mutating path only: the same remount attempt as vault_write, then a clear
+# error. Read paths keep _api_ipwl_ensure_file (never a remount).
+_api_ipwl_ensure_writable() {
+    local dir; dir=$(dirname "${CIPI_API_IP_WHITELIST}")
+    if [[ "$dir" == "${CIPI_CONFIG}" ]]; then
+        _cipi_ensure_config_writable && return 0
+    else
+        _cipi_path_writable "$dir" && return 0
+        _cipi_remount_rw "$dir" || true
+        _cipi_path_writable "$dir" && return 0
+    fi
+    _api_ipwl_ro_error
+    return 1
 }
 
 # Returns 0 if entry is * / valid IPv4 / IPv6 / CIDR.
@@ -1512,6 +1575,7 @@ exit(filter_var($e, FILTER_VALIDATE_IP) ? 0 : 1);
 # Print normalized entries (no comments/blanks), one per line.
 _api_ipwl_entries() {
     _api_ipwl_ensure_file
+    [[ -f "${CIPI_API_IP_WHITELIST}" ]] || return 0
     local line
     while IFS= read -r line || [[ -n "$line" ]]; do
         line="${line%%#*}"
@@ -1532,10 +1596,21 @@ _api_ipwl_is_allow_all() {
     return 1
 }
 
+# Replace the list atomically: the new content is written next to the file
+# and renamed over it, so a crash leaves the old list or the new one. A temp
+# under /tmp made the rename cross filesystems whenever /tmp is one of its own
+# (tmpfs, or a service's private /tmp): mv then removed the live file and
+# copied — no whitelist at all for a moment, allow-all for the API — and on a
+# read-only /etc it stopped at "inter-device move failed … unable to remove
+# target", the only message the panel got. Returns 1 with a clear error when
+# the directory cannot be written; the callers exit on it.
 _api_ipwl_write() {
     local -a entries=("$@")
-    local tmp
-    tmp=$(mktemp)
+    local dir tmp err
+    dir=$(dirname "${CIPI_API_IP_WHITELIST}")
+    _api_ipwl_ensure_writable || return 1
+    tmp=$(mktemp "${dir}/.api-ip-whitelist.XXXXXX" 2>/dev/null) \
+        || { _api_ipwl_ro_error "no temporary file in ${dir}"; return 1; }
     {
         echo "# Cipi API IP whitelist — managed by: cipi api ip-whitelist"
         echo "# * = allow all | otherwise one IPv4/IPv6 or CIDR per line"
@@ -1547,9 +1622,13 @@ _api_ipwl_write() {
                 echo "$e"
             done
         fi
-    } > "$tmp"
-    mv -f "$tmp" "${CIPI_API_IP_WHITELIST}"
-    chmod 644 "${CIPI_API_IP_WHITELIST}" 2>/dev/null || true
+    } > "$tmp" 2>/dev/null || { rm -f "$tmp"; _api_ipwl_ro_error "write to ${tmp} failed"; return 1; }
+    chmod 644 "$tmp" 2>/dev/null || true
+    if ! err=$(mv -f "$tmp" "${CIPI_API_IP_WHITELIST}" 2>&1); then
+        rm -f "$tmp"
+        _api_ipwl_ro_error "${err:-rename failed}"
+        return 1
+    fi
 }
 
 _api_ipwl_public_ip_hint() {
@@ -1606,8 +1685,11 @@ api_ip_whitelist_show() {
     echo -e "  ${DIM}Add:    cipi api ip-whitelist add <ip|cidr>${NC}"
     echo -e "  ${DIM}Remove: cipi api ip-whitelist remove <ip|cidr>${NC}"
     echo -e "  ${DIM}Reset:  cipi api ip-whitelist allow-all${NC}"
-    local hint
-    hint=$(_api_ipwl_public_ip_hint)
+    # The public-IP hint costs a curl (up to 5 s): only for a person at a
+    # terminal. The panel API runs add/remove/set through this summary and
+    # discards it — it was waiting for nothing.
+    local hint=""
+    [[ -t 1 ]] && hint=$(_api_ipwl_public_ip_hint)
     if [[ -n "$hint" ]]; then
         echo -e "  ${DIM}This server public IP (often needed for same-host GUI): ${hint}${NC}"
     fi
@@ -1652,7 +1734,7 @@ api_ip_whitelist_add() {
             error "Invalid IP or CIDR: ${a}"; exit 1
         fi
         if [[ "$a" == "*" ]]; then
-            _api_ipwl_write '*'
+            _api_ipwl_write '*' || exit 1
             log_action "API IP WHITELIST: allow-all"
             success "Whitelist set to allow all (*)"
             return 0
@@ -1669,9 +1751,9 @@ api_ip_whitelist_add() {
     done
 
     if [[ ${#current[@]} -eq 0 ]]; then
-        _api_ipwl_write '*'
+        _api_ipwl_write '*' || exit 1
     else
-        _api_ipwl_write "${current[@]}"
+        _api_ipwl_write "${current[@]}" || exit 1
     fi
     log_action "API IP WHITELIST ADD: ${to_add[*]}"
     if [[ "$allow_all" == "true" && $added -gt 0 ]]; then
@@ -1729,11 +1811,11 @@ api_ip_whitelist_remove() {
     done
 
     if [[ ${#next[@]} -eq 0 ]]; then
-        _api_ipwl_write '*'
+        _api_ipwl_write '*' || exit 1
         log_action "API IP WHITELIST: allow-all (last entry removed)"
         success "Last entry removed — whitelist reset to allow all (*)"
     else
-        _api_ipwl_write "${next[@]}"
+        _api_ipwl_write "${next[@]}" || exit 1
         log_action "API IP WHITELIST REMOVE: ${to_remove[*]}"
         success "Removed ${removed} entr$([[ $removed -eq 1 ]] && echo y || echo ies)"
     fi
@@ -1802,7 +1884,7 @@ api_ip_whitelist_set() {
     # If * is present, allow-all wins
     for e in "${entries[@]}"; do
         if [[ "$e" == "*" ]]; then
-            _api_ipwl_write '*'
+            _api_ipwl_write '*' || exit 1
             log_action "API IP WHITELIST: allow-all"
             success "Whitelist set to allow all (*)"
             api_ip_whitelist_show
@@ -1821,7 +1903,7 @@ api_ip_whitelist_set() {
         [[ "$seen" == "false" ]] && unique+=("$e")
     done
 
-    _api_ipwl_write "${unique[@]}"
+    _api_ipwl_write "${unique[@]}" || exit 1
     log_action "API IP WHITELIST SET: ${unique[*]}"
     warn "Restricted mode — clients not on this list get HTTP 403."
     warn "Escape hatch: cipi api ip-whitelist allow-all"
@@ -1831,7 +1913,7 @@ api_ip_whitelist_set() {
 
 api_ip_whitelist_allow_all() {
     _api_ipwl_ensure_file
-    _api_ipwl_write '*'
+    _api_ipwl_write '*' || exit 1
     log_action "API IP WHITELIST: allow-all"
     success "Whitelist set to allow all (*)"
     api_ip_whitelist_show

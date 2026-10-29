@@ -4,6 +4,24 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.8.5] — 2026-10-29
+
+From the field: the IP tab of the panel refused every change with `mv: inter-device move failed: '/tmp/tmp.…' to '/etc/cipi/api-ip-whitelist'; unable to remove target: Read-only file system`. Two defects in one line. `cipi api ip-whitelist` built the new list under `/tmp` and moved it into place: when `/tmp` is a filesystem of its own — tmpfs, the default on recent Ubuntu and Debian, or the private `/tmp` of a systemd unit — that move is not a rename but a remove-then-copy, so for a moment there was no whitelist at all (allow all, for the API) and a crash or a full disk in between left none. And the whitelist writer was the one `/etc/cipi` writer without the read-only handling the vault, SMTP and basicauth received in 5.0.x: a root the kernel had remounted read-only after a disk error, or a caller sandboxed by systemd, surfaced as that raw `mv` message, with nothing about the cause.
+
+### Fixed
+
+- **`cipi api ip-whitelist add|remove|set|allow-all` replace the list atomically**: the new content is written to a temporary file next to `/etc/cipi/api-ip-whitelist` and renamed over it. A crash leaves the old list or the new one, never none, and the rename never crosses a filesystem.
+- **A read-only `/etc/cipi` is handled like every other mutating write**: the same remount attempt as `vault_write`, then — when it does not help — one error that says which cause it is and what to do, and nothing changed. A root the kernel remounted read-only (`errors=remount-ro`): the mount line, the remount error, `dmesg` and `mount -o remount,rw /`. A process in a mount namespace of its own (a systemd unit with `ProtectSystem=` or `ReadOnlyPaths=`, where `/etc` is read-only for that process alone and looks fine from a shell): the unit that started cipi, read from its cgroup, and the `systemctl show` to run. The panel API answers 422 with the CLI's output, so this is what the IP tab now shows.
+- **`cipi api ip-whitelist show` on a read-only `/etc/cipi` no longer aborts**: creating the default file is best-effort and a missing file reads as allow all, as the API middleware already treats it.
+- **`cipi api ip-whitelist add|remove|set|allow-all` from the panel no longer wait for the public-IP hint.** The summary printed after every change looks the server's public IP up with a `curl` capped at 5 seconds, a hint for a person at a terminal; the panel API discards that output but waited for it on every click of the IP tab. The hint is computed only when stdout is a terminal.
+- **`vault_write` and `vault_seal` write next to the file as well.** Every vault file (`apps.json`, `server.json`, `databases.json`, …) went through the same `mktemp` + `mv`: on a server with a tmpfs `/tmp`, each save of the server's configuration removed the live file and copied the new one in. Now a rename; a failed encryption removes its temporary file and returns an error instead of leaving a half-written one behind.
+
+### Ecosystem
+
+- cipi/api needs no change: the message reaches the IP tab as soon as the server runs 5.8.5 (`cipi self-update`, or the nightly update at 03:50). A server whose root is already read-only cannot self-update until it is remounted: `mount -o remount,rw /` first.
+- cipi/gui 4.1.1: every button that calls the server — the IP tab's included — ignores further clicks while the request is out and shows a spinner when the answer takes longer than 150 ms. One Livewire action interceptor for the whole panel; buttons with a `wire:loading` of their own keep it. And a time zone per account (Settings → Profile, UTC until chosen) that every time the panel shows follows.
+- Tests: `bash tests/verify-5.8.5.sh`.
+
 ## [5.8.4] — 2026-10-29
 
 From the field: a deploy started by a Git push is invisible while it runs — whoever watches the panel sees nothing until the ledger shows the result — and a release that fails its post-deploy healthcheck is a surprise to someone who never meant to set one (the log read `Healthcheck FAILED after 5 attempts — got 404`, on an app whose `/up` route does not exist). Three things change: Cipi can now say whether a deploy is running, whoever started it; the failed check says where it comes from and how to turn it off; and `cipi yml example` no longer arms a healthcheck when committed as it is.

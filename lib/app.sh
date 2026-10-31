@@ -218,8 +218,13 @@ app_create() {
     home="/home/${app_user}"
 
     # 1. Linux user
+    # The membership runs one way only: www-data (nginx, the panel) joins the
+    # app's group to read its docroot and connect to its socket. The app user
+    # is NOT in www-data — every PHP-FPM socket on the server is group
+    # www-data, so that membership let any app run PHP in every other pool
+    # and as www-data itself (5.8.6, migration drops it on existing servers).
     step "Creating user..."
-    useradd -m -s /bin/bash -G www-data,cipi-apps "$app_user"
+    useradd -m -s /bin/bash -G cipi-apps "$app_user"
     app_ssh_apply_default "$app_user"
     echo "${app_user}:${user_pass}" | chpasswd
     chmod 750 "$home"

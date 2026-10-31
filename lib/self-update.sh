@@ -32,11 +32,21 @@ selfupdate_command() {
     fi
 
     step "Downloading from '${branch}'..."
-    local tmp="/tmp/cipi-update-$$"; rm -rf "$tmp"
+    # A private, unpredictable directory. The old /tmp/cipi-update-$$ was
+    # removed and then cloned into: a local user who recreated it in between
+    # owned the tree that root copies over /opt/cipi (5.8.6).
+    local tmp
+    tmp=$(mktemp -d /tmp/cipi-update.XXXXXXXXXX) && [[ -n "$tmp" && -d "$tmp" ]] || {
+        error "Cannot create a temporary directory under /tmp"
+        echo "  Check:  df -h /tmp  and  ls -ld /tmp"
+        exit 1
+    }
+    chmod 700 "$tmp"
 
     if ! command -v git >/dev/null 2>&1; then
         error "git is not installed — cannot download the update"
         echo "  Install it with:  apt-get install -y git"
+        rm -rf "$tmp"
         exit 1
     fi
 
@@ -84,7 +94,9 @@ selfupdate_command() {
         version_changed=true
     fi
     info "Updating v${old_ver} → v${nv}"
-    cp -r /opt/cipi "/opt/cipi.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null||true
+    local bak
+    bak="/opt/cipi.bak.$(date +%Y%m%d%H%M%S)"
+    cp -r /opt/cipi "$bak" 2>/dev/null || bak=""
     cp "${tmp}/cipi" /usr/local/bin/cipi; chmod 700 /usr/local/bin/cipi
     cp "${tmp}"/lib/*.sh /opt/cipi/lib/; chmod 700 /opt/cipi/lib/*.sh
     # cipi-app-post-deploy (app user) sources yml.sh for the deploy.post steps
@@ -164,7 +176,13 @@ selfupdate_command() {
             if [[ "$(printf '%s\n' "$CIPI_VERSION" "$mv"|sort -V|head -1)" == "$CIPI_VERSION" && "$mv" != "$CIPI_VERSION" ]]; then
                 step "Migration ${mv}..."
                 if ! ( set -euo pipefail; bash "$m" ); then
-                    error "Migration ${mv} failed — version not updated, installation unchanged at v${CIPI_VERSION}"
+                    # Honest about the state: the v${nv} files are already in
+                    # place, only /etc/cipi/version still says v${CIPI_VERSION},
+                    # so this migration runs again on the next self-update.
+                    error "Migration ${mv} failed — recorded version stays v${CIPI_VERSION}; the v${nv} files are already installed"
+                    echo "  The migration runs again on the next update (the nightly one too):"
+                    echo "    cipi self-update"
+                    [[ -n "$bak" ]] && echo "  The v${CIPI_VERSION} files are kept in ${bak}"
                     rm -rf "$tmp"
                     exit 1
                 fi

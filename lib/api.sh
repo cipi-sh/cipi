@@ -366,6 +366,11 @@ api_setup() {
     echo "{\"domain\": \"${domain}\"}" | vault_write api.json
     success "Config saved"
 
+    # The www-data sudoers whitelist the panel runs cipi through. Not written
+    # by setup.sh any more (5.8.6): it exists only while a panel is installed.
+    _panel_sudoers_ensure
+    success "Sudoers whitelist for www-data ready"
+
     # Default API IP whitelist (* = allow all) — readable by www-data
     _api_ipwl_ensure_file
     success "API IP whitelist ready (${CIPI_API_IP_WHITELIST})"
@@ -468,11 +473,20 @@ api_setup() {
 _api_ensure_laravel_app() {
     if [[ ! -f "${CIPI_API_ROOT}/artisan" ]]; then
         step "Installing Laravel API app..."
-        rm -rf /tmp/cipi-api-build 2>/dev/null
+        # A private build directory: the fixed /tmp/cipi-api-build could be
+        # pre-created by any local user between its removal and the build (5.8.6).
+        rm -rf /tmp/cipi-api-build /var/tmp/cipi-api-build.* 2>/dev/null || true
+        local build
+        build=$(mktemp -d /var/tmp/cipi-api-build.XXXXXXXX) && [[ -n "$build" && -d "$build" ]] || {
+            error "Cannot create a build directory under /var/tmp"
+            exit 1
+        }
+        chmod 700 "$build"
 
         # 1. Create fresh Laravel project
-        (cd /tmp && composer create-project laravel/laravel cipi-api-build --no-interaction --prefer-dist 2>/dev/null) || {
+        (cd "$(dirname "$build")" && composer create-project laravel/laravel "$build" --no-interaction --prefer-dist 2>/dev/null) || {
             error "Failed to create Laravel app. Ensure composer is available."
+            rm -rf "$build"
             exit 1
         }
 
@@ -480,52 +494,53 @@ _api_ensure_laravel_app() {
         local pkg_dir="/opt/cipi/cipi-api"
         [[ -d "${CIPI_LIB}/../cipi-api" ]] && pkg_dir="${CIPI_LIB}/../cipi-api"
         if [[ -d "$pkg_dir" ]]; then
-            (cd /tmp/cipi-api-build && composer config repositories.cipi-api path "$pkg_dir" 2>/dev/null) || true
-            (cd /tmp/cipi-api-build && composer require cipi/api:@dev --no-interaction 2>/dev/null) || true
+            (cd "${build}" && composer config repositories.cipi-api path "$pkg_dir" 2>/dev/null) || true
+            (cd "${build}" && composer require cipi/api:@dev --no-interaction 2>/dev/null) || true
         else
-            (cd /tmp/cipi-api-build && composer require cipi/api --no-interaction 2>/dev/null) || true
+            (cd "${build}" && composer require cipi/api --no-interaction 2>/dev/null) || true
         fi
-        (cd /tmp/cipi-api-build && composer require laravel/mcp --no-interaction 2>/dev/null) || true
+        (cd "${build}" && composer require laravel/mcp --no-interaction 2>/dev/null) || true
 
         # 3. Configure .env
-        sed -i "s|^APP_ENV=.*|APP_ENV=production|" /tmp/cipi-api-build/.env
-        sed -i "s|^APP_DEBUG=.*|APP_DEBUG=false|" /tmp/cipi-api-build/.env
-        sed -i "s|^QUEUE_CONNECTION=.*|QUEUE_CONNECTION=database|" /tmp/cipi-api-build/.env
-        if grep -q '^LOG_CHANNEL=' /tmp/cipi-api-build/.env 2>/dev/null; then
-            sed -i 's|^LOG_CHANNEL=.*|LOG_CHANNEL=stack|' /tmp/cipi-api-build/.env
+        sed -i "s|^APP_ENV=.*|APP_ENV=production|" "${build}/.env"
+        sed -i "s|^APP_DEBUG=.*|APP_DEBUG=false|" "${build}/.env"
+        sed -i "s|^QUEUE_CONNECTION=.*|QUEUE_CONNECTION=database|" "${build}/.env"
+        if grep -q '^LOG_CHANNEL=' "${build}/.env" 2>/dev/null; then
+            sed -i 's|^LOG_CHANNEL=.*|LOG_CHANNEL=stack|' "${build}/.env"
         else
-            echo 'LOG_CHANNEL=stack' >> /tmp/cipi-api-build/.env
+            echo 'LOG_CHANNEL=stack' >> "${build}/.env"
         fi
-        if grep -q '^LOG_STACK=' /tmp/cipi-api-build/.env 2>/dev/null; then
-            sed -i 's|^LOG_STACK=.*|LOG_STACK=single,stderr|' /tmp/cipi-api-build/.env
+        if grep -q '^LOG_STACK=' "${build}/.env" 2>/dev/null; then
+            sed -i 's|^LOG_STACK=.*|LOG_STACK=single,stderr|' "${build}/.env"
         else
-            echo 'LOG_STACK=single,stderr' >> /tmp/cipi-api-build/.env
+            echo 'LOG_STACK=single,stderr' >> "${build}/.env"
         fi
-        if grep -q '^SESSION_DRIVER=' /tmp/cipi-api-build/.env 2>/dev/null; then
-            sed -i 's|^SESSION_DRIVER=.*|SESSION_DRIVER=array|' /tmp/cipi-api-build/.env
+        if grep -q '^SESSION_DRIVER=' "${build}/.env" 2>/dev/null; then
+            sed -i 's|^SESSION_DRIVER=.*|SESSION_DRIVER=array|' "${build}/.env"
         else
-            echo 'SESSION_DRIVER=array' >> /tmp/cipi-api-build/.env
+            echo 'SESSION_DRIVER=array' >> "${build}/.env"
         fi
-        grep -q '^CIPI_APPS_JSON=' /tmp/cipi-api-build/.env 2>/dev/null \
-            && sed -i "s|^CIPI_APPS_JSON=.*|CIPI_APPS_JSON=${CIPI_CONFIG}/apps-public.json|" /tmp/cipi-api-build/.env \
-            || echo "CIPI_APPS_JSON=${CIPI_CONFIG}/apps-public.json" >> /tmp/cipi-api-build/.env
+        grep -q '^CIPI_APPS_JSON=' "${build}/.env" 2>/dev/null \
+            && sed -i "s|^CIPI_APPS_JSON=.*|CIPI_APPS_JSON=${CIPI_CONFIG}/apps-public.json|" "${build}/.env" \
+            || echo "CIPI_APPS_JSON=${CIPI_CONFIG}/apps-public.json" >> "${build}/.env"
 
         # 4. Publish assets and run setup
-        (cd /tmp/cipi-api-build && php artisan vendor:publish --tag=cipi-assets --force 2>/dev/null) || true
-        (cd /tmp/cipi-api-build && php artisan key:generate --force 2>/dev/null) || true
-        (cd /tmp/cipi-api-build && php artisan migrate --force 2>/dev/null) || true
-        (cd /tmp/cipi-api-build && php artisan cipi:seed-user 2>/dev/null) || true
+        (cd "${build}" && php artisan vendor:publish --tag=cipi-assets --force 2>/dev/null) || true
+        (cd "${build}" && php artisan key:generate --force 2>/dev/null) || true
+        (cd "${build}" && php artisan migrate --force 2>/dev/null) || true
+        (cd "${build}" && php artisan cipi:seed-user 2>/dev/null) || true
 
         # 5. Ensure User model has HasApiTokens trait
-        _api_patch_user_model /tmp/cipi-api-build
+        _api_patch_user_model "${build}"
 
         # 6. Replace default / route with cipi welcome
-        [[ -f /tmp/cipi-api-build/routes/web.php ]] && \
-            sed -i "s/view('welcome')/view('cipi::welcome')/g" /tmp/cipi-api-build/routes/web.php
+        [[ -f "${build}/routes/web.php" ]] && \
+            sed -i "s/view('welcome')/view('cipi::welcome')/g" "${build}/routes/web.php"
 
         # 7. Move to final location
         rm -rf "${CIPI_API_ROOT}" 2>/dev/null
-        mv /tmp/cipi-api-build "${CIPI_API_ROOT}"
+        chmod 755 "${build}"  # private (0700) only while it was being built
+        mv "${build}" "${CIPI_API_ROOT}"
         chown -R www-data:www-data "${CIPI_API_ROOT}"
         success "Laravel API app + cipi-api package"
     else
@@ -972,17 +987,34 @@ api_upgrade() {
 
     # 1. Backup critical data
     step "Backing up..."
-    local backup_dir="/tmp/cipi-api-backup-$(date +%s)"
-    mkdir -p "$backup_dir"
+    # mktemp, not a name built from the clock: a dir under /tmp that any user
+    # could pre-create would have handed them the panel .env and token DB.
+    local backup_dir
+    backup_dir=$(mktemp -d /var/tmp/cipi-api-backup.XXXXXXXX) && [[ -n "$backup_dir" && -d "$backup_dir" ]] || {
+        error "Cannot create a backup directory under /var/tmp"
+        systemctl start cipi-queue 2>/dev/null || true
+        exit 1
+    }
+    chmod 700 "$backup_dir"
     [[ -f "${CIPI_API_ROOT}/.env" ]] && cp "${CIPI_API_ROOT}/.env" "${backup_dir}/.env"
     [[ -f "${CIPI_API_ROOT}/database/database.sqlite" ]] && cp "${CIPI_API_ROOT}/database/database.sqlite" "${backup_dir}/database.sqlite"
     success "Backup → $backup_dir"
 
     # 2. Build new Laravel project
     step "Creating fresh Laravel project..."
-    rm -rf /tmp/cipi-api-build 2>/dev/null
-    (cd /tmp && composer create-project laravel/laravel cipi-api-build --no-interaction --prefer-dist 2>/dev/null) || {
+    # A private build directory: the fixed /tmp/cipi-api-build could be
+    # pre-created by any local user between its removal and the build (5.8.6).
+    rm -rf /tmp/cipi-api-build /var/tmp/cipi-api-build.* 2>/dev/null || true
+    local build
+    build=$(mktemp -d /var/tmp/cipi-api-build.XXXXXXXX) && [[ -n "$build" && -d "$build" ]] || {
+        error "Cannot create a build directory under /var/tmp"
+        systemctl start cipi-queue 2>/dev/null || true
+        exit 1
+    }
+    chmod 700 "$build"
+    (cd "$(dirname "$build")" && composer create-project laravel/laravel "$build" --no-interaction --prefer-dist 2>/dev/null) || {
         error "Failed to create Laravel app."
+        rm -rf "$build"
         systemctl start cipi-queue 2>/dev/null || true
         exit 1
     }
@@ -993,57 +1025,58 @@ api_upgrade() {
     local pkg_dir="/opt/cipi/cipi-api"
     [[ -d "${CIPI_LIB}/../cipi-api" ]] && pkg_dir="${CIPI_LIB}/../cipi-api"
     if [[ -d "$pkg_dir" ]]; then
-        (cd /tmp/cipi-api-build && composer config repositories.cipi-api path "$pkg_dir" 2>/dev/null) || true
-        (cd /tmp/cipi-api-build && composer require cipi/api:@dev --no-interaction 2>/dev/null) || true
+        (cd "${build}" && composer config repositories.cipi-api path "$pkg_dir" 2>/dev/null) || true
+        (cd "${build}" && composer require cipi/api:@dev --no-interaction 2>/dev/null) || true
     else
-        (cd /tmp/cipi-api-build && composer require cipi/api --no-interaction 2>/dev/null) || true
+        (cd "${build}" && composer require cipi/api --no-interaction 2>/dev/null) || true
     fi
-    (cd /tmp/cipi-api-build && composer require laravel/mcp --no-interaction 2>/dev/null) || true
+    (cd "${build}" && composer require laravel/mcp --no-interaction 2>/dev/null) || true
     success "cipi-api package installed"
 
     # 4. Restore .env (keeps APP_KEY, DB credentials, QUEUE_CONNECTION)
     step "Restoring .env..."
     if [[ -f "${backup_dir}/.env" ]]; then
-        cp "${backup_dir}/.env" /tmp/cipi-api-build/.env
+        cp "${backup_dir}/.env" "${build}/.env"
     else
-        sed -i "s|^APP_ENV=.*|APP_ENV=production|" /tmp/cipi-api-build/.env
-        sed -i "s|^APP_DEBUG=.*|APP_DEBUG=false|" /tmp/cipi-api-build/.env
-        sed -i "s|^QUEUE_CONNECTION=.*|QUEUE_CONNECTION=database|" /tmp/cipi-api-build/.env
-        (cd /tmp/cipi-api-build && php artisan key:generate --force 2>/dev/null) || true
+        sed -i "s|^APP_ENV=.*|APP_ENV=production|" "${build}/.env"
+        sed -i "s|^APP_DEBUG=.*|APP_DEBUG=false|" "${build}/.env"
+        sed -i "s|^QUEUE_CONNECTION=.*|QUEUE_CONNECTION=database|" "${build}/.env"
+        (cd "${build}" && php artisan key:generate --force 2>/dev/null) || true
     fi
-    if grep -q '^LOG_STACK=' /tmp/cipi-api-build/.env 2>/dev/null; then
-        sed -i 's|^LOG_STACK=.*|LOG_STACK=single,stderr|' /tmp/cipi-api-build/.env
+    if grep -q '^LOG_STACK=' "${build}/.env" 2>/dev/null; then
+        sed -i 's|^LOG_STACK=.*|LOG_STACK=single,stderr|' "${build}/.env"
     else
-        echo 'LOG_STACK=single,stderr' >> /tmp/cipi-api-build/.env
+        echo 'LOG_STACK=single,stderr' >> "${build}/.env"
     fi
     success ".env restored"
 
     # 5. Restore database
     step "Restoring database..."
     if [[ -f "${backup_dir}/database.sqlite" ]]; then
-        cp "${backup_dir}/database.sqlite" /tmp/cipi-api-build/database/database.sqlite
+        cp "${backup_dir}/database.sqlite" "${build}/database/database.sqlite"
     fi
     success "Database restored"
 
     # 6. Patch User model, publish assets, run new migrations
-    _api_patch_user_model /tmp/cipi-api-build
-    (cd /tmp/cipi-api-build && php artisan vendor:publish --tag=cipi-assets --force 2>/dev/null) || true
-    (cd /tmp/cipi-api-build && php artisan migrate --force 2>/dev/null) || true
-    (cd /tmp/cipi-api-build && php artisan cipi:seed-user 2>/dev/null) || true
-    if [[ -f /tmp/cipi-api-build/vendor/cipi/api/token-abilities.txt ]]; then
-        cp /tmp/cipi-api-build/vendor/cipi/api/token-abilities.txt /tmp/cipi-api-build/token-abilities.txt
+    _api_patch_user_model "${build}"
+    (cd "${build}" && php artisan vendor:publish --tag=cipi-assets --force 2>/dev/null) || true
+    (cd "${build}" && php artisan migrate --force 2>/dev/null) || true
+    (cd "${build}" && php artisan cipi:seed-user 2>/dev/null) || true
+    if [[ -f "${build}/vendor/cipi/api/token-abilities.txt" ]]; then
+        cp "${build}/vendor/cipi/api/token-abilities.txt" "${build}/token-abilities.txt"
     elif [[ -f /opt/cipi/cipi-api/token-abilities.txt ]]; then
-        cp /opt/cipi/cipi-api/token-abilities.txt /tmp/cipi-api-build/token-abilities.txt
+        cp /opt/cipi/cipi-api/token-abilities.txt "${build}/token-abilities.txt"
     fi
-    [[ -f /tmp/cipi-api-build/routes/web.php ]] && \
-        sed -i "s/view('welcome')/view('cipi::welcome')/g" /tmp/cipi-api-build/routes/web.php
+    [[ -f "${build}/routes/web.php" ]] && \
+        sed -i "s/view('welcome')/view('cipi::welcome')/g" "${build}/routes/web.php"
     success "Migrations & assets"
 
     # 7. Swap in the new build
     step "Swapping..."
     rm -rf "${CIPI_API_ROOT}.old" 2>/dev/null
     mv "${CIPI_API_ROOT}" "${CIPI_API_ROOT}.old" 2>/dev/null || true
-    mv /tmp/cipi-api-build "${CIPI_API_ROOT}"
+    chmod 755 "${build}"  # private (0700) only while it was being built
+    mv "${build}" "${CIPI_API_ROOT}"
     chown -R www-data:www-data "${CIPI_API_ROOT}"
     _api_sync_token_abilities_file 2>/dev/null || true
     _api_ensure_log_stack_env
@@ -1313,8 +1346,8 @@ _api_is_installed() {
 }
 
 # Everything `cipi api <domain>` set up. Apps, databases and the rest of the
-# server are untouched. /etc/sudoers.d/cipi-api stays: it is part of every
-# Cipi install (setup.sh writes it) and migrations keep it current.
+# server are untouched. /etc/sudoers.d/cipi-api is removed with the last
+# panel (API or GUI) and written again by the next `cipi api` / `cipi gui`.
 api_remove() {
     unset ARG_force
     parse_args "$@"
@@ -1366,7 +1399,8 @@ api_remove() {
 
     # The upgrade backups hold the panel .env (APP_KEY) and the token database.
     step "Application..."
-    rm -rf "${CIPI_API_ROOT:?}" "${CIPI_API_ROOT:?}.old" /tmp/cipi-api-build /tmp/cipi-api-backup-[0-9]* 2>/dev/null || true
+    rm -rf "${CIPI_API_ROOT:?}" "${CIPI_API_ROOT:?}.old" /tmp/cipi-api-build /tmp/cipi-api-backup-[0-9]* \
+        /var/tmp/cipi-api-build.* /var/tmp/cipi-api-backup.* 2>/dev/null || true
 
     step "Config..."
     rm -f "${CIPI_API_CONFIG:?}" "${CIPI_API_IP_WHITELIST:?}" 2>/dev/null || true
@@ -1374,6 +1408,11 @@ api_remove() {
     rm -f /var/log/cipi-api-fpm-slow.log /var/log/cipi-api-php-error.log /var/log/cipi-queue.log \
         /var/log/cipi-api-maintain.log* /var/log/cipi-api-update.log* \
         /var/log/nginx/cipi-api-access.log* /var/log/nginx/cipi-api-error.log* 2>/dev/null || true
+
+    # The www-data sudoers whitelist goes with the last panel: kept while the
+    # GUI is still installed, removed otherwise (5.8.6).
+    step "Sudoers..."
+    _panel_sudoers_ensure
 
     log_action "API REMOVED${domain:+: $domain}"
     success "API removed"

@@ -537,7 +537,8 @@ _sync_create_app() {
     # 1. Linux user
     step "User..."
     local user_pass; user_pass=$(generate_password 40)
-    useradd -m -s /bin/bash -G www-data,cipi-apps "$app"
+    # Not in www-data: see `cipi app create` (lib/app.sh).
+    useradd -m -s /bin/bash -G cipi-apps "$app"
     app_ssh_apply_default "$app"
     echo "${app}:${user_pass}" | chpasswd
     chmod 750 "$home"

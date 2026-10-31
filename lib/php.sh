@@ -209,6 +209,8 @@ max_input_time = 300
 expose_php = Off
 $(php_fpm_ini_hardening)
 EOF
+    # Placeholder pool (same as setup.sh): no vhost uses it, socket 0600 so
+    # only www-data itself can reach a pool that runs without open_basedir.
     cat > "/etc/php/${v}/fpm/pool.d/www.conf" <<POOLEOF
 [www]
 user = www-data
@@ -216,6 +218,7 @@ group = www-data
 listen = /run/php/php${v}-fpm.sock
 listen.owner = www-data
 listen.group = www-data
+listen.mode = 0600
 pm = ondemand
 pm.max_children = 2
 pm.process_idle_timeout = 10s

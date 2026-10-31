@@ -935,7 +935,9 @@ session.upload_progress.enabled = 0
 fatal_error_backtraces = 0
 INIEOF
 
-        # Replace default www pool with a minimal placeholder so FPM can start
+        # Replace default www pool with a minimal placeholder so FPM can start.
+        # No vhost points at it; it runs as www-data without open_basedir, so
+        # its socket is 0600 — reachable by www-data alone, never by an app.
         cat > "/etc/php/${VER}/fpm/pool.d/www.conf" <<POOLEOF
 [www]
 user = www-data
@@ -943,6 +945,7 @@ group = www-data
 listen = /run/php/php${VER}-fpm.sock
 listen.owner = www-data
 listen.group = www-data
+listen.mode = 0600
 pm = ondemand
 pm.max_children = 2
 pm.process_idle_timeout = 10s
@@ -1214,10 +1217,13 @@ EOF
     # Version
     echo "$BUILD" > /etc/cipi/version
 
-    # Sudoers for API (www-data runs cipi via sudo — restricted to API commands only)
+    # Sudoers for the panel (www-data runs cipi via sudo — restricted to API
+    # commands only). Written only when the API or the GUI is installed, so a
+    # fresh server has no www-data → root path at all; `cipi api <domain>` and
+    # `cipi gui <domain>` write it when they install (5.8.6).
     # shellcheck source=/dev/null
     source "${CIPI_LIB}/cipi-api-sudoers.sh"
-    write_cipi_api_sudoers
+    ensure_cipi_api_sudoers
 
     rm -rf /tmp/cipi-install
 

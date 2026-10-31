@@ -176,13 +176,15 @@ _gui_cd_safe() {
     pwd >/dev/null 2>&1 || cd / 2>/dev/null || cd /root 2>/dev/null || true
 }
 
+# The directory exists, empty and 0700, when this returns: composer
+# create-project accepts an empty target. mktemp rather than $$.$RANDOM, so
+# no local user can own the tree root later moves to /opt/cipi/gui (5.8.6).
 _gui_new_build_dir() {
     _gui_cd_safe
     rm -rf /tmp/cipi-gui-build /var/tmp/cipi-gui-build.* 2>/dev/null || true
-    local dir="/var/tmp/cipi-gui-build.$$.$RANDOM"
-    while [[ -e "$dir" ]]; do
-        dir="/var/tmp/cipi-gui-build.$$.$RANDOM"
-    done
+    local dir
+    dir=$(mktemp -d /var/tmp/cipi-gui-build.XXXXXXXX) && [[ -n "$dir" && -d "$dir" ]] || return 1
+    chmod 700 "$dir"
     echo "$dir"
 }
 
@@ -374,6 +376,7 @@ _gui_ensure_laravel_app() {
 
         _gui_cd_safe
         rm -rf "${CIPI_GUI_ROOT}" 2>/dev/null
+        chmod 755 "$build_dir"  # private (0700) only while it was being built
         mv "$build_dir" "${CIPI_GUI_ROOT}"
         chown -R www-data:www-data "${CIPI_GUI_ROOT}"
         success "Laravel GUI app + cipi/gui package"
@@ -596,6 +599,11 @@ gui_setup() {
     mkdir -p "${CIPI_CONFIG}"
     echo "{\"domain\": \"${domain}\"}" | vault_write gui.json
     success "Config saved"
+
+    # The www-data sudoers whitelist: written by the panels themselves since
+    # 5.8.6, no longer by setup.sh on every server.
+    _panel_sudoers_ensure
+    success "Sudoers whitelist for www-data ready"
 
     if [[ ! -f "${CIPI_GUI_ROOT}/artisan" ]]; then
         if [[ ! -t 0 && ! -r /dev/tty ]]; then
@@ -842,9 +850,13 @@ gui_upgrade() {
     _gui_cd_safe
     export COMPOSER_ALLOW_SUPERUSER=1
 
-    local backup_dir="/var/tmp/cipi-gui-backup-$(date +%s)"
-    local build_dir
-    mkdir -p "$backup_dir"
+    # mktemp, not a name built from the clock (see _gui_new_build_dir).
+    local backup_dir build_dir
+    backup_dir=$(mktemp -d /var/tmp/cipi-gui-backup.XXXXXXXX) && [[ -n "$backup_dir" && -d "$backup_dir" ]] || {
+        error "Cannot create a backup directory under /var/tmp"
+        exit 1
+    }
+    chmod 700 "$backup_dir"
     [[ -f "${CIPI_GUI_ROOT}/.env" ]] && cp "${CIPI_GUI_ROOT}/.env" "${backup_dir}/.env"
     [[ -f "${CIPI_GUI_ROOT}/database/database.sqlite" ]] && cp "${CIPI_GUI_ROOT}/database/database.sqlite" "${backup_dir}/database.sqlite"
 
@@ -871,6 +883,7 @@ gui_upgrade() {
     _gui_cd_safe
     rm -rf "${CIPI_GUI_ROOT}.old" 2>/dev/null
     mv "${CIPI_GUI_ROOT}" "${CIPI_GUI_ROOT}.old" 2>/dev/null || true
+    chmod 755 "$build_dir"  # private (0700) only while it was being built
     mv "$build_dir" "${CIPI_GUI_ROOT}"
     rm -rf "$backup_dir" 2>/dev/null || true
     chown -R www-data:www-data "${CIPI_GUI_ROOT}"
@@ -970,12 +983,17 @@ gui_remove() {
     fi
 
     step "Application..."
-    rm -rf "${CIPI_GUI_ROOT:?}" "${CIPI_GUI_ROOT:?}.old" /tmp/cipi-gui-build /var/tmp/cipi-gui-build.* 2>/dev/null || true
+    rm -rf "${CIPI_GUI_ROOT:?}" "${CIPI_GUI_ROOT:?}.old" /tmp/cipi-gui-build /var/tmp/cipi-gui-build.* \
+        /var/tmp/cipi-gui-backup-[0-9]* /var/tmp/cipi-gui-backup.* 2>/dev/null || true
 
     step "Config..."
     rm -f "${CIPI_GUI_CONFIG:?}" 2>/dev/null || true
 
     rm -f /var/log/cipi-gui-fpm-slow.log /var/log/cipi-gui-php-error.log 2>/dev/null || true
+
+    # Kept while the API is still installed, removed with the last panel.
+    step "Sudoers..."
+    _panel_sudoers_ensure
 
     log_action "GUI REMOVED${domain:+: $domain}"
     success "GUI removed"

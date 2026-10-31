@@ -792,6 +792,19 @@ ensure_apps_json_api_access() {
     _update_apps_public
 }
 
+# /etc/sudoers.d/cipi-api — the commands www-data (panel API, GUI) may run as
+# root. Present only while a panel is installed (lib/cipi-api-sudoers.sh);
+# `cipi api`, `cipi gui` and their `remove` call this after writing or
+# deleting their config. Best-effort, never fails the caller.
+_panel_sudoers_ensure() {
+    if ! declare -f ensure_cipi_api_sudoers >/dev/null 2>&1; then
+        [[ -f "${CIPI_LIB}/cipi-api-sudoers.sh" ]] || return 0
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/cipi-api-sudoers.sh"
+    fi
+    ensure_cipi_api_sudoers || true
+}
+
 # Panel API (/opt/cipi/api): SQLite, Laravel logs, and bootstrap cache must be
 # writable by www-data (PHP-FPM, queue worker, artisan via sudo -u www-data).
 # Call after root-run composer or manual edits under /opt/cipi/api.

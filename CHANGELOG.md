@@ -4,6 +4,32 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.8.6] — 2026-10-31
+
+Two security reports, both verified and both closed in this release. They came in through the private channel in SECURITY.md and had not been shared elsewhere; thanks to the two researchers.
+
+The first: every app user was a member of the `www-data` group, and every PHP-FPM socket on a Cipi server — each app's, the stock `www` pool's, the panel API's and the GUI's — is group `www-data` with mode 0660. So an app user, or code running inside an app (an RCE, a malicious Composer or npm dependency, an SFTP password shared with a freelancer), could open any other app's socket, send it a FastCGI request for a script under `/tmp` (in every pool's `open_basedir`) and run PHP as that app: read its `.env`, its database credentials, its keys. The stock `www` pool runs as `www-data` without `open_basedir`, and `/etc/sudoers.d/cipi-api` — written by `setup.sh` on every server, API installed or not — lets `www-data` run `cipi ssh add`, which appends a key to the `cipi` admin user; from there `sudo cipi credentials` prints the root password. One compromised tenant, the whole server. The membership was never needed: nginx and the panel reach an app the other way round, `www-data` is in each app's group.
+
+The second: every app user may run `cipi-app-notify <app> *` as root through sudo (that is how a failed webhook deploy sends its alert), and the helper compared its exit-code argument with `-eq`. bash evaluates the operand of `-eq` as an arithmetic expression, and an arithmetic expression evaluates array subscripts, command substitutions included: `sudo cipi-app-notify myapp deploy 'BASH_VERSINFO[$(id > /tmp/pwned)]'` ran `id` as root. One command from any app shell to root.
+
+### Security
+
+- **App users are no longer in `www-data`.** `cipi app create` and `cipi sync` create them in `cipi-apps` only; `www-data` still joins each app's group, which is all nginx and the panel need. Migration 5.8.6 removes every app user (members of `cipi-apps`, keys of `apps.json`; nothing else) from `www-data` on installed servers, restarts PHP-FPM — a worker keeps the groups it was forked with — and then each app's supervisor programs, what every deploy restarts anyway. Open SSH/SFTP sessions of app users keep the old membership until they log out.
+- **The stock `www` pool socket is 0600** (`setup.sh`, `cipi php install`; the migration adds the line to the placeholder Cipi wrote and leaves a hand-edited `www.conf` alone, with a note). No vhost points at that pool and `www-data` owns the socket, so nothing changes for nginx.
+- **`/etc/sudoers.d/cipi-api` exists only while a panel is installed.** `setup.sh` no longer writes it on every server; `cipi api <domain>` and `cipi gui <domain>` write it when they install, `cipi api remove` / `cipi gui remove` drop it with the last panel. The migration removes it from servers with neither. Servers with the API or the GUI keep it as it is: nothing in the panels changes.
+- **`cipi-app-notify` validates every argument before it uses one.** The exit code must be 1–3 digits and is compared as a string, never with `-eq` or `(( ))`; the label a short word; the app name app-shaped and, when called through sudo, the caller's own; the log file a regular file that resolves under `/home/<app>/` (symlinks followed — a link to `/etc/shadow` is "no log", not a read as root); the free text bounded to 4 KB and stripped of control characters. The environment of a sudo caller is ignored. Legitimate calls (`cipi-app-deploy`, with `deploy`, `deploy-ok`, a numeric status, the app's own `logs/deploy.log`) are unchanged. No migration: self-update installs the new helper before anything else.
+- **Root builds and backs up in private directories.** `cipi self-update` cloned into `/tmp/cipi-update-$$` after removing it: a local user who recreated the empty directory in between owned the tree root copies over `/opt/cipi`. `cipi api <domain>` and `cipi api upgrade` built in `/tmp/cipi-api-build` and backed the panel `.env` and token database up to `/tmp/cipi-api-backup-<epoch>`, the GUI's upgrade to `/var/tmp/cipi-gui-backup-<epoch>`. All of them are `mktemp -d` now, mode 0700; `cipi api remove` and `cipi gui remove` clean the new names as well as the old.
+
+### Fixed
+
+- **A failed migration says what state the server is in.** The message read "installation unchanged"; the new release's files were already in place, only `/etc/cipi/version` had not moved. It now says so, that the migration runs again on the next update (the nightly one too), and where the previous files are kept.
+
+### Ecosystem
+
+- cipi/api, cipi/gui, cipi/sdk, cipi-cli, cipi/agent: no change needed. The panels run `cipi` through the same sudoers whitelist, which is written by their own install from now on; `cipi ssh add` from the panel still works. A server that had the API or the GUI removed by hand and the sudoers file left behind loses that file with the migration — expected, it reappears with the next `cipi api <domain>` / `cipi gui <domain>`.
+- Still open, by design and documented for a later release: `open_basedir` keeps `/tmp/` for every app (packages that hard-code it would break with a per-app directory; a sibling app can no longer reach the pool, so it is no longer a cross-app vector), password SSH/SFTP for app users stays on by default (`cipi ssh apps disable --all` turns it off for every app user and for apps created later), and the nightly self-update follows the `latest` branch without a signature check.
+- Tests: `bash tests/verify-5.8.6.sh`.
+
 ## [5.8.5] — 2026-10-29
 
 From the field: the IP tab of the panel refused every change with `mv: inter-device move failed: '/tmp/tmp.…' to '/etc/cipi/api-ip-whitelist'; unable to remove target: Read-only file system`. Two defects in one line. `cipi api ip-whitelist` built the new list under `/tmp` and moved it into place: when `/tmp` is a filesystem of its own — tmpfs, the default on recent Ubuntu and Debian, or the private `/tmp` of a systemd unit — that move is not a rename but a remove-then-copy, so for a moment there was no whitelist at all (allow all, for the API) and a crash or a full disk in between left none. And the whitelist writer was the one `/etc/cipi` writer without the read-only handling the vault, SMTP and basicauth received in 5.0.x: a root the kernel had remounted read-only after a disk error, or a caller sandboxed by systemd, surfaced as that raw `mv` message, with nothing about the cause.

@@ -992,6 +992,8 @@ du() { bash -c "set -euo pipefail
     deployer_unlock_ensure_hook demo"; }
 du; du; [[ "$(grep -c "^after('deploy:failed', 'deploy:unlock');$" "$D18/deploy.php")" == "1" ]] && pass "an existing Laravel deploy.php gets the line, once" || fail "unlock hook: $(cat "$D18/deploy.php")"
 printf "<?php\nnamespace Deployer;\n// classic\n" > "$D18/deploy.php"; du; ! grep -q 'deploy:unlock' "$D18/deploy.php" && pass "a custom app's recipe (no lock) is left alone" || fail "unlock hook added to a custom recipe"
+grep -q 'if \[\[ -z "\$repository" && "\${ARG_repository+x}" != x && -t 0 \]\]; then' "${LIB}/app.sh" \
+    && pass "app create --custom asks for the repository on a terminal only (from the panel the question was the error)" || fail "custom app create still prompts without a terminal"
 ac=$(sed -n '/^auth_create() {/,/^auth_edit() {/p' "${LIB}/app.sh")
 grep -q 'if \[\[ -t 0 && -t 1 && "${ARG_no_edit:-}" != "true" \]\]; then' <<< "$ac" && grep -q '^        auth_edit "\$app"$' <<< "$ac" \
     && pass "cipi auth create opens the editor on a terminal (not for the panel, not with --no-edit)" || fail "auth create does not open the editor"

@@ -115,7 +115,10 @@ app_create() {
     [[ -z "$app_user" ]]    && read_input "App username (lowercase, min 3 chars)" "" app_user
     [[ -z "$domain" ]]      && read_input "Primary domain" "" domain
     if [[ "$app_type" == "custom" ]]; then
-        if [[ -z "$repository" && "${ARG_repository+x}" != x ]]; then
+        # Asked on a terminal only. The panel sends no --repository for an
+        # SFTP-only app: the prompt then read end-of-file, and the command
+        # ended right there with the question as its only output.
+        if [[ -z "$repository" && "${ARG_repository+x}" != x && -t 0 ]]; then
             read_input "Git — leave empty to use SFTP only (no repository)" "" repository
         fi
     else
@@ -165,7 +168,7 @@ app_create() {
     if [[ "$app_type" == "custom" ]]; then
         docroot="${ARG_docroot:-}"
         if [[ -z "$docroot" ]]; then
-            echo -e "  Document root under htdocs (default /): e.g. ${CYAN}/${NC}, ${CYAN}www${NC}, ${CYAN}dist${NC}, ${CYAN}public${NC}"
+            echo -e "  Document root, inside ${CYAN}~/htdocs${NC} — ${CYAN}/${NC} is htdocs itself (default); or a folder in it: ${CYAN}www${NC}, ${CYAN}dist${NC}, ${CYAN}public${NC}"
             read_input "Docroot" "/" docroot
         fi
         [[ "$docroot" == "/" || "$docroot" == "." ]] && docroot=""
@@ -687,7 +690,7 @@ SUDO
     fi
     [[ -n "$node_build" ]] && echo -e "  Build:      ${CYAN}${node_build}${NC}  ${DIM}(every deploy, before the release goes live)${NC}"
     echo -e "  Home:       ${CYAN}${home}${NC}"
-    [[ "$app_type" == "custom" ]] && echo -e "  Docroot:    ${CYAN}/${docroot:-}${NC}"
+    [[ "$app_type" == "custom" ]] && echo -e "  Docroot:    ${CYAN}${home}/htdocs${docroot:+/${docroot}}${NC}  ${DIM}(a custom app is served from htdocs; \"/\" is htdocs itself)${NC}"
     echo ""
     echo -e "  ${BOLD}SSH${NC}         ${CYAN}${app_user}${NC} / ${CYAN}${user_pass}${NC}"
     if id -nG "$app_user" 2>/dev/null | tr ' ' '\n' | grep -qx cipi-nossh; then

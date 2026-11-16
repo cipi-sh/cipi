@@ -65,6 +65,7 @@ _horizon_enable() {
     supervisorctl start "${app}-horizon" 2>/dev/null || true
 
     app_set "$app" horizon "true"
+    app_unset "$app" horizon_auto
     log_action "HORIZON ENABLE: $app"
 
     # Report what supervisor actually did, rather than assuming it worked.
@@ -115,6 +116,9 @@ _horizon_disable() {
     # apps.json claiming Horizon is still on.
     reload_supervisor || warn "supervisorctl reread/update reported a problem — check: supervisorctl status"
     app_unset "$app" horizon
+    # Someone decided: a deploy that finds laravel/horizon installed does
+    # not switch it on again (_deploy_horizon_detect in deploy.sh).
+    app_set "$app" horizon_auto "off"
     log_action "HORIZON DISABLE: $app"
     success "Horizon disabled — default queue worker restored"
 }

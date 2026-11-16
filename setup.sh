@@ -1576,7 +1576,90 @@ _confirm_credentials_saved() {
 # The optional layers, one yes/no each, instead of a page of commands under
 # the credentials. Each runs the normal command with stdin on the terminal:
 # this script's own stdin is the pipe from wget.
+# Optional: the token of the Git provider. With one, `cipi app create` adds
+# the deploy key and the webhook to the repository by itself; without one
+# both are added by hand, for every app — and that was only said afterwards.
+# The token is read without echo and handed to `cipi git <provider>-token`,
+# the command that saves it later too. Nothing is asked without a terminal.
+_setup_git_token() {
+    local choice provider label token url
+    echo -e "  ${BOLD}Optional — your Git provider${NC}"
+    echo -e "  ${DIM}With an access token, ${NC}cipi app create${DIM} adds the deploy key and the push webhook to each${NC}"
+    echo -e "  ${DIM}repository by itself. Without one you add both by hand for every app. It can be added later.${NC}"
+    echo ""
+    _has_tty || { echo -e "  ${DIM}Later: cipi git github-token <token>  (gitlab-token, bitbucket-token, azure-token — cipi help git)${NC}"; echo ""; return 0; }
+    echo -e "    ${CYAN}1${NC}  GitHub"
+    echo -e "    ${CYAN}2${NC}  GitLab ${DIM}(gitlab.com or self-hosted)${NC}"
+    echo -e "    ${CYAN}3${NC}  Bitbucket"
+    echo -e "    ${CYAN}4${NC}  Azure DevOps"
+    echo -e "    ${CYAN}Enter${NC}  skip — I will add it later, or add keys and webhooks by hand"
+    echo -en "  ${BOLD}Where are your repositories?${NC} [1-4, Enter = skip] "
+    read -r choice < /dev/tty
+    case "$(printf '%s' "$choice" | tr -d '[:space:]')" in
+        1) provider=github; label="GitHub" ;;
+        2) provider=gitlab; label="GitLab" ;;
+        3) provider=bitbucket; label="Bitbucket" ;;
+        4) provider=azure; label="Azure DevOps" ;;
+        *) echo -e "  ${DIM}Skipped. Later: cipi git github-token <token>  (cipi help git for the other providers)${NC}"; echo ""; return 0 ;;
+    esac
+    echo ""
+    echo -e "  ${BOLD}How to create the token${NC}"
+    case "$provider" in
+        github)
+            echo -e "  ${CYAN}https://github.com/settings/personal-access-tokens/new${NC}  ${DIM}(Settings → Developer settings → Fine-grained tokens)${NC}"
+            echo -e "    Repository access   the repositories you will deploy (or all)"
+            echo -e "    Permissions         ${BOLD}Administration: Read and write${NC}  ${DIM}(deploy keys)${NC}"
+            echo -e "                        ${BOLD}Webhooks: Read and write${NC}"
+            echo -e "  ${DIM}A classic token works too: scopes ${NC}repo${DIM} and ${NC}admin:repo_hook${DIM}.${NC}"
+            ;;
+        gitlab)
+            echo -e "  ${CYAN}https://gitlab.com/-/user_settings/personal_access_tokens${NC}  ${DIM}(or the same page of your own GitLab)${NC}"
+            echo -e "    Scope               ${BOLD}api${NC}"
+            echo -e "    Role                ${BOLD}Maintainer${NC} on the projects you will deploy"
+            echo -en "  ${BOLD}Self-hosted GitLab URL${NC} ${DIM}(Enter = gitlab.com)${NC}: "
+            read -r url < /dev/tty
+            url=$(printf '%s' "$url" | tr -d '[:space:]')
+            if [[ -n "$url" ]]; then
+                /usr/local/bin/cipi git gitlab-url "$url" < /dev/tty || echo -e "  ${YELLOW}URL not saved — later: cipi git gitlab-url <url>${NC}"
+            fi
+            ;;
+        bitbucket)
+            echo -e "  An access token of the workspace ${DIM}(Workspace settings → Access tokens)${NC}, pasted as it is,"
+            echo -e "  or an API token of your Atlassian account, pasted as ${BOLD}email:token${NC}"
+            echo -e "  ${CYAN}https://id.atlassian.com/manage-profile/security/api-tokens${NC}"
+            echo -e "    Scopes              ${BOLD}Repositories: Admin${NC}  ${DIM}(deploy keys)${NC}"
+            echo -e "                        ${BOLD}Webhooks: Read and write${NC}"
+            ;;
+        azure)
+            echo -e "  ${CYAN}https://dev.azure.com${NC} → User settings → Personal access tokens"
+            echo -e "  ${DIM}Azure DevOps has no deploy key per repository: the token adds the server's SSH key to${NC}"
+            echo -e "  ${DIM}your account and a service hook to each project, so it must be allowed to manage both${NC}"
+            echo -e "  ${DIM}(a token with Full access is).${NC}"
+            ;;
+    esac
+    echo ""
+    echo -en "  ${BOLD}Paste the ${label} token${NC} ${DIM}(not shown; Enter = skip)${NC}: "
+    read -rs token < /dev/tty
+    echo ""
+    token=$(printf '%s' "$token" | tr -d '[:space:]')
+    if [[ -z "$token" ]]; then
+        echo -e "  ${DIM}Skipped. Later: cipi git ${provider}-token <token>${NC}"
+        echo ""
+        return 0
+    fi
+    if /usr/local/bin/cipi git "${provider}-token" "$token" < /dev/tty; then
+        echo -e "  ${GREEN}✓ ${label} token saved${NC} ${DIM}— new apps get their deploy key and webhook by themselves (cipi git status)${NC}"
+    else
+        echo -e "  ${YELLOW}The token was not saved — see above.${NC} Later: ${CYAN}cipi git ${provider}-token <token>${NC}"
+    fi
+    echo ""
+    return 0
+}
+
 _setup_optional_wizard() {
+    _setup_git_token || true
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
     echo -e "  ${BOLD}Optional — a browser instead of SSH${NC}"
     echo -e "  ${DIM}Two layers, each a yes/no now or one command later. Both need a DNS A record of their own → ${SERVER_IP}.${NC}"
     echo ""

@@ -967,6 +967,11 @@ app_show() {
         local cloned; cloned=$(app_get "$app" cloned_from)
         [[ -n "$cloned" ]] && printf "  %-14s ${CYAN}%s${NC}\n" "Cloned from" "$cloned"
     fi
+    # Databases linked to the app (cipi db create --app=, cipi db link). The
+    # one created with a Laravel app has the app's name and is not repeated.
+    local linked_dbs
+    linked_dbs=$(vault_read apps.json | jq -r --arg a "$app" '[(.[$a].databases // [])[] | "\(.name) (\(.engine // "mariadb"))"] | join(", ")' 2>/dev/null || true)
+    [[ -n "$linked_dbs" ]] && printf "  %-14s ${CYAN}%s${NC}\n" "Databases" "$linked_dbs"
     printf "  %-14s ${CYAN}%s${NC}\n" "Created" "$ca"
     if [[ "$(app_get "$app" suspended)" == "true" ]]; then
         printf "  %-14s ${YELLOW}%s${NC}\n" "Status" "suspended (offline)"
@@ -1393,6 +1398,10 @@ app_delete() {
     step "Workers...";     supervisorctl stop "${app}-worker-"* 2>/dev/null||true; supervisorctl stop "${app}-octane" 2>/dev/null||true; supervisorctl stop "${app}-reverb" 2>/dev/null||true; supervisorctl stop "${app}-horizon" 2>/dev/null||true; rm -f "/etc/supervisor/conf.d/${app}.conf"; reload_supervisor
     step "Nginx...";       rm -f "/etc/nginx/sites-enabled/${app}" "/etc/nginx/sites-available/${app}"; reload_nginx
     step "PHP-FPM...";     rm -f "/etc/php/${p}/fpm/pool.d/${app}.conf"; reload_php_fpm "$p" 2>/dev/null||true
+    # Databases linked to the app (cipi db link) are not the app's to take
+    # with it: they stay, and the link goes with the app's entry.
+    local kept_dbs
+    kept_dbs=$(vault_read apps.json | jq -r --arg a "$app" '[(.[$a].databases // [])[] | "\(.name) (\(.engine // "mariadb"))"] | join(", ")' 2>/dev/null || true)
     local skip_db; skip_db=false
     [[ "$(app_get "$app" custom)" == "true" ]] && skip_db=true
     if [[ "$skip_db" != "true" ]]; then
@@ -1443,7 +1452,9 @@ app_delete() {
         "An app was deleted.\n\nServer: $(hostname)\nApp: ${app}\nDomain: ${d}\nPHP: ${p}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         app_delete
 
-    echo ""; success "'${app}' deleted"; echo ""
+    echo ""; success "'${app}' deleted"
+    [[ -n "$kept_dbs" ]] && echo -e "  ${DIM}Linked database(s) kept: ${kept_dbs} — remove one with: cipi db delete <name>${NC}"
+    echo ""
 }
 
 # ── ENV / LOGS / TINKER / ARTISAN ─────────────────────────────

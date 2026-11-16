@@ -809,7 +809,7 @@ _update_apps_public() {
             basic_auth, www_redirect, redirect, redirects, proxies, force_https, custom, docroot, engine,
             octane, octane_port, reverb, reverb_port, horizon, schedule, node_build,
             cloned_from, predeploy_snapshot, limits, ini, health_url, health_expect,
-            ssl_dns_provider, backup_profiles, search,
+            ssl_dns_provider, backup_profiles, search, databases,
             runtime, node_mode, node_version, node_framework, node_output, node_start, node_health, node_ports
         })
     ' > "${CIPI_CONFIG}/apps-public.json" 2>/dev/null || return 0

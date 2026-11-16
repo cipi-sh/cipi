@@ -17,10 +17,12 @@ db_command() {
         create)    _db_create "$@" ;;
         list|ls)   _db_list "$@" ;;
         delete)    _db_delete "$@" ;;
+        link)      _db_link "$@" ;;
+        unlink)    _db_unlink "$@" ;;
         backup)    _db_backup "$@" ;;
         restore)   _db_restore "$@" ;;
         password)  _db_password "$@" ;;
-        *) error "Use: install uninstall default engines create list delete backup restore password upgrade"; exit 1 ;;
+        *) error "Use: install uninstall default engines create list delete link unlink backup restore password upgrade"; exit 1 ;;
     esac
 }
 
@@ -226,6 +228,97 @@ _db_meta_del() {
 _db_meta_user() {
     local engine="$1" name="$2"
     vault_read databases.json | jq -r --arg e "$engine" --arg n "$name" '.[$e][$n].user // $n' 2>/dev/null
+}
+
+# ── Databases linked to an app ───────────────────────────────
+#
+# `cipi db create` makes a database that belongs to nobody: the WordPress of
+# a custom app has one, and nothing on the server or in the panel says so. A
+# link is one line in the app's entry of apps.json —
+#     "databases": [{"name": "wpblog", "engine": "mariadb"}]
+# — so it is in the projection the panel reads, travels with the app
+# (cipi sync) and is gone with it when the app is deleted. A database is
+# linked to one app at most. The link grants nothing: the database keeps its
+# own user and password, and deleting the app leaves it where it is.
+#
+# Without a link a database still has an owner Cipi already knows: the one
+# created with a Laravel app has the app's name ("own"), and cipi.yml lets an
+# app declare databases named <app>_… ("namespace").
+
+# Every explicit link, "<app>\t<engine>\t<name>" per line.
+_db_links() {
+    vault_read apps.json 2>/dev/null | jq -r '
+        to_entries[] | .key as $a | (.value.databases // [])[]
+        | select((.name // "") != "") | [$a, (.engine // "mariadb"), .name] | @tsv' 2>/dev/null || true
+}
+
+# The app a database is linked to (an explicit link only); nothing when none.
+db_linked_app() {   # <engine> <name>
+    _db_links | awk -F'\t' -v e="$1" -v n="$2" '$2 == e && $3 == n { print $1; exit }'
+}
+
+_db_link_del() {   # <engine> <name>
+    [[ -f "${CIPI_CONFIG}/apps.json" ]] || return 0
+    local cur; cur=$(vault_read apps.json) || return 0
+    jq -e --arg e "$1" --arg n "$2" 'any(.[]; (.databases // []) | any(.name == $n and (.engine // "mariadb") == $e))' <<< "$cur" &>/dev/null || return 0
+    jq --arg e "$1" --arg n "$2" '
+        with_entries(if (.value | has("databases")) then
+            .value.databases |= map(select((.name == $n and (.engine // "mariadb") == $e) | not))
+            | if (.value.databases | length) == 0 then .value |= del(.databases) else . end
+        else . end)' <<< "$cur" | vault_write apps.json
+    ensure_apps_json_api_access
+}
+
+_db_link_set() {   # <app> <engine> <name>
+    _db_link_del "$2" "$3"
+    vault_read apps.json | jq --arg a "$1" --arg e "$2" --arg n "$3" '
+        .[$a].databases = (((.[$a].databases // []) + [{name: $n, engine: $e}]) | sort_by(.engine, .name))
+    ' | vault_write apps.json
+    ensure_apps_json_api_access
+}
+
+# cipi db link <database> <app> [--engine=]
+_db_link() {
+    local name="${1:-}" app="${2:-}"
+    [[ -z "$name" || -z "$app" || "$name" == --* || "$app" == --* ]] && { error "Usage: cipi db link <database> <app> [--engine=]"; exit 1; }
+    validate_db_name "$name" || { error "Invalid name"; exit 1; }
+    app_exists "$app" || { error "App '${app}' not found"; exit 1; }
+    parse_args "$@"
+    local RESOLVED_ENGINE=""
+    _db_resolve_name_engine "$name" || exit 1
+    local engine="$RESOLVED_ENGINE"
+    local have; have=$(db_list_databases "$engine" 2>/dev/null || true)
+    grep -qx -- "$name" <<< "$have" || { error "No database '${name}' on ${engine}"; exit 1; }
+    local own_engine; own_engine=$(app_get "$app" engine); [[ -z "$own_engine" ]] && own_engine="mariadb"
+    if [[ "$name" == "$app" && "$(app_get "$app" custom)" != "true" && "$(db_normalize_engine "$own_engine" 2>/dev/null || echo mariadb)" == "$engine" ]]; then
+        info "'${name}' is the database created with '${app}' — it is already shown as its own"
+        return 0
+    fi
+    local was; was=$(db_linked_app "$engine" "$name")
+    if [[ "$was" == "$app" ]]; then
+        info "'${name}' (${engine}) is already linked to '${app}'"
+        return 0
+    fi
+    _db_link_set "$app" "$engine" "$name"
+    log_action "DB LINKED: $name ($engine) -> $app${was:+ (was $was)}"
+    success "'${name}' (${engine}) linked to app '${app}'${was:+ — it was linked to '${was}'}"
+    echo -e "  ${DIM}Only a label: the database keeps its user and password, and stays when the app is deleted.${NC}"
+}
+
+# cipi db unlink <database> [--engine=]
+_db_unlink() {
+    local name="${1:-}"
+    [[ -z "$name" || "$name" == --* ]] && { error "Usage: cipi db unlink <database> [--engine=]"; exit 1; }
+    validate_db_name "$name" || { error "Invalid name"; exit 1; }
+    parse_args "$@"
+    local RESOLVED_ENGINE=""
+    _db_resolve_name_engine "$name" || exit 1
+    local engine="$RESOLVED_ENGINE" was
+    was=$(db_linked_app "$engine" "$name")
+    [[ -n "$was" ]] || { info "'${name}' (${engine}) is not linked to an app"; return 0; }
+    _db_link_del "$engine" "$name"
+    log_action "DB UNLINKED: $name ($engine) from $was"
+    success "'${name}' (${engine}) unlinked from app '${was}'"
 }
 
 # ── Low-level SQL ops ────────────────────────────────────────
@@ -446,9 +539,31 @@ db_dump_database_ex() {
     [[ -s "$outfile" ]]
 }
 
-# The dump as a stream, however it is stored.
-_db_dump_cat() {
+# The dump as a stream, however it is stored. With a second argument the
+# file is opened by that user instead of root (db_dump_reader).
+_db_dump_cat() {   # <file> [user]
+    if [[ -n "${2:-}" ]]; then
+        if [[ "$1" == *.gz ]]; then app_as "$2" gunzip -c -- "$1" < /dev/null
+        else app_as "$2" cat -- "$1" < /dev/null; fi
+        return
+    fi
     if [[ "$1" == *.gz ]]; then gunzip -c "$1"; else cat "$1"; fi
+}
+
+# Who opens a dump root is asked to restore. A file in an app's home, or in
+# a tree of the panel (the API keeps the dumps uploaded through it in its own
+# storage), is whatever that user made of the name a moment ago — a symlink
+# to a file only root reads, for one. Root opening it would lend its rights
+# to the import, and the first line the client cannot parse comes back in
+# the error. So the owner of the tree opens it: the rule of app_as in
+# common.sh. Prints the user, or nothing for a file that is root's to read.
+db_dump_reader() {   # <file>
+    local f="${1:-}" o
+    [[ "${EUID:-$(id -u)}" -eq 0 ]] || return 0
+    declare -f app_of_path >/dev/null 2>&1 || return 0
+    if o=$(app_of_path "$f"); then printf '%s' "$o"; return 0; fi
+    if _panel_tree_is_www "$f"; then printf '%s' "www-data"; return 0; fi
+    return 0
 }
 
 # psql stops at the first failed statement (ON_ERROR_STOP), so the preamble of
@@ -499,13 +614,14 @@ _db_restore_say_why() {
 # does not even uncompress must not count as restored either.
 db_restore_database() {
     local engine="$1" name="$2" file="$3"
-    local err rc=0
+    local err rc=0 reader=""
+    reader=$(db_dump_reader "$file")
     err=$(mktemp) || return 1
     case "$engine" in
         mariadb)
             local dbr; dbr=$(db_get_root_password mariadb)
             ( set -o pipefail
-              _db_dump_cat "$file" 2>>"$err" \
+              _db_dump_cat "$file" "$reader" 2>>"$err" \
                 | mariadb -u root -p"$dbr" "$name" >/dev/null 2>>"$err" ) || rc=$?
             ;;
         pgsql)
@@ -522,7 +638,7 @@ db_restore_database() {
             ( set -o pipefail
               { printf '%s\n' "BEGIN;" "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" \
                     "DO \$\$ BEGIN EXECUTE format('ALTER SCHEMA public OWNER TO %I', (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database())); END \$\$;"
-                _db_dump_cat "$file" 2>>"$err" | _db_pgsql_restore_filter "$dbr" 2>>"$err" && printf '%s\n' "COMMIT;"
+                _db_dump_cat "$file" "$reader" 2>>"$err" | _db_pgsql_restore_filter "$dbr" 2>>"$err" && printf '%s\n' "COMMIT;"
               } | PGPASSWORD="$dbr" psql -U postgres -h 127.0.0.1 -p 5432 -d "$name" -v ON_ERROR_STOP=1 >/dev/null 2>>"$err" ) || rc=$?
             ;;
         *) rm -f "${err:?}"; return 1 ;;
@@ -854,6 +970,13 @@ _db_create() {
     validate_db_name "$name" || { error "Invalid name"; exit 1; }
     [[ -z "$user" ]] && user="$name"
     validate_db_name "$user" || { error "Invalid user"; exit 1; }
+    # --app=<app>: the database is shown as that app's (cipi db list, cipi app
+    # show, the panel). Checked before anything is created.
+    local link_app="${ARG_app:-}"
+    if [[ -n "$link_app" ]]; then
+        [[ "$link_app" != "true" ]] || { error "--app needs a name: --app=<app>"; exit 1; }
+        app_exists "$link_app" || { error "App '${link_app}' not found"; exit 1; }
+    fi
 
     # Collision within same engine
     local meta
@@ -866,16 +989,66 @@ _db_create() {
     step "Creating database on $(db_engine_label "$engine")..."
     db_create_database "$engine" "$name" "$user" "$pass" || { error "Create failed"; exit 1; }
     _db_meta_set "$engine" "$name" "$user"
+    [[ -n "$link_app" ]] && _db_link_set "$link_app" "$engine" "$name"
 
-    log_action "DB CREATED: $name ($engine)"
+    log_action "DB CREATED: $name ($engine)${link_app:+ for $link_app}"
     cipi_notify \
         "Cipi database created: ${name} (${engine}) on $(hostname)" \
-        "A database was created.\n\nServer: $(hostname)\nEngine: ${engine}\nDatabase: ${name}\nUser: ${user}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A database was created.\n\nServer: $(hostname)\nEngine: ${engine}\nDatabase: ${name}\nUser: ${user}${link_app:+\\nApp: ${link_app}}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         db_create
     echo -e "\n${GREEN}✓${NC} Engine: ${CYAN}${engine}${NC}  Database: ${CYAN}${name}${NC}  User: ${CYAN}${user}${NC}  Password: ${CYAN}${pass}${NC}"
+    [[ -n "$link_app" ]] && echo -e "  App: ${CYAN}${link_app}${NC}"
     echo -e "${YELLOW}Save this password!${NC}\n"
+    return 0
 }
 
+# Who a database belongs to, for cipi db list: "<app>\t<kind>" — linked (an
+# explicit link), own (the database created with a Laravel app), namespace
+# (<app>_…, what cipi.yml lets an app declare) — or nothing.
+# Reads _DBL_LINK, _DBL_OWN and _DBL_APPS of the caller.
+_db_list_owner() {   # <engine> <database>
+    local engine="$1" db="$2" a best=""
+    if [[ -n "${_DBL_LINK["${engine}/${db}"]:-}" ]]; then
+        printf '%s\tlinked' "${_DBL_LINK["${engine}/${db}"]}"; return 0
+    fi
+    if [[ "${_DBL_OWN["$db"]:-}" == "$engine" ]]; then
+        printf '%s\town' "$db"; return 0
+    fi
+    for a in $_DBL_APPS; do
+        [[ "$db" == "${a}_"* && ${#a} -gt ${#best} ]] && best="$a"
+    done
+    [[ -n "$best" ]] && printf '%s\tnamespace' "$best"
+    return 0
+}
+
+# One database of the list: a table row, or a JSON line when --json.
+_db_list_row() {   # <engine> <database> <user> <size MB>
+    local engine="$1" db="$2" u="$3" sz="$4" o app="" kind=""
+    o=$(_db_list_owner "$engine" "$db")
+    [[ -n "$o" ]] && { app="${o%%$'\t'*}"; kind="${o#*$'\t'}"; }
+    if [[ "$_DBL_JSON" == true ]]; then
+        _DBL_ROWS+=("$(jq -cn --arg e "$engine" --arg n "$db" --arg u "$u" --arg s "$sz" --arg a "$app" --arg k "$kind" '
+            {engine: $e, name: $n, user: (if $u == "" or $u == "—" then null else $u end),
+             size_mb: ($s | tonumber? // 0), size: ($s + " MB"),
+             app: (if $a == "" then null else $a end), link: (if $k == "" then null else $k end)}')")
+        return 0
+    fi
+    if [[ "$_DBL_APP_COL" == true ]]; then
+        local label="—"
+        [[ -n "$app" ]] && label="$app"
+        [[ "$kind" == "linked" ]] && label="${label} ${DIM}(linked)${NC}"
+        tbl_row "$engine" "$db" "$u" "${sz} MB" "$label"
+    else
+        tbl_row "$engine" "$db" "$u" "${sz} MB"
+    fi
+}
+
+# cipi db list [--engine=] [--json]
+#
+# The APP column is for a person at a terminal. The panel API up to 1.38
+# reads this table with a regex that takes everything after the user as the
+# size, and the other lines as database names: piped or run by the panel the
+# table keeps the four columns it always had, and --json carries the rest.
 _db_list() {
     parse_args "$@"
     local filter="${ARG_engine:-}"
@@ -895,12 +1068,31 @@ _db_list() {
     [[ ${#engines[@]} -eq 0 ]] && { error "No database engines installed"; exit 1; }
 
     local db_meta app_meta
-    db_meta=$(vault_read databases.json 2>/dev/null)
-    app_meta=$(vault_read apps.json 2>/dev/null)
+    db_meta=$(vault_read databases.json 2>/dev/null) || db_meta="{}"
+    app_meta=$(vault_read apps.json 2>/dev/null) || app_meta="{}"
 
-    echo -e "\n${BOLD}Databases${NC}"
-    tbl_start
-    tbl_head "ENGINE" "DATABASE" "USER" "SIZE"
+    local _DBL_JSON=false _DBL_APP_COL=false _DBL_APPS="" _la _le _ln
+    local -a _DBL_ROWS=()
+    local -A _DBL_LINK=() _DBL_OWN=()
+    [[ "${ARG_json:-}" == "true" ]] && _DBL_JSON=true
+    [[ "$_DBL_JSON" == false && -t 1 ]] && _DBL_APP_COL=true
+    while IFS=$'\t' read -r _la _le _ln; do
+        [[ -n "$_la" && -n "$_ln" ]] && _DBL_LINK["${_le}/${_ln}"]="$_la"
+    done < <(jq -r 'to_entries[] | .key as $a | (.value.databases // [])[] | select((.name // "") != "") | [$a, (.engine // "mariadb"), .name] | @tsv' <<< "$app_meta" 2>/dev/null || true)
+    while IFS=$'\t' read -r _la _le; do
+        [[ -n "$_la" ]] && _DBL_OWN["$_la"]="$_le"
+    done < <(jq -r 'to_entries[] | select((.value.custom // false) != true) | [.key, (.value.engine // "mariadb")] | @tsv' <<< "$app_meta" 2>/dev/null || true)
+    _DBL_APPS=$(jq -r 'keys[]' <<< "$app_meta" 2>/dev/null | tr '\n' ' ' || true)
+
+    if [[ "$_DBL_JSON" == false ]]; then
+        echo -e "\n${BOLD}Databases${NC}"
+        tbl_start
+        if [[ "$_DBL_APP_COL" == true ]]; then
+            tbl_head "ENGINE" "DATABASE" "USER" "SIZE" "APP"
+        else
+            tbl_head "ENGINE" "DATABASE" "USER" "SIZE"
+        fi
+    fi
 
     local engine
     for engine in "${engines[@]}"; do
@@ -929,7 +1121,7 @@ _db_list() {
                     fi
                     [[ -z "$u" ]] && u="—"
                     [[ -z "$sz" || "$sz" == "NULL" ]] && sz="0"
-                    tbl_row "mariadb" "$db" "$u" "${sz} MB"
+                    _db_list_row "mariadb" "$db" "$u" "$sz"
                 done <<< "$rows"
                 ;;
             pgsql)
@@ -955,11 +1147,19 @@ _db_list() {
                     fi
                     [[ -z "$u" ]] && u="—"
                     [[ -z "$sz" || "$sz" == "NULL" ]] && sz="0"
-                    tbl_row "pgsql" "$db" "$u" "${sz} MB"
+                    _db_list_row "pgsql" "$db" "$u" "$sz"
                 done <<< "$rows"
                 ;;
         esac
     done
+    if [[ "$_DBL_JSON" == true ]]; then
+        if [[ ${#_DBL_ROWS[@]} -gt 0 ]]; then
+            printf '%s\n' "${_DBL_ROWS[@]}" | jq -s '{databases: .}'
+        else
+            echo '{"databases": []}'
+        fi
+        return 0
+    fi
     tbl_print
     echo ""
 }
@@ -998,6 +1198,7 @@ _db_delete() {
     validate_db_name "$u" || { error "Invalid stored user for '${name}'"; exit 1; }
     db_drop_database "$engine" "$name" "$u"
     _db_meta_del "$engine" "$name"
+    _db_link_del "$engine" "$name"
     log_action "DB DELETED: $name ($engine)"
     cipi_notify \
         "Cipi database deleted: ${name} (${engine}) on $(hostname)" \
@@ -1024,7 +1225,14 @@ _db_restore() {
     local name="${1:-}" file="${2:-}"
     [[ -z "$name" || -z "$file" ]] && { error "Usage: cipi db restore <name> <file> [--engine=] [--force]"; exit 1; }
     validate_db_name "$name" || { error "Invalid name"; exit 1; }
-    [[ ! -f "$file" ]] && { error "File not found: $file"; exit 1; }
+    # In an app's home or in a panel tree the file is looked at, and later
+    # opened, by the user that tree belongs to (db_dump_reader).
+    local reader; reader=$(db_dump_reader "$file")
+    if [[ -n "$reader" ]]; then
+        app_as "$reader" test -f "$file" < /dev/null 2>/dev/null || { error "File not found (or not readable by ${reader}): $file"; exit 1; }
+    else
+        [[ ! -f "$file" ]] && { error "File not found: $file"; exit 1; }
+    fi
     parse_args "$@"
     if [[ "${ARG_force:-}" != "true" ]] && [[ -t 0 ]]; then
         confirm "Restore '${name}' from '${file}'?" || { info "Cancelled"; return; }

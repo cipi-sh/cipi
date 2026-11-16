@@ -203,8 +203,9 @@ _cipi_complete() {
             esac ;;
 
         deploy)
-            if [[ $pos -eq 1 ]]; then sub="$(_cipi_apps)"
-            else sub="--snapshot --rollback --releases --log --status --tail= --key --webhook --unlock --trust-host= --rollback-on-unhealthy --audit --days= --json"; fi ;;
+            if [[ $pos -eq 1 ]]; then sub="$(_cipi_apps) --last --history"
+            elif [[ $pos -eq 2 && "$w1" == "--history" ]]; then sub="$(_cipi_apps)"
+            else sub="--snapshot --rollback --releases --history --limit= --last --log --status --tail= --key --webhook --unlock --trust-host= --rollback-on-unhealthy --audit --days= --json"; fi ;;
 
         use)
             [[ $pos -eq 1 ]] && sub="$(_cipi_apps) --clear" ;;
@@ -230,11 +231,13 @@ _cipi_complete() {
 
         db)
             case $pos in
-                1) sub="engines install uninstall default create list delete backup restore password upgrade" ;;
+                1) sub="engines install uninstall default create list delete link unlink backup restore password upgrade" ;;
                 2) case "$w1" in
                        install|uninstall|default|upgrade) sub="mariadb pgsql" ;;
+                       create) sub="--name= --engine= --user= --app=" ;;
+                       list)   sub="--engine= --json" ;;
                    esac ;;
-                3) case "$w1" in upgrade) sub="--yes" ;; esac ;;
+                3) case "$w1" in upgrade) sub="--yes" ;; link) sub="$(_cipi_apps)" ;; esac ;;
             esac ;;
 
         node)
@@ -336,6 +339,9 @@ _cipi_complete() {
                        profile)     sub="list show add edit remove enable disable" ;;
                        destination) sub="list show add edit remove test" ;;
                        key)         sub="show rotate" ;;
+                       status)      sub="--json" ;;
+                       run)         sub="--profile= --dry-run --detach" ;;
+                       list)        sub="--profile= --json" ;;
                    esac ;;
             esac ;;
 

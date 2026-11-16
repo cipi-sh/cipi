@@ -5,6 +5,16 @@
 # sudo-rs (Ubuntu 25.10+) allows '*' only as the final argument token.
 # Use "db restore *" (not "db restore * *") for multi-arg commands.
 #
+# 5.9.0 adds what the panel's Node, backup and database pages run: Node
+# runtimes (install, default, upgrade, remove), the link between a database
+# and an app, and the backup profiles — status and archive listings as JSON,
+# a run started in the background (--detach comes first on purpose: a plain
+# `backup run` would hold the panel's queue worker for as long as it takes),
+# verify, and the profiles themselves. Not here, and so not in the panel:
+# `backup configure` and `backup destination add|edit|remove` (an S3 secret
+# on a command line, which the panel would also keep in its jobs table),
+# `backup fetch`, `backup key` and `backup prune`.
+#
 # The file exists only while something runs PHP as www-data on behalf of a
 # person: the panel API (`cipi api <domain>`) or the GUI (`cipi gui <domain>`).
 # Until 5.8.5 setup.sh wrote it on every server; with nothing installed it
@@ -86,6 +96,11 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi node list, \
                                /usr/local/bin/cipi node status *, \
                                /usr/local/bin/cipi node restart *, \
+                               /usr/local/bin/cipi node install *, \
+                               /usr/local/bin/cipi node default *, \
+                               /usr/local/bin/cipi node upgrade, \
+                               /usr/local/bin/cipi node upgrade *, \
+                               /usr/local/bin/cipi node remove *, \
                                /usr/local/bin/cipi ssl install *, \
                                /usr/local/bin/cipi ssl force *, \
                                /usr/local/bin/cipi ssl dns *, \
@@ -99,6 +114,21 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi db backup *, \
                                /usr/local/bin/cipi db restore *, \
                                /usr/local/bin/cipi db password *, \
+                               /usr/local/bin/cipi db link *, \
+                               /usr/local/bin/cipi db unlink *, \
+                               /usr/local/bin/cipi backup status --json, \
+                               /usr/local/bin/cipi backup list --json, \
+                               /usr/local/bin/cipi backup list --json *, \
+                               /usr/local/bin/cipi backup run --detach, \
+                               /usr/local/bin/cipi backup run --detach *, \
+                               /usr/local/bin/cipi backup verify *, \
+                               /usr/local/bin/cipi backup profile add *, \
+                               /usr/local/bin/cipi backup profile edit *, \
+                               /usr/local/bin/cipi backup profile remove *, \
+                               /usr/local/bin/cipi backup profile enable *, \
+                               /usr/local/bin/cipi backup profile disable *, \
+                               /usr/local/bin/cipi backup destination test, \
+                               /usr/local/bin/cipi backup destination test *, \
                                /usr/local/bin/cipi search status, \
                                /usr/local/bin/cipi search status *, \
                                /usr/local/bin/cipi search list, \

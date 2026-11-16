@@ -637,9 +637,12 @@ _bk_profile_add() {
         && json=$(echo "$json" | jq --argjson v "$(_bk_csv_to_json "${ARG_apps}")" '.apps = $v')
     [[ -n "${ARG_databases:-}" ]] \
         && json=$(echo "$json" | jq --argjson v "$(_bk_csv_to_json "${ARG_databases}")" '.databases = $v')
-    [[ -n "${ARG_exclude_databases:-}" ]] \
+    # The two exclusion lists can be emptied again: --exclude-databases= (the
+    # flag with nothing after the equals sign). The panel edits a profile by
+    # sending every field, an emptied list included.
+    [[ -n "${ARG_exclude_databases+x}" ]] \
         && json=$(echo "$json" | jq --argjson v "$(_bk_csv_to_json "${ARG_exclude_databases}")" '.exclude_databases = $v')
-    [[ -n "${ARG_exclude_tables:-}" ]] \
+    [[ -n "${ARG_exclude_tables+x}" ]] \
         && json=$(echo "$json" | jq --argjson v "$(_bk_csv_to_json "${ARG_exclude_tables}")" '.exclude_tables = $v')
 
     # ── schedule
@@ -876,20 +879,64 @@ _bk_check_archive() {
 
 # ── Run ──────────────────────────────────────────────────────
 
+# cipi backup run … --detach: the same run, started on its own and left to
+# finish — its output goes to backup.log, like the scheduled ones, and
+# `cipi backup status` says when it is done. For whoever cannot wait for it:
+# the panel's queue worker gives a command ten minutes and takes its children
+# with it when it is recycled, and a backup of a real server needs longer.
+# Under systemd the run gets a unit of its own (nothing to do with the
+# caller's); without it, a session of its own.
+_bk_run_detached() {   # [args of cipi backup run, without --detach]
+    local log="${CIPI_LOG}/backup.log" bin="${CIPI_BIN:-/usr/local/bin/cipi}" started=false
+    mkdir -p "${CIPI_LOG}" 2>/dev/null || true
+    if [[ -d /run/systemd/system ]] && command -v systemd-run >/dev/null 2>&1; then
+        if systemd-run --quiet --collect --no-block \
+            --unit="cipi-backup-run-$(date +%s)-$$" \
+            --description="Cipi backup run (detached)" \
+            --setenv=HOME=/root \
+            --setenv=CIPI_BACKUP_LOG="$log" \
+            /bin/bash -c 'exec "$0" backup run "$@" >> "$CIPI_BACKUP_LOG" 2>&1' "$bin" "$@" 2>/dev/null; then
+            started=true
+        fi
+    fi
+    if [[ "$started" == false ]]; then
+        setsid nohup "$bin" backup run "$@" >> "$log" 2>&1 < /dev/null &
+        disown 2>/dev/null || true
+    fi
+    success "Backup started in the background"
+    echo -e "  ${DIM}Follow it: tail -f ${log}  ·  when it is done: cipi backup status${NC}"
+    return 0
+}
+
 _bk_run() {
-    local profile="" target="" dry=false
+    local profile="" target="" dry=false detach=false
     local arg
+    local -a pass=()
     for arg in "$@"; do
         case "$arg" in
-            --profile=*) profile="${arg#--profile=}" ;;
+            --profile=*) profile="${arg#--profile=}"; pass+=("$arg") ;;
             --dry-run)   dry=true ;;
+            --detach)    detach=true ;;
             --*)         error "Unknown flag: ${arg}"; exit 1 ;;
-            *)           target="$arg" ;;
+            *)           target="$arg"; pass+=("$arg") ;;
         esac
     done
 
     _bk_require_config
     _bk_ensure_default_profile
+
+    if [[ "$detach" == true ]]; then
+        [[ "$dry" == false ]] || { error "--detach and --dry-run do not go together"; exit 1; }
+        if [[ -n "$profile" ]]; then
+            _bk_valid_profile_name "$profile" || { error "Invalid profile name: ${profile}"; exit 1; }
+            _bk_profile_exists "$profile" || { error "No such profile: ${profile}"; exit 1; }
+        fi
+        if [[ -n "$target" ]]; then
+            app_exists "$target" || { error "App '${target}' not found"; exit 1; }
+        fi
+        _bk_run_detached "${pass[@]}"
+        return 0
+    fi
 
     # `cipi backup run` / `cipi backup run <app>` keep their old meaning: run
     # every enabled profile (optionally narrowed to one app).
@@ -1485,10 +1532,11 @@ _bk_prune_legacy() {
 
 _bk_list() {
     _bk_require_config
-    local profile="" arg
+    local profile="" arg json=false
     for arg in "$@"; do
         case "$arg" in
             --profile=*) profile="${arg#--profile=}" ;;
+            --json) json=true ;;
             --*) error "Unknown flag: ${arg}"; exit 1 ;;
             *)   profile="$arg" ;;
         esac
@@ -1500,6 +1548,10 @@ _bk_list() {
         names="$profile"
     else
         names=$(_bk_profile_names)
+    fi
+    if [[ "$json" == true ]]; then
+        _bk_list_json "$profile"
+        return 0
     fi
 
     local p ts n
@@ -1530,7 +1582,179 @@ _bk_list() {
 
 # ── Status / staleness ───────────────────────────────────────
 
+# Profiles a `cipi backup run` is working on right now, one per line; "*" for
+# a run of every profile. From the process table, like `cipi deploy --status`.
+_bk_running() {
+    local pid args
+    ps axww -o pid=,args= 2>/dev/null | while read -r pid args; do
+        [[ "$pid" == "$$" || "$pid" == "${BASHPID:-}" ]] && continue
+        case "$args" in
+            *"/cipi backup run"*)
+                case " ${args#*/cipi backup run} " in *" --dry-run "*|*" --detach "*) continue ;; esac
+                if [[ "$args" =~ --profile=([a-z][a-z0-9-]{1,31}) ]]; then echo "${BASH_REMATCH[1]}"; else echo "*"; fi ;;
+        esac
+    done | sort -u
+    return 0
+}
+
+# cipi backup status --json — what a backup page is drawn from: the
+# destinations (never their keys), every profile with what it covers right
+# now, its last run, whether it is overdue or running, and the apps and
+# databases no enabled profile takes. It only reads: no default profile is
+# created and no "overdue" mail is sent, whatever asks and however often.
+_bk_status_json() {
+    if ! _bk_configured; then
+        jq -n '{configured: false, local_dir: null, encryption_key: false, destinations: [], profiles: [],
+                apps: [], databases: [], uncovered: {apps: [], databases: []}}'
+        return 0
+    fi
+    # shellcheck source=/dev/null
+    declare -f db_list_databases >/dev/null 2>&1 || source "${CIPI_LIB}/db.sh"
+    local cfg state now
+    cfg=$(_bk_cfg); state=$(_bk_state); now=$(date +%s)
+
+    local all_apps all_dbs="" eng db
+    all_apps=$(vault_read apps.json 2>/dev/null | jq -r 'keys[]' 2>/dev/null || true)
+    for eng in mariadb pgsql; do
+        db_engine_is_installed "$eng" 2>/dev/null || continue
+        while IFS= read -r db; do
+            [[ -n "$db" ]] && all_dbs+="${eng}"$'\t'"${db}"$'\n'
+        done < <(db_list_databases "$eng" 2>/dev/null || true)
+    done
+    local running; running=$(_bk_running)
+
+    local -a pj=()
+    local p prof scope enabled inc_apps inc_dbs exc_dbs a cov_apps cov_dbs interval last created overdue is_running
+    while IFS= read -r p; do
+        [[ -n "$p" ]] || continue
+        prof=$(jq -c --arg p "$p" '.profiles[$p]' <<< "$cfg")
+        scope=$(jq -r '.scope // "all"' <<< "$prof")
+        enabled=$(jq -r 'if .enabled == false then "false" else "true" end' <<< "$prof")
+        inc_apps=$(jq -r '(.apps // [])[]' <<< "$prof")
+        inc_dbs=$(jq -r '(.databases // [])[]' <<< "$prof")
+        exc_dbs=$(jq -r '(.exclude_databases // [])[]' <<< "$prof")
+        cov_apps=""; cov_dbs=""
+        if [[ "$scope" == "all" || "$scope" == "files" ]]; then
+            while IFS= read -r a; do
+                [[ -n "$a" ]] || continue
+                _bk_glob_match "$a" "$inc_apps" && cov_apps+="${a}"$'\n'
+            done <<< "$all_apps"
+        fi
+        if [[ "$scope" == "all" || "$scope" == "db" ]]; then
+            while IFS=$'\t' read -r eng db; do
+                [[ -n "$db" ]] || continue
+                _bk_glob_match "$db" "$inc_dbs" || continue
+                _bk_glob_match "$db" "$exc_dbs" && continue
+                cov_dbs+="${eng}"$'\t'"${db}"$'\n'
+            done <<< "$all_dbs"
+        fi
+        # Overdue by the rule of `cipi backup check`: no success within twice
+        # the profile's interval, and a new profile gets that long to start.
+        overdue=false
+        if [[ "$enabled" == "true" ]]; then
+            interval=$(jq -r '.interval_seconds // 86400' <<< "$prof"); [[ "$interval" =~ ^[0-9]+$ ]] || interval=86400
+            last=$(jq -r --arg p "$p" '.[$p].last_success_epoch // 0' <<< "$state"); [[ "$last" =~ ^[0-9]+$ ]] || last=0
+            created=$(jq -r '.created_at // 0' <<< "$prof"); [[ "$created" =~ ^[0-9]+$ ]] || created=0
+            if [[ "$last" -eq 0 ]]; then
+                [[ "$created" -gt 0 && $(( now - created )) -lt $(( interval * 2 )) ]] || overdue=true
+            elif [[ $(( now - last )) -gt $(( interval * 2 )) ]]; then
+                overdue=true
+            fi
+        fi
+        is_running=false
+        grep -qxF -e "$p" <<< "$running" && is_running=true
+        [[ "$enabled" == "true" ]] && grep -qxF -e '*' <<< "$running" && is_running=true
+        pj+=("$(jq -cn --arg name "$p" --argjson prof "$prof" --arg apps "$cov_apps" --arg dbs "$cov_dbs" \
+            --argjson st "$(jq -c --arg p "$p" '.[$p] // null' <<< "$state")" \
+            --argjson overdue "$overdue" --argjson running "$is_running" '
+            {name: $name, scope: ($prof.scope // "all"), enabled: ($prof.enabled != false),
+             cron: ($prof.cron // null), interval_seconds: ($prof.interval_seconds // null),
+             apps: ($prof.apps // []), databases: ($prof.databases // []),
+             exclude_databases: ($prof.exclude_databases // []), exclude_tables: ($prof.exclude_tables // []),
+             destinations: ($prof.destinations // []),
+             retention: {keep: ($prof.retention.keep // 0), days: ($prof.retention.days // 0), weeks: ($prof.retention.weeks // 0)},
+             encrypt: ($prof.encrypt == true), created_at: ($prof.created_at // null),
+             covers: {apps: ($apps | split("\n") | map(select(. != ""))),
+                      databases: ($dbs | split("\n") | map(select(. != "") | split("\t") | {engine: .[0], name: .[1]}))},
+             last: (if $st == null then null else
+                 {status: ($st.status // null), detail: ($st.detail // null),
+                  started_at: ($st.last_start // null), finished_at: ($st.last_end // null),
+                  epoch: ($st.last_epoch // null), last_success_epoch: ($st.last_success_epoch // null)} end),
+             overdue: $overdue, running: $running}')")
+    done < <(jq -r '(.profiles // {}) | keys[]' <<< "$cfg")
+
+    local profiles_json="[]" key=false
+    [[ ${#pj[@]} -gt 0 ]] && profiles_json=$(printf '%s\n' "${pj[@]}" | jq -cs .)
+    [[ -f "$BACKUP_KEY_FILE" ]] && key=true
+    jq -n --argjson cfg "$cfg" --argjson profiles "$profiles_json" --argjson key "$key" \
+        --arg local "$(_bk_local_root)" --arg apps "$all_apps" --arg dbs "$all_dbs" '
+        def nz: if . == null or . == "" then null else . end;
+        ($apps | split("\n") | map(select(. != ""))) as $A
+        | ($dbs | split("\n") | map(select(. != "") | split("\t") | {engine: .[0], name: .[1]})) as $D
+        | ($profiles | map(select(.enabled))) as $on
+        | {configured: true, local_dir: $local, encryption_key: $key,
+           destinations: (
+               [{name: "local", type: "local", path: $local, default: false}]
+               + (if ($cfg.bucket // "") != "" then
+                    [{name: "s3", type: "s3", bucket: $cfg.bucket, region: ($cfg.region // "eu-central-1"),
+                      endpoint: ($cfg.endpoint_url | nz), default: true}] else [] end)
+               + (($cfg.s3_destinations // {}) | to_entries | map(
+                    {name: .key, type: "s3", bucket: (.value.bucket // null), region: (.value.region | nz),
+                     endpoint: (.value.endpoint_url | nz), default: false}))
+               | map(. as $d | . + {profiles: [$profiles[] | select(.destinations | index($d.name) != null) | .name]})),
+           profiles: $profiles, apps: $A, databases: $D,
+           uncovered: {
+               apps: ($A - ([$on[].covers.apps[]] | unique)),
+               databases: ($D - ([$on[].covers.databases[]] | unique))}}'
+    return 0
+}
+
+# cipi backup list --json [--profile=NAME] — the runs each destination holds,
+# newest first. One listing per profile and bucket, not one per run.
+_bk_list_json() {   # [profile]
+    local only="${1:-}" names p ts dn errs="" errf out
+    if [[ -n "$only" ]]; then names="$only"; else names=$(_bk_profile_names); fi
+    errf=$(mktemp) || return 1
+    local -a pj=()
+    while IFS= read -r p; do
+        [[ -n "$p" ]] || continue
+        local -A where=()
+        local ldir; ldir="$(_bk_local_root)/${p}"
+        if [[ -d "$ldir" ]]; then
+            while IFS= read -r ts; do
+                [[ "$ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}$ ]] && where["$ts"]="local"
+            done < <(ls -1 "$ldir" 2>/dev/null || true)
+        fi
+        while IFS= read -r dn; do
+            [[ -n "$dn" ]] || continue
+            : > "$errf"
+            out=$(_bk_s3_ls_dirs "$dn" "$(_bk_s3_uri "$dn" "$p")" 2>"$errf" || true)
+            [[ -s "$errf" ]] && errs+="$(tail -1 "$errf")"$'\n'
+            while IFS= read -r ts; do
+                [[ "$ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}$ ]] || continue
+                where["$ts"]="${where["$ts"]:-}${where["$ts"]:+,}${dn}"
+            done <<< "$out"
+        done < <(_bk_s3_names)
+        local rows=""
+        for ts in "${!where[@]}"; do rows+="${ts}"$'\t'"${where["$ts"]}"$'\n'; done
+        pj+=("$(jq -cn --arg p "$p" --arg rows "$rows" '
+            {key: $p, value: ($rows | split("\n") | map(select(. != "") | split("\t")
+                | {run: .[0], destinations: (.[1] | split(","))}) | sort_by(.run) | reverse)}')")
+        unset where
+    done <<< "$names"
+    rm -f "$errf"
+    local body="[]"
+    [[ ${#pj[@]} -gt 0 ]] && body=$(printf '%s\n' "${pj[@]}" | jq -cs .)
+    jq -n --argjson e "$body" --arg errs "$errs" \
+        '{profiles: ($e | from_entries), errors: ($errs | split("\n") | map(select(. != "")) | unique)}'
+    return 0
+}
+
 _bk_status() {
+    local _a
+    for _a in "$@"; do
+        [[ "$_a" == "--json" ]] && { _bk_status_json; return; }
+    done
     _bk_configured || {
         echo -e "\n${BOLD}Backup${NC}"
         echo -e "  ${YELLOW}Not configured${NC} — run: ${CYAN}cipi backup configure${NC}\n"

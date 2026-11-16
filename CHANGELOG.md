@@ -4,6 +4,39 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.9.0] — 2026-11-16
+
+What people who run Cipi every day asked for, on the command line first — the panel API (1.39.0) and the GUI (4.2.0) are built on these commands.
+
+One of the requests was a bug report: "deploys started by the webhook do not save how long they took". They do — both deploy paths write the same end banner, with the duration, to the deploy log. What loses it is the night: `deploy.log` is rotated daily (`copytruncate`), so the banners of yesterday's runs are in `deploy.log.1` and older ones in `deploy.log.N.gz`, and the panel read `deploy.log` alone. A deploy somebody starts is watched while it runs; one a push starts is looked at the day after, when its banner is no longer in the file. The history is now a command that reads the rotated files too.
+
+### Added
+
+- **`cipi deploy <app> --history [--limit=30] [--json]`** — past deploys and rollbacks, newest first: result, release, duration, exit code, trigger, branch, when it started and ended. It reads `deploy.log` and its rotated files, newest first and only as far back as it takes. `--json` gives each run the keys of `last` in `--status --json`, with ISO 8601 times. **`cipi deploy --last [--json]`** is every app's last run in one call (and `cipi deploy <app> --last` one app's). Both also exist with the flag first — `cipi deploy --history <app>` — because a Cipi older than 5.9.0 answers "App '--history' not found" to that form and would *deploy* on the other: the panel uses the safe one. `cipi deploy <app> --releases` finds a release's duration in the rotated logs as well.
+- **Horizon is detected at deploy.** When a deploy finds `laravel/horizon` installed, `QUEUE_CONNECTION=redis` in the app's `.env` and no queue worker configured, it enables Horizon (what `cipi worker horizon enable <app>` does) — an app in that state has nothing processing its jobs. In the other two cases it says what to do, once per situation, and changes nothing: with `queue:work` workers already there (they are never replaced on their own) and with another queue connection (the two commands to run are printed; the `.env` is never edited). `cipi worker horizon disable <app>` is remembered: Horizon is not turned back on. Webhook deploys run as the app user and cannot enable it; `cipi pending` lists the apps left without a worker.
+- **Databases linked to an app.** `cipi db create --app=<app>` creates a database and shows it as that app's — the WordPress of a custom app, a second database of a Laravel app. `cipi db link <database> <app>` and `cipi db unlink <database>` do the same for one that exists. A link is a line in the app's entry of `apps.json` (`databases: [{name, engine}]`): it is in the projection the panel reads, travels with `cipi sync`, and is gone with the app — the database is not, and `cipi app delete` says which ones it left. It is a label: the database keeps its own user and password. `cipi db list` has an APP column on a terminal, and `--json` carries `app` and `link` for every database — `linked`, `own` (the one created with a Laravel app) or `namespace` (`<app>_…`, what `cipi.yml` lets an app declare). `cipi app show` lists the linked ones.
+- **`cipi backup status --json`** — what a backup page is drawn from: the destinations (never their keys), every profile with the apps and databases its globs cover right now, its last run, whether it is overdue or running, and the apps and databases no enabled profile takes. It only reads: no default profile is created and no "overdue" mail is sent, however often it is asked. **`cipi backup list --json [--profile=]`** lists the runs each destination holds with one listing per profile and bucket.
+- **`cipi backup run --detach [--profile=NAME]`** starts the run and returns; the output goes to `backup.log`, like the scheduled runs, and `cipi backup status` says how it ended. Under systemd the run gets a transient unit of its own, otherwise a session of its own — the panel's queue worker gives a command ten minutes and takes its children with it when it is recycled.
+- **`cipi backup profile edit <name> --exclude-databases=`** (and `--exclude-tables=`) with nothing after the equals sign empties the list; until now an exclusion could be changed but not removed.
+- **An optional Git provider step in `setup.sh`.** After the install the wizard asks where the repositories are — GitHub, GitLab (gitlab.com or self-hosted), Bitbucket, Azure DevOps, or Enter to skip — shows where the token is created and which permissions it needs, and saves it with `cipi git <provider>-token` (read without echo). With a token, `cipi app create` adds the deploy key and the webhook to each repository by itself. Skipping changes nothing, and without a terminal the step only prints the command for later.
+- **The panel may manage Node runtimes, backup profiles and database links.** `/etc/sudoers.d/cipi-api` gains `cipi node install|default|upgrade|remove`, `cipi db link|unlink`, `cipi backup status --json`, `backup list --json`, `backup run --detach`, `backup verify`, `backup profile add|edit|remove|enable|disable` and `backup destination test`. Migration 5.9.0 rewrites the file on servers with a panel, checks it with `visudo` and puts the previous one back if it is refused. Not there, on purpose: `backup configure` and `backup destination add|edit|remove` (an S3 secret on a command line, which the panel would also keep in its jobs table), `backup key`, `backup fetch`, `backup prune`, and a backup run that is not detached.
+
+### Changed
+
+- **`cipi db restore <name> <file>` opens the file as the owner of the tree it is in**: the app user for a dump in an app's home, `www-data` for one in the panel's storage (where the API keeps the dumps uploaded through it). Root opening a name another user controls lends its rights to whatever the name points at — the rule 5.8.6 applied everywhere else under `/home/<app>`. A dump in a directory of root's is read as before.
+- `cipi db list`, piped or run by the panel, prints the four columns it always had: the panel API up to 1.38 reads that table with a regex.
+
+### Tests
+
+- `tests/verify-5.9.0.sh`: the Horizon states and the advice given once; the history across rotated and gzipped logs, a run that starts before a rotation and ends after it, a time `date` cannot read, a control character in a banner, the forms that must never deploy; links (one app at most, own and namespace databases, the four columns checked with the old panel's regex); who opens a dump; the backup JSON (no key in it, covers, overdue, uncovered, nothing written), a detached run really started in its own session; the sudoers rules, parsed by `visudo`.
+
+### Ecosystem
+
+- **cipi/api 1.39.0** — deploy history and last deploys, Node runtimes, backup profiles, database links, dump upload.
+- **cipi/gui 4.2.0** — the pages for all of it, a confirmation dialog in place of the browser's, saved Artisan commands, deferred loading everywhere.
+
+---
+
 ## [5.8.6] — 2026-11-16
 
 Two security reports, both verified and both closed in this release. They came in through the private channel in SECURITY.md and had not been shared elsewhere; thanks to the two researchers.

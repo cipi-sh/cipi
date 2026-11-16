@@ -242,6 +242,24 @@ _pending_valkey() {
         "cipi valkey isolate <app>   (or all of them: cipi valkey isolate --all)"
 }
 
+# ── Horizon installed, nothing running it ────────────────────
+# Deploys started by a Git push run as the app's user and cannot start a
+# supervisor program: the case `cipi deploy` settles by itself is reported
+# here for the apps that are only ever deployed that way.
+_pending_horizon() {
+    [[ -f "${CIPI_CONFIG}/apps.json" ]] || return 0
+    declare -f deploy_horizon_state >/dev/null || source "${CIPI_LIB}/deploy.sh"
+    local app list=""
+    while IFS= read -r app; do
+        [[ -n "$app" ]] || continue
+        [[ "$(deploy_horizon_state "$app" || true)" == "enable" ]] && list="${list} ${app}"
+    done < <(vault_read apps.json 2>/dev/null | jq -r 'to_entries[] | select((.value.custom // false) != true and (.value.custom // "") != "true" and (.value.horizon // "") != "true") | .key' 2>/dev/null || true)
+    [[ -n "$list" ]] || return 0
+    _pending_add warning horizon \
+        "laravel/horizon is installed, the queues are on Redis and no worker is configured — nothing processes the jobs of:${list}" \
+        "cipi worker horizon enable <app>   (the next cipi deploy <app> does it by itself)"
+}
+
 # ── the rest ─────────────────────────────────────────────────
 _pending_unattended() {
     command -v apt-config >/dev/null 2>&1 || return 0
@@ -271,6 +289,7 @@ pending_collect() {
     _pending_node
     _pending_pecl
     _pending_valkey
+    _pending_horizon
     _pending_unattended
     _pending_logrotate
     _pending_cache_write

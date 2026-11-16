@@ -166,7 +166,11 @@ _deploy_predeploy_snapshot() {
     step "Pre-deploy DB snapshot → ${dump}..."
     if db_dump_database "$eng" "$app" "$dump"; then
         success "Snapshot saved: ${dump}"
-        echo "$dump" > "/tmp/cipi-predeploy-${app}.path" 2>/dev/null || true
+        # Kept in memory for _deploy_run. It went through
+        # /tmp/cipi-predeploy-<app>.path: a name any local user could create
+        # first, and whatever path it then held was the one a failed deploy
+        # told the admin to restore.
+        CIPI_PREDEPLOY_SNAPSHOT="$dump"
         return 0
     fi
 
@@ -209,9 +213,9 @@ _deploy_run() {
     # Legacy per-file ACLs on laravel-*.log break deploy:writable chmod — strip before Deployer runs.
     ensure_app_logs_permissions "$app" || true
 
+    CIPI_PREDEPLOY_SNAPSHOT=""
     _deploy_predeploy_snapshot "$app" || exit 1
-    local snapshot_path=""
-    [[ -f "/tmp/cipi-predeploy-${app}.path" ]] && snapshot_path=$(cat "/tmp/cipi-predeploy-${app}.path" 2>/dev/null || true)
+    local snapshot_path="${CIPI_PREDEPLOY_SNAPSHOT:-}"
 
     local lf; lf=$(deploy_log_file "$app")
     local branch_disp; branch_disp=$(app_get "$app" branch)
@@ -306,7 +310,11 @@ _deploy_commit_info() {
     [[ -n "$release" ]] || return 0
     [[ -d "${dir}/.git" ]] || dir="${home}/current"
     [[ -d "${dir}/.git" ]] || return 0
-    git -C "$dir" log -1 --format='%h|%s|%an|%ad' --date=format:'%Y-%m-%d %H:%M' 2>/dev/null || true
+    # git, as the app user: a repository carries its own configuration, and
+    # root does not run git on one an app user controls (app_as in common.sh).
+    # As root git refused these trees anyway ("dubious ownership") and the
+    # line came back empty.
+    app_as "$app" git --no-pager -C "$dir" log -1 --format='%h|%s|%an|%ad' --date=format:'%Y-%m-%d %H:%M' 2>/dev/null < /dev/null || true
 }
 
 # Multi-line body shared by the success and failure notifications.
@@ -796,7 +804,7 @@ _deploy_unlock() {
         info "No deploy lock found for '${app}'"
         return 0
     fi
-    rm -f "$lockfile"
+    app_rm "$app" "$lockfile" || true
     success "Deploy unlocked — run: cipi deploy ${app}"
     log_action "DEPLOY UNLOCK: $app"
 }
@@ -898,8 +906,11 @@ _deploy_releases() {
         when=$(stat -c '%y' "${home}/releases/${r}" 2>/dev/null | cut -d. -f1)
         sha=""; subject=""
         if [[ -d "${home}/releases/${r}/.git" ]]; then
-            sha=$(git -C "${home}/releases/${r}" log -1 --format=%h 2>/dev/null || true)
-            subject=$(git -C "${home}/releases/${r}" log -1 --format=%s 2>/dev/null | cut -c1-46 || true)
+            # As the app user, one call for both (see _deploy_commit_info).
+            local gl=""
+            gl=$(app_as "$app" git --no-pager -C "${home}/releases/${r}" log -1 --format='%h|%s' 2>/dev/null < /dev/null || true)
+            sha="${gl%%|*}"
+            [[ "$gl" == *"|"* ]] && subject=$(printf '%s' "${gl#*|}" | cut -c1-46)
         fi
         took=$(_deploy_release_took "$app" "$r")
         mark=""; [[ "$r" == "$current" ]] && mark=" ${GREEN}← current${NC}"
@@ -916,7 +927,7 @@ _deploy_key() {
     local kf="/home/${app}/.ssh/id_ed25519.pub"
     [[ ! -f "$kf" ]] && { error "Key not found"; exit 1; }
     echo -e "\n${BOLD}Deploy Key for '${app}'${NC}"
-    echo -e "${CYAN}$(cat "$kf")${NC}\n"
+    echo -e "${CYAN}$(app_read "$app" "$kf" || true)${NC}\n"
 
     local git_prov; git_prov=$(app_get "$app" git_provider)
     local git_dkid; git_dkid=$(app_get "$app" git_deploy_key_id)
@@ -971,16 +982,15 @@ _deploy_trust_host() {
         exit 1
     fi
 
+    # ~/.ssh is the app user's: known_hosts and config are edited by that
+    # user (app_as in common.sh), not by root following the names it finds.
     # Remove any existing entry for this host to avoid duplicates
     if [[ -f "$known_hosts" ]]; then
-        local tmp; tmp=$(mktemp)
-        ssh-keygen -R "$host" -f "$known_hosts" &>/dev/null || true
-        [[ "$port" != "22" ]] && ssh-keygen -R "[${host}]:${port}" -f "$known_hosts" &>/dev/null || true
+        app_as "$app" ssh-keygen -R "$host" -f "$known_hosts" &>/dev/null < /dev/null || true
+        [[ "$port" != "22" ]] && app_as "$app" ssh-keygen -R "[${host}]:${port}" -f "$known_hosts" &>/dev/null < /dev/null || true
     fi
 
-    echo "$scan_out" >> "$known_hosts"
-    chown "${app}:${app}" "$known_hosts"
-    chmod 600 "$known_hosts"
+    echo "$scan_out" | _app_file_op "$app" "$known_hosts" 'umask 077; cat >> "$1" && chmod 600 "$1"'
 
     success "Fingerprint of ${host}:${port} trusted for '${app}'"
     echo ""
@@ -992,22 +1002,23 @@ _deploy_trust_host() {
     local kf="${home}/.ssh/id_ed25519.pub"
     if [[ -f "$kf" ]]; then
         echo -e "${BOLD}Deploy Key${NC} (add this to your Git server):"
-        echo -e "  ${CYAN}$(cat "$kf")${NC}"
+        echo -e "  ${CYAN}$(app_read "$app" "$kf" || true)${NC}"
         echo ""
     fi
 
     # If non-standard port, write/update SSH config entry
     if [[ "$port" != "22" ]]; then
         local ssh_cfg="${home}/.ssh/config"
-        # Remove existing Host block for this host if any
-        if [[ -f "$ssh_cfg" ]]; then
-            local tmp; tmp=$(mktemp)
-            awk -v h="$host" '
-                /^Host / { in_block = ($2 == h) }
-                !in_block { print }
-            ' "$ssh_cfg" > "$tmp" && mv "$tmp" "$ssh_cfg"
-        fi
-        cat >> "$ssh_cfg" <<SSHCFG
+        # The file without this host's block, if it had one, then the block:
+        # read and written whole (app_write takes all of it before it writes).
+        {
+            if [[ -f "$ssh_cfg" ]]; then
+                app_read "$app" "$ssh_cfg" | awk -v h="$host" '
+                    /^Host / { in_block = ($2 == h) }
+                    !in_block { print }
+                ' || true
+            fi
+            cat <<SSHCFG
 
 Host ${host}
     HostName ${host}
@@ -1015,8 +1026,7 @@ Host ${host}
     IdentityFile ${home}/.ssh/id_ed25519
     StrictHostKeyChecking accept-new
 SSHCFG
-        chown "${app}:${app}" "$ssh_cfg"
-        chmod 600 "$ssh_cfg"
+        } | app_write "$app" "$ssh_cfg" 600
         success "SSH config updated (port ${port} → ${host})"
     fi
 

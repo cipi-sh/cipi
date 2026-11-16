@@ -30,6 +30,7 @@ APP="$1"
 
 HOME_DIR="/home/${APP}"
 [[ -d "$HOME_DIR" ]] || exit 0
+HOME_REAL=$(cd "$HOME_DIR" 2>/dev/null && pwd -P) || exit 0
 
 if [[ -d "${HOME_DIR}/current" ]]; then
     ROOT="${HOME_DIR}/current"
@@ -51,6 +52,10 @@ trap 'rm -f "$TMP" "$ERR"' EXIT
     echo "# symlinks not followed"
     (
         cd "$ROOT" || exit 1
+        # `current` is the app user's symlink, and this runs as root whenever
+        # that user asks: the tree hashed is one inside its home, or none.
+        # (Physical paths on both sides: /home may itself be a link.)
+        [[ "$(pwd -P)" == "${HOME_REAL}/"* ]] || { echo "cipi-scan-manifest: ${ROOT} is not inside ${HOME_DIR}" >&2; exit 1; }
         set -o pipefail
         find -P . -type f -print0 2>>"$ERR" | sort -z | xargs -0 -r sha256sum 2>>"$ERR"
     )

@@ -6,7 +6,10 @@
 # is not one (the same injection through `printf -v`), the logs root writes
 # for an app moved out of the app's home (/var/log/cipi-apps/<app>), the log
 # readers dropping to the app user, `cipi node restart` under sudo, the swap
-# line of root's crontab and the SSH default of a new server.
+# line of root's crontab, the SSH default of a new server, and root no longer
+# writing, reading or chowning by path inside an existing app's home (the
+# app_as helpers, the .env functions that take a value as data, the sync
+# .env merge, the integrity hashing, the Laravel recipe under set -e).
 # Pure bash + coreutils: cipi-app-notify, parse_args, the log helpers and
 # cipi-read-app-logs are run for real, and so is the migration — against a
 # fake root under the temp dir, with every command that would act on the
@@ -15,7 +18,9 @@
 # jq and is skipped without it. It covers the move going well, a second
 # run, and nginx, supervisor or PHP-FPM refusing the new configuration.
 # What needs real accounts — root following, or not, a symlink an app user
-# planted — is not here: it was run by hand for the release (CHANGELOG).
+# planted, and a function handed to the app user (app_call) on a real home —
+# is not here: it was run by hand for the release (CHANGELOG). Here the app
+# is a directory and sudo a stub that runs the command as whoever runs the test.
 # Nothing outside the temp dir is touched and no mail is sent.
 # Run from repo root: bash tests/verify-5.8.6.sh
 set -uo pipefail
@@ -571,6 +576,173 @@ esac"
        && "$(ncalls '^node-switch')" -eq 0 ]] && called 'systemctl reload php8.3-fpm' \
         && grep -qxF "$R/home/*/logs/nginx-access.log" "$R/etc/logrotate.d/cipi-http-logs" && grep -qxF "$R/var/log/cipi-apps/*/nginx-access.log" "$R/etc/logrotate.d/cipi-http-logs" \
         && pass "cipi app fix-permissions <app> moves that app only; logrotate covers both places while other apps are on ~/logs" || fail "single app: rc=${rc}"
+fi
+
+# ── 12. root and an app's home ──────────────────────────────
+# Root does not open, write, chown or chmod a path inside the home of an app
+# that exists: the app user does (app_as and the helpers on it, common.sh).
+echo "--- static: root and an app's home"
+# X | hasq [grep options] PATTERN — grep -q on a pipe, with all of the input
+# read first: grep -q stops at the first match, the writer of a long input is
+# left with a closed pipe, and pipefail reports the match as a failure.
+hasq() { local t; t=$(cat); grep -q "$@" <<< "$t"; }
+for f in app_as app_sh app_call app_of_path _app_reown _app_dir_do _app_own_check _app_file_op app_read app_write app_append app_sed app_rm app_mkdir; do
+    [[ -n "$(fn common.sh "$f")" ]] || fail "common.sh has no ${f}"
+done
+fn common.sh app_as | hasq 'sudo -u "\$app" -- "\$@"' && fn common.sh app_as | hasq 'EUID' \
+    && pass "app_as: root drops to the app user, anyone else runs the command as it is" || fail "app_as"
+fn common.sh app_of_path | hasq 'EUID' && fn common.sh app_of_path | hasq -F '^/home/([a-z][a-z0-9]{2,31})/' \
+    && pass "app_of_path: an app's home, for root only" || fail "app_of_path"
+for f in _env_read_key _env_to_json _env_set_key _env_unset_key _env_set_or_add _env_apply_group _env_remove_keys; do
+    fn app.sh "$f" | sed -n 2p | hasq "app_of_path .*app_call \"\\\$_o\" \"${f}[ \"]" \
+        || fail "app.sh ${f} does not hand itself to the app user first"
+done
+for f in _search_env_get _search_env_set _search_env_del _search_env_block; do
+    fn search.sh "$f" | sed -n 2p | hasq "app_of_path .*app_call \"\\\$_o\" \"${f}[ \"]" \
+        || fail "search.sh ${f} does not hand itself to the app user first"
+done
+[[ "$FAIL" -eq 0 ]] && pass "the .env functions (app.sh, search.sh) run as the app user on an app's .env"
+for f in _env_set_or_add _env_apply_group; do
+    fn app.sh "$f" | hasq -F "sed 's/[\\\\&|]/\\\\&/g'" || fail "app.sh ${f} puts the value into the sed script as it is"
+done
+fn search.sh _search_env_set | hasq -F "sed 's/[\\\\&|]/\\\\&/g'" \
+    && pass ".env values are escaped before sed sees them (a \"|\" ended the replacement: |e ran what followed)" || fail "search.sh _search_env_set does not escape the value"
+code() { grep -vE '^[[:space:]]*#' "${LIB}/$1"; }
+fnc() { fn "$@" | grep -vE '^[[:space:]]*#'; }   # a function without its comments (they tell what root used to do)
+code app.sh | hasq -E 'chown "\$\{(app|name)\}:\$\{(app|name)\}" "\$(env_file|envf|dst_env|auth_file)"' \
+    && fail "app.sh still chowns .env / auth.json by path" || pass "app.sh: no chown of .env or auth.json by path"
+code search.sh | hasq -E 'chown "\$\{app\}:\$\{app\}" "\$envf"' \
+    && fail "search.sh still chowns .env by path" || pass "search.sh: no chown of .env by path"
+tpl=$(fnc app.sh _create_deployer_config_from_template)
+grep -qE 'chown -R|> "\$\{dh\}/\.deployer/deploy\.php"' <<< "$tpl" \
+    && fail "deploy.php is still written and chowned by root" || pass "deploy.php is written by the app user (no root write, no chown -R of ~/.deployer)"
+grep -q 'if \[\[ -n "\$extra_task" \]\]; then' <<< "$tpl" && ! grep -q '\[\[ -n "\$extra_task" \]\] &&' <<< "$tpl" \
+    && pass "the recipe loop ends on an if (its status counts, now that it feeds a pipeline)" || fail "recipe loop can end on a false test under pipefail"
+fnc common.sh deployer_audit_ensure_hook | hasq -E '>> "\$df"|chown' \
+    && fail "the audit hook is still appended by root" || pass "the audit hook is appended by the app user"
+fnc common.sh _sync_node_build_script | hasq -E 'cat > |chown|chmod 750 "' \
+    && fail "node-build.sh is still written by root" || pass "node-build.sh is written by the app user"
+fnc node.sh _node_webhook_config | hasq -E 'chown|> "\$\{dir\}/webhook\.json"' \
+    && fail "~/.cipi/webhook.json is still written by root" || pass "~/.cipi/webhook.json is written by the app user"
+fnc node.sh _node_recipe_config_write | hasq -E '> "\$\{f\}\.tmp"|chown' \
+    && fail "~/.deployer/node.json is still written by root" || pass "~/.deployer/node.json is written by the app user"
+rot=$(fnc git.sh _git_rotate_local_key)
+grep -qE 'chown|mkdir -p "\$\{home\}|^[[:space:]]*touch "\$ak"$' <<< "$rot" || ! grep -q 'app_mkdir "\$app" "\${home}/.ssh" 700' <<< "$rot" \
+    && fail "_git_rotate_local_key still works in ~/.ssh as root" || pass "the deploy key is rotated in ~/.ssh by the app user"
+logs=$(fnc common.sh ensure_app_logs_permissions)
+grep -q '_app_dir_do "\$app" shared/storage/logs chown -h -R --from=root' <<< "$logs" && ! grep -qE 'chown .*"\$\{home\}/(logs|shared/storage/logs)"' <<< "$logs" \
+    && pass "root-owned logs are reclaimed from inside the directory, and only if no link is on the way to it" || fail "ensure_app_logs_permissions still chowns a path under the home"
+[[ "$(grep -c -- '-pass env:CIPI_SYNC_PASSPHRASE' "${LIB}/sync.sh")" -eq 3 ]] && ! code sync.sh | hasq -- '-pass pass:' \
+    && pass "sync: the passphrase reaches openssl through the environment, not the command line" || fail "sync: passphrase on the openssl command line"
+fnc sync.sh _sync_update_app | hasq -E '(^|[^_])(cp|tar -xzf) .*"\$\{home\}/|chown -R ' \
+    && fail "sync update still copies into the home as root" || pass "sync update writes .env, auth.json, storage and deploy.php as the app user"
+code deploy.sh | hasq '/tmp/cipi-predeploy-' \
+    && fail "deploy.sh still keeps the snapshot path in /tmp" || pass "the pre-deploy snapshot path is not kept in a file under /tmp"
+fn deploy.sh _deploy_commit_info | hasq 'app_as "\$app" git ' && fn deploy.sh _deploy_releases | hasq 'app_as "\$app" git ' \
+    && pass "git reads a release as the app user (root does not run it on a tree the app controls)" || fail "git still runs as root on the app's releases"
+code cipi-deploy-audit.sh | hasq "safe.directory" || ! code cipi-deploy-audit.sh | hasq '_as_app git -C' \
+    && fail "cipi-deploy-audit still runs git as root with safe.directory=*" || pass "cipi-deploy-audit reads REVISION, the repository and releases_log as the app user"
+grep -q 'runuser -u "\$app" -- setsid -w timeout' "${LIB}/php.sh" \
+    && pass "the FrankenPHP binary of an app is asked its version without a terminal" || fail "php.sh runs the app's binary on root's terminal"
+grep -q 'pwd -P' "${LIB}/cipi-scan-manifest.sh" && fn scan.sh _scan_hash_tree | hasq 'is not inside' \
+    && pass "integrity hashing stays inside the app's home" || fail "integrity hashing follows current/htdocs anywhere"
+fnc scan.sh _scan_hash_tree | hasq 'err=\$(_scan_hash_err)' \
+    && fail "_scan_hash_tree names its error file in a subshell (errors were never seen)" || pass "_scan_hash_tree keeps the name of its error file"
+
+echo "--- functional: the helpers, on a fake home"
+AH="${TMP}/ah"; S12="${TMP}/s12"; mkdir -p "$AH/demo/shared" "$S12"
+# The app is a directory, not a user: sudo runs the command as whoever runs the test.
+printf '%s\n' '#!/bin/bash' 'while [[ "${1:-}" == -* ]]; do case "$1" in -u) shift 2 ;; --) shift; break ;; *) shift ;; esac; done' 'exec "$@"' > "$S12/sudo"
+chmod +x "$S12/sudo"
+hlp=$(for f in app_as app_sh app_call app_of_path _app_reown _app_dir_do _app_own_check _app_file_op app_read app_write app_append app_sed app_rm app_mkdir; do fn common.sh "$f"; done | sed "s#/home/#${AH}/#g")
+run12() { PATH="$S12:$PATH" bash -c "${hlp}"$'\n'"set -euo pipefail"$'\n'"$1"; }
+mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+E="$AH/demo/shared/.env"
+printf 'A=1\n' | run12 "app_write demo '$E' 640"
+[[ "$(cat "$E")" == "A=1" && "$(mode "$E")" == "640" ]] && pass "app_write: a new file, with the mode asked for" || fail "app_write new: $(cat "$E" 2>&1) $(mode "$E")"
+ino=$(ls -i "$E" | awk '{print $1}')
+printf 'A=2\nB=x\n' | run12 "app_write demo '$E'"
+[[ "$(cat "$E")" == $'A=2\nB=x' && "$(mode "$E")" == "640" && "$(ls -i "$E" | awk '{print $1}')" == "$ino" ]] \
+    && pass "app_write: a file that exists is rewritten in place and keeps its mode" || fail "app_write existing: $(mode "$E")"
+run12 "app_read demo '$E' | app_write demo '$E'"
+[[ "$(cat "$E")" == $'A=2\nB=x' ]] && pass "app_write: all of stdin is taken before the file is opened (a pipeline may read what it writes)" || fail "app_write lost the file it was reading"
+printf 'C=3\n' | run12 "app_append demo '$E'"
+[[ "$(tail -n 1 "$E")" == "C=3" && "$(wc -l < "$E" | tr -d ' ')" == "3" ]] && pass "app_append" || fail "app_append: $(cat "$E")"
+[[ "$(run12 "app_read demo '$E'")" == "$(cat "$E")" ]] && pass "app_read" || fail "app_read"
+out=$(run12 "app_read demo '$AH/demo/shared/nope' || echo \"rc=\$?\"")
+[[ "$out" == rc=* ]] && pass "app_read: a file that is not there is nothing, and a status" || fail "app_read missing: '${out}'"
+run12 "app_mkdir demo '$AH/demo/.cipi/x' 700 && app_rm demo '$E.gone' '$AH/demo/shared/nope'"
+[[ -d "$AH/demo/.cipi/x" && "$(mode "$AH/demo/.cipi/x")" == "700" ]] && pass "app_mkdir (with a mode), app_rm of files that are not there" || fail "app_mkdir: $(mode "$AH/demo/.cipi/x")"
+out=$(run12 "inner() { echo \"got:\$1\"; }; outer() { inner \"\$@\"; return 7; }; app_call demo 'outer inner' outer 'a b' || echo \"rc=\$?\"")
+[[ "$out" == $'got:a b\nrc=7' ]] && pass "app_call: a function, the one it calls, its arguments and its status" || fail "app_call: '${out}'"
+if sed --version >/dev/null 2>&1; then
+    run12 "app_sed demo '$E' 's|^A=.*|A=9|'"
+    [[ "$(head -n 1 "$E")" == "A=9" && "$(mode "$E")" == "640" ]] && pass "app_sed" || fail "app_sed: $(cat "$E")"
+
+    echo "--- functional: a .env value is data"
+    V=";touch ${TMP}/ran;|e;s|a|b"
+    for spec in "app.sh _env_set_or_add" "search.sh _search_env_set"; do
+        f="${spec#* }"; printf 'K=old\nZ=1\n' > "$E"; rm -f "${TMP}/ran"
+        VAL="$V" run12 "$(fn "${spec% *}" "$f" | sed "s#/home/#${AH}/#g"); $f '$E' K \"\$VAL\""
+        [[ ! -e "${TMP}/ran" && "$(head -n 1 "$E")" == "K=${V}" && "$(tail -n 1 "$E")" == "Z=1" ]] \
+            && pass "${f}: a value with |e in it is written, not run" || fail "${f}: $(head -n 1 "$E") ran=$([[ -e "${TMP}/ran" ]] && echo yes || echo no)"
+    done
+    printf 'K=old\nZ=1\n' > "$E"; rm -f "${TMP}/ran"
+    VAL="$V" run12 "$(fn app.sh _env_read_key; fn app.sh _env_apply_group | sed "s#/home/#${AH}/#g"); _env_apply_group '$E' false '# x' \"K=\$VAL\" 'N=new & old | both'"
+    [[ ! -e "${TMP}/ran" && "$(head -n 1 "$E")" == "K=${V}" ]] && grep -qxF 'N=new & old | both' "$E" \
+        && pass "_env_apply_group: the same, and \"&\" and \"|\" arrive as written" || fail "_env_apply_group: $(tr '\n' ' ' < "$E")"
+else
+    echo "  SKIP: not GNU sed — the sed -i checks are not run"
+fi
+
+echo "--- functional: sync update keeps the local database settings without sed"
+mkdir -p "${TMP}/ad12"
+printf 'APP_NAME=FromSource\nDB_CONNECTION=mysql\nDB_HOST=10.0.0.5\nDB_DATABASE=src\nDB_USERNAME=src\nDB_PASSWORD=srcpass\nDB_PASSWORD_OLD=keep\nMAIL_HOST=smtp\n' > "${TMP}/ad12/env"
+printf 'APP_NAME=Local\nDB_CONNECTION=pgsql\nDB_HOST=127.0.0.1\nDB_DATABASE=demo\nDB_USERNAME=demo\nDB_PASSWORD=p|a&ss;touch %s/ran2;|e\n' "$TMP" > "$E"; chmod 640 "$E"
+blk=$(sed -n '/^    # 1\. \.env/,/^    # 2\. auth\.json/p' "${LIB}/sync.sh" | sed '$d')
+run12 "step() { :; }; success() { :; }; laravel_app_env_single_log() { :; }
+f12() {
+${blk}
+}
+app=demo; home='$AH/demo'; ad='${TMP}/ad12'; f12"
+[[ ! -e "${TMP}/ran2" && "$(grep -c . "$E")" == "8" ]] && grep -qx 'APP_NAME=FromSource' "$E" && grep -qx 'DB_CONNECTION=pgsql' "$E" && grep -qx 'DB_HOST=127.0.0.1' "$E" \
+   && grep -qxF "DB_PASSWORD=p|a&ss;touch ${TMP}/ran2;|e" "$E" && grep -qx 'DB_PASSWORD_OLD=keep' "$E" && grep -qx 'MAIL_HOST=smtp' "$E" && [[ "$(mode "$E")" == "640" ]] \
+    && pass "the source's .env with this server's DB_* — a password with | & ; in it kept as it is, nothing run" || fail "sync .env: $(tr '\n' ' ' < "$E") ran=$([[ -e "${TMP}/ran2" ]] && echo yes || echo no)"
+
+echo "--- functional: integrity hashing"
+if command -v sha256sum >/dev/null 2>&1; then
+    mkdir -p "$AH/demo/releases/1/app" "${TMP}/elsewhere" "${TMP}/s12b"
+    echo a > "$AH/demo/releases/1/app/A.php"; echo b > "$AH/demo/releases/1/app/B.php"; echo x > "${TMP}/elsewhere/secret"
+    ln -sfn releases/1 "$AH/demo/current"
+    scn="$(fn scan.sh _scan_hash_err; fn scan.sh _scan_hash_err_clear; fn scan.sh _scan_hash_tree; fn scan.sh _scan_hash_errors)"
+    out=$(bash -c "${scn}"$'\n'"_scan_hash_tree '$AH/demo/current' | wc -l; [[ -z \"\$(_scan_hash_errors)\" ]] && echo clean; _scan_hash_err_clear")
+    [[ "$(tr -d ' ' <<< "$out")" == $'2\nclean' ]] && pass "_scan_hash_tree: every file of the release, no error" || fail "_scan_hash_tree: ${out}"
+    real=$(command -v sha256sum)
+    printf '#!/bin/bash\nrc=0\nfor f in "$@"; do case "$f" in *B.php) echo "sha256sum: $f: Permission denied" >&2; rc=1;; *) %s "$f";; esac; done\nexit $rc\n' "$real" > "${TMP}/s12b/sha256sum"; chmod +x "${TMP}/s12b/sha256sum"
+    out=$(PATH="${TMP}/s12b:$PATH" bash -c "${scn}"$'\n'"_scan_hash_tree '$AH/demo/current' >/dev/null; _scan_hash_errors; _scan_hash_err_clear")
+    grep -q 'B.php' <<< "$out" && pass "a file that could not be hashed is seen by the caller (it never was: the pass counted as complete)" || fail "hash error lost: '${out}'"
+    ln -sfn "${TMP}/elsewhere" "$AH/demo/current"
+    out=$(bash -c "${scn}"$'\n'"_scan_hash_tree '$AH/demo/current'; _scan_hash_errors; _scan_hash_err_clear")
+    grep -q 'is not inside' <<< "$out" && ! grep -q 'secret' <<< "$out" \
+        && pass "current → a directory outside the home: not hashed, and reported as an incomplete pass" || fail "outside tree: '${out}'"
+    ln -sfn releases/1 "$AH/demo/current"
+else
+    echo "  SKIP: sha256sum not installed — hashing checks not run"
+fi
+
+if command -v jq >/dev/null 2>&1; then
+    echo "--- functional: deploy.php from the template, under set -e"
+    mkdir -p "${TMP}/c12" "${TMP}/l12"; rm -rf "$AH/demo/.deployer"
+    out=$(PATH="$S12:$PATH" bash -c "export CIPI_LIB='${LIB}' CIPI_CONFIG='${TMP}/c12' CIPI_LOG='${TMP}/l12'; RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
+        source '${LIB}/common.sh' 2>/dev/null; vault_read() { echo '{\"demo\":{\"php\":\"8.4\",\"branch\":\"main\"}}'; }; source '${LIB}/app.sh' 2>/dev/null
+        for f in _create_deployer_config_from_template deployer_audit_ensure_hook; do eval \"\$(declare -f \$f | sed 's|/home/|${AH}/|g')\"; done
+        set -euo pipefail
+        _create_deployer_config_from_template laravel demo git@github.com:a/b.git main 8.4
+        echo REACHED" 2>&1)
+    df="$AH/demo/.deployer/deploy.php"
+    [[ "$(tail -n 1 <<< "$out")" == "REACHED" && -s "$df" ]] && ! grep -q '__CIPI_' "$df" && grep -q "set('branch', 'main');" "$df" && grep -q 'cipi:deploy-audit' "$df" \
+        && pass "Laravel recipe with no extra artisan task: written, hook added, and the command goes on (the template ends on that placeholder)" \
+        || fail "recipe under set -e: $(tail -n 2 <<< "$out" | tr '\n' ' ')"
 fi
 
 echo ""

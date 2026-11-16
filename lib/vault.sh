@@ -29,7 +29,10 @@ _cipi_config_writable() {
 _cipi_remount_rw() {
     local path="${1:-/}" target="/" source="" err
     _CIPI_REMOUNT_ERR=""
-    err="/tmp/cipi-remount-err.$$"
+    # A file of root's own (it was /tmp/cipi-remount-err.<pid>, a name another
+    # local user could have put there first). No temp file — a read-only
+    # /tmp — is no reason not to try: the message is then the generic one.
+    err=$(mktemp 2>/dev/null) || err="/dev/null"
 
     if command -v findmnt >/dev/null 2>&1; then
         target=$(findmnt -n -o TARGET --target "$path" 2>/dev/null || echo "/")
@@ -38,24 +41,24 @@ _cipi_remount_rw() {
     [[ -z "$target" ]] && target="/"
 
     if mount -n -o remount,rw "$target" >"$err" 2>&1; then
-        rm -f "$err" 2>/dev/null || true
+        [[ "$err" == /dev/null ]] || rm -f "$err" 2>/dev/null || true
         return 0
     fi
     if [[ -n "$source" ]] && mount -n -o remount,rw "$source" "$target" >"$err" 2>&1; then
-        rm -f "$err" 2>/dev/null || true
+        [[ "$err" == /dev/null ]] || rm -f "$err" 2>/dev/null || true
         return 0
     fi
     if mount -n -o remount,rw / >"$err" 2>&1; then
-        rm -f "$err" 2>/dev/null || true
+        [[ "$err" == /dev/null ]] || rm -f "$err" 2>/dev/null || true
         return 0
     fi
     if mount -o remount,rw / >"$err" 2>&1; then
-        rm -f "$err" 2>/dev/null || true
+        [[ "$err" == /dev/null ]] || rm -f "$err" 2>/dev/null || true
         return 0
     fi
 
     _CIPI_REMOUNT_ERR=$(tr '\n' ' ' <"$err" 2>/dev/null | sed 's/[[:space:]]*$//')
-    rm -f "$err" 2>/dev/null || true
+    [[ "$err" == /dev/null ]] || rm -f "$err" 2>/dev/null || true
     [[ -z "${_CIPI_REMOUNT_ERR:-}" ]] && _CIPI_REMOUNT_ERR="mount -n -o remount,rw ${target} failed"
     return 1
 }

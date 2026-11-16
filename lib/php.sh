@@ -97,7 +97,9 @@ _php_frankenphp_report() {
             echo -e "  ${app}  ${YELLOW}no FrankenPHP binary in current/${NC} — check the PHP it runs on with: frankenphp -v"
             continue
         fi
-        out=$(runuser -u "$app" -- timeout 10 "$bin" -v 2>/dev/null || true)
+        # …and with no terminal: this is the app's own program, and with the
+        # admin's terminal as its own it could type into it (TIOCSTI).
+        out=$(runuser -u "$app" -- setsid -w timeout 10 "$bin" -v 2>/dev/null < /dev/null || true)
         full=$(grep -oE 'PHP [0-9]+\.[0-9]+\.[0-9]+' <<< "$out" | head -1 | cut -d' ' -f2 || true)
         if [[ -z "$full" ]]; then
             echo -e "  ${app}  ${YELLOW}FrankenPHP did not report its PHP version${NC} — check: ${bin} -v"

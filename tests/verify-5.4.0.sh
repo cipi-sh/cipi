@@ -16,6 +16,16 @@ fail() { echo "  FAIL: $*" >&2; FAIL=$((FAIL + 1)); }
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# Since 5.8.6 root hands file work inside an app's home to the app user
+# (app_as: sudo -u). The apps here are directories in a temp dir, not users:
+# sudo is a stub that runs the command as whoever runs the test.
+mkdir -p "${TMP}/stub"
+printf '%s\n' '#!/bin/bash' \
+    'while [[ "${1:-}" == -* ]]; do case "$1" in -u) shift 2 ;; --) shift; break ;; *) shift ;; esac; done' \
+    'exec "$@"' > "${TMP}/stub/sudo"
+chmod +x "${TMP}/stub/sudo"
+export PATH="${TMP}/stub:${PATH}"
+
 command -v sha256sum >/dev/null 2>&1 || sha256sum() { shasum -a 256; }
 export -f sha256sum 2>/dev/null || true
 

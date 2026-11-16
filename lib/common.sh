@@ -473,12 +473,14 @@ octane_php_ini_ensure() {
 app_env_set_deploy_branch() {
     local app="${1:-}" branch="${2:-}" mode="${3:-set}" env="/home/${1:-}/shared/.env" safe
     [[ -n "$app" && -n "$branch" && -f "$env" ]] || return 0
-    if grep -q '^CIPI_DEPLOY_BRANCH=' "$env" 2>/dev/null; then
+    # Read and written as the app user (see app_as).
+    local cur; cur=$(app_read "$app" "$env") || cur=""
+    if grep -q '^CIPI_DEPLOY_BRANCH=' <<< "$cur"; then
         [[ "$mode" == "add" ]] && return 0
         safe=$(printf '%s' "$branch" | sed 's/[&|\\]/\\&/g')
-        sed -i "s|^CIPI_DEPLOY_BRANCH=.*|CIPI_DEPLOY_BRANCH=${safe}|" "$env"
+        app_sed "$app" "$env" "s|^CIPI_DEPLOY_BRANCH=.*|CIPI_DEPLOY_BRANCH=${safe}|"
     else
-        printf 'CIPI_DEPLOY_BRANCH=%s\n' "$branch" >> "$env"
+        printf 'CIPI_DEPLOY_BRANCH=%s\n' "$branch" | app_append "$app" "$env"
     fi
 }
 
@@ -506,15 +508,17 @@ app_env_set_environment() {
     local app="${1:-}" label="${2:-}" mode="${3:-set}" env="/home/${1:-}/shared/.env"
     [[ -n "$app" && -f "$env" ]] || return 0
     validate_env_label "$label" || return 1
-    if grep -q '^CIPI_ENV=' "$env" 2>/dev/null; then
+    # Read and written as the app user (see app_as).
+    local cur; cur=$(app_read "$app" "$env") || cur=""
+    if grep -q '^CIPI_ENV=' <<< "$cur"; then
         [[ "$mode" == "add" ]] && return 0
-        sed -i "s|^CIPI_ENV=.*|CIPI_ENV=${label}|" "$env"
+        app_sed "$app" "$env" "s|^CIPI_ENV=.*|CIPI_ENV=${label}|"
     else
-        printf 'CIPI_ENV=%s\n' "$label" >> "$env"
+        printf 'CIPI_ENV=%s\n' "$label" | app_append "$app" "$env"
     fi
     [[ "$mode" == "add" ]] && return 0
-    if grep -q '^APP_ENV=' "$env" 2>/dev/null; then
-        sed -i "s|^APP_ENV=.*|APP_ENV=${label}|" "$env"
+    if grep -q '^APP_ENV=' <<< "$cur"; then
+        app_sed "$app" "$env" "s|^APP_ENV=.*|APP_ENV=${label}|"
     fi
     return 0
 }
@@ -545,15 +549,18 @@ deployer_audit_ensure_hook() {
     local app="$1" custom="${2:-}" df tpl
     df="/home/${app}/.deployer/deploy.php"
     [[ -f "$df" ]] || return 1
-    grep -q 'cipi:deploy-audit' "$df" 2>/dev/null && return 0
+    # deploy.php is read and appended to as the app user (see app_as): root
+    # appended to it and then chowned it — on every `cipi deploy`, to
+    # whatever a symlink of that name pointed at.
+    local cur; cur=$(app_read "$app" "$df") || return 1
+    grep -q 'cipi:deploy-audit' <<< "$cur" && return 0
     [[ -n "$custom" ]] || custom=$(app_get "$app" custom 2>/dev/null || echo false)
     tpl="${CIPI_LIB}/deployer/audit-releases.php"
     [[ "$custom" == "true" ]] && tpl="${CIPI_LIB}/deployer/audit-custom.php"
     [[ -f "$tpl" ]] || return 1
     # A deploy.php closed with "?>" would print the hook instead of running it.
-    grep -qE '^[[:space:]]*\?>[[:space:]]*$' "$df" && return 1
-    sed "s|__CIPI_APP_USER__|${app}|g" "$tpl" >> "$df" || return 1
-    chown "${app}:${app}" "$df" 2>/dev/null || true
+    grep -qE '^[[:space:]]*\?>[[:space:]]*$' <<< "$cur" && return 1
+    sed "s|__CIPI_APP_USER__|${app}|g" "$tpl" | app_append "$app" "$df" || return 1
     return 0
 }
 
@@ -972,9 +979,13 @@ _sync_node_build_script() {
     local cmd home
     cmd=$(app_get "$app" node_build)
     home="/home/${app}"
-    mkdir -p "${home}/.deployer"
+    # Made, written and removed as the app user (see app_as). Root wrote the
+    # script and chowned it: with node-build.sh a symlink, the file it pointed
+    # at was overwritten and handed to the app — and an app with `cipi yml
+    # auto on` reaches this on its own, through sudo (5.8.6).
+    app_mkdir "$app" "${home}/.deployer"
     if [[ -z "$cmd" ]]; then
-        rm -f "${home}/.deployer/node-build.sh"
+        app_rm "$app" "${home}/.deployer/node-build.sh"
         return 0
     fi
     # An app with its own Node major (Node apps, Laravel apps pinned with
@@ -983,15 +994,13 @@ _sync_node_build_script() {
     local node_ver path_line='export PATH="/usr/local/bin:$PATH"'
     node_ver=$(app_get "$app" node_version)
     [[ "$node_ver" =~ ^[0-9]{2}$ ]] && path_line="export PATH=\"/opt/cipi/node/${node_ver}/bin:/usr/local/bin:\$PATH\""
-    cat > "${home}/.deployer/node-build.sh" <<EOF
+    app_write "$app" "${home}/.deployer/node-build.sh" 750 <<EOF
 #!/bin/bash
 set -euo pipefail
 ${path_line}
 cd "\${1:-\$(pwd)}"
 ${cmd}
 EOF
-    chown "${app}:${app}" "${home}/.deployer/node-build.sh"
-    chmod 750 "${home}/.deployer/node-build.sh"
 }
 
 app_save() {
@@ -1212,7 +1221,152 @@ app_log_dir() { echo "/var/log/cipi-apps/${1:-}"; }
 # one the app user cannot enter). Never fails the caller.
 _app_as() {   # <app> <script> [args…]
     local app="$1" script="$2"; shift 2
-    (cd / && sudo -u "$app" /bin/bash -c "$script" _ "$@") 2>/dev/null || true
+    (cd / && sudo -u "$app" /bin/bash -c "$script" _ "$@") 2>/dev/null < /dev/null || true
+}
+
+# ── Root and an app's home ───────────────────────────────────
+# Everything under /home/<app> is the app user's to rename, replace and link:
+# a name root opens there is whatever the app made of it a moment ago. So
+# root does not open, create, delete, chown or chmod a path inside an app's
+# home, and does not run a program on a tree it finds there (git reads the
+# repository's own configuration). It asks the app user to: the kernel then
+# checks every step with that user's rights, and a symlink to /etc/shadow is
+# a "permission denied", not a file handed over. What root still does itself
+# is on names it controls — /home/<app> itself — or without following
+# anything (`chown -h -R`, which walks by descriptor; `rm -rf`; a test with
+# [[ -f ]]).
+#
+# The exception is an app being created (cipi app create, cipi sync import):
+# nobody can be that user before the command that makes it has finished.
+#
+#   app_as <app> <command> [args…]        the command's own status and output
+#   app_sh <app> <script> [args…]         a bash script, "$1"… are its args
+#   app_call <app> "<fn> …" <fn> [args…]  shell functions defined here
+#   app_read <app> <file>                 its content (nothing when unreadable)
+#   app_write <app> <file> [mode]         stdin → the file
+#   app_append <app> <file>               stdin → its end
+#   app_sed <app> <file> <sed args…>      sed -i
+#   app_rm <app> <path>…                  rm -f
+#   app_mkdir <app> <dir> [mode]          mkdir -p
+#   app_of_path <path>                    whose home a path is in (for root)
+#
+# Root drops with sudo -u. Anyone else — the app user itself, in
+# cipi-app-post-deploy — has no more rights than that already and runs the
+# command as it is.
+app_as() {   # <app> <command> [args…]
+    local app="$1"; shift
+    if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+        ( cd / 2>/dev/null; "$@" )
+        return
+    fi
+    ( cd / && sudo -u "$app" -- "$@" )
+}
+app_sh() {   # <app> <script> [args…]
+    local app="$1" script="$2"; shift 2
+    app_as "$app" /bin/bash -c "$script" _ "$@"
+}
+# The functions travel as text (declare -f): what they call must be named too.
+app_call() {   # <app> "<function> …" <function> [args…]
+    local app="$1" fns="$2"; shift 2
+    # shellcheck disable=SC2086
+    app_as "$app" /bin/bash -c "$(declare -f app_of_path $fns)"$'\n''"$@"' _ "$@"
+}
+# The app whose home a path is in — for root only: 1 for anyone else, and for
+# a path that is in no app's home. A function that works on a path starts with
+#     local _o; if _o=$(app_of_path "$1"); then _app_own_check "$_o" "$1"; app_call "$_o" "<itself> …" <itself> "$@"; return; fi
+# and is then the same function for an admin's own file, for the app user,
+# and — run as the app user — for root on a file in an app's home.
+app_of_path() {   # <path>
+    [[ "${EUID:-$(id -u)}" -eq 0 && "${1:-}" =~ ^/home/([a-z][a-z0-9]{2,31})/ ]] || return 1
+    id "${BASH_REMATCH[1]}" &>/dev/null || return 1
+    printf '%s' "${BASH_REMATCH[1]}"
+}
+
+# What is left of a time when root wrote here: a file or a directory of
+# root's inside the home, which the app user cannot replace or enter. The one
+# thing root does about it is hand the whole top-level entry back —
+# /home/<app>/<name>, whose parent is root's, so the name is the one meant;
+# -h -R changes a link and never what it points at, and walks by descriptor.
+_app_reown() {   # <app> <path under the home>
+    local app="$1" path="$2" rel top
+    [[ "${EUID:-$(id -u)}" -eq 0 ]] || return 1
+    [[ "$app" =~ ^[a-z][a-z0-9]{2,31}$ && "$path" == "/home/${app}/"?* ]] || return 1
+    rel="${path#"/home/${app}/"}"; top="${rel%%/*}"
+    [[ -n "$top" && "$top" != "." && "$top" != ".." ]] || return 1
+    chown -h -R "${app}:${app}" "/home/${app}/${top}" 2>/dev/null
+}
+# A command of root's inside a directory of an app's home, on "." — and only
+# when that directory really is where its name says: with a symlink anywhere
+# on the way the physical path differs, and nothing runs. Once inside, the
+# directory cannot be swapped under the command.
+_app_dir_do() {   # <app> <directory, relative to the home> <command> [args…]
+    local app="$1" rel="$2"; shift 2
+    (
+        cd "/home/${app}" 2>/dev/null || exit 1
+        want="$(pwd -P)/${rel}"
+        cd "$rel" 2>/dev/null || exit 1
+        [[ "$(pwd -P)" == "$want" ]] || exit 1
+        "$@"
+    )
+}
+# Before the app user is asked to work on a path: is it, or the directory it
+# is in, somebody else's? Then _app_reown. Looked at, never opened: stat on
+# the name itself.
+_app_own_check() {   # <app> <path>
+    local app="$1" path="$2" uid o t
+    [[ "${EUID:-$(id -u)}" -eq 0 ]] || return 0
+    uid=$(id -u "$app" 2>/dev/null) || return 0
+    for t in "$path" "$(dirname -- "$path")"; do
+        o=$(stat -c '%u' -- "$t" 2>/dev/null || true)
+        if [[ -n "$o" && "$o" != "$uid" ]]; then
+            _app_reown "$app" "$path" || true
+            return 0
+        fi
+    done
+    return 0
+}
+# A file operation as the app user. The script gets the path as "$1", then
+# the arguments; stdin is the caller's.
+_app_file_op() {   # <app> <path> <script> [args…]
+    local app="$1" path="$2" script="$3"; shift 3
+    _app_own_check "$app" "$path"
+    app_sh "$app" "$script" "$path" "$@"
+}
+app_read() {   # <app> <file>
+    _app_own_check "$1" "$2"
+    app_as "$1" cat -- "$2" 2>/dev/null < /dev/null
+}
+# In place, like the `cat > file` root ran before: a file that exists keeps
+# its inode and, without a mode, its mode. A new file is 644, or private from
+# its first byte when a mode is given. All of stdin is taken before the file
+# is opened, so a pipeline may read the file it writes.
+app_write() {   # <app> <file> [mode]
+    local buf rc=0
+    # root's own file, 600: it is handed over as an open descriptor.
+    buf=$(mktemp) || return 1
+    cat > "$buf" || { rm -f "$buf"; return 1; }
+    _app_file_op "$1" "$2" '
+        f="$1"; m="$2"; umask 022
+        if [[ -n "$m" && ! -e "$f" ]]; then ( umask 077; : > "$f" ) || exit 1; fi
+        cat > "$f" || exit 1
+        if [[ -n "$m" ]]; then chmod "$m" "$f" || exit 1; fi
+        exit 0' "${3:-}" < "$buf" || rc=$?
+    rm -f "$buf"
+    return $rc
+}
+app_append() {   # <app> <file>
+    _app_file_op "$1" "$2" 'umask 022; cat >> "$1"'
+}
+app_sed() {   # <app> <file> <sed args…>
+    local app="$1" path="$2"; shift 2
+    _app_file_op "$app" "$path" 'f="$1"; shift; sed -i "$@" "$f"' "$@" < /dev/null
+}
+app_rm() {   # <app> <path>…
+    local app="$1"; shift
+    app_as "$app" rm -f -- "$@" 2>/dev/null < /dev/null
+}
+app_mkdir() {   # <app> <dir> [mode]
+    _app_file_op "$1" "$2" 'umask 022; mkdir -p "$1" || exit 1; if [[ -n "$2" ]]; then chmod "$2" "$1" || exit 1; fi; exit 0' "${3:-}" < /dev/null
 }
 
 # The directory, and deploy.log in it — the one log both root (`cipi deploy`)
@@ -1298,41 +1452,45 @@ ensure_app_logs_permissions() {
         _app_as "$app" 'mkdir -p "$1"' "${home}/logs"
     fi
 
-    if command -v setfacl &>/dev/null; then
-        if [[ -d "${home}/logs" && ! -L "${home}/logs" ]]; then
-            find "${home}/logs" -type f -exec setfacl -b {} \; 2>/dev/null || true
-            setfacl -k "${home}/logs" 2>/dev/null || true
-        fi
-        if [[ -d "${home}/shared/storage/logs" && ! -L "${home}/shared/storage/logs" ]]; then
-            find "${home}/shared/storage/logs" -type f -name '*.log' -exec setfacl -b {} \; 2>/dev/null || true
-            setfacl -k "${home}/shared/storage/logs" 2>/dev/null || true
-        fi
-    fi
-
     # Reclaim root-owned log files left by old logrotate "create" rules — and,
     # since 5.8.6, the logs nginx and supervisor wrote here before the move.
-    # chown -R --from=root, not find … -exec chown <path>: the app user can
-    # rename what is in these directories, and a path is resolved again when
-    # chown runs — `logs` swapped for a symlink in between would aim it at a
-    # root-owned file of the same name anywhere. -R walks by descriptor.
-    if [[ -d "${home}/logs" && ! -L "${home}/logs" ]]; then
-        chown -h -R --from=root "${app}:www-data" "${home}/logs" 2>/dev/null || true
-    fi
-    if [[ -d "${home}/shared/storage/logs" && ! -L "${home}/shared/storage/logs" ]]; then
-        chown -h -R --from=root "${app}:${app}" "${home}/shared/storage/logs" 2>/dev/null || true
-        _app_as "$app" 'chmod 664 "$1"/*.log' "${home}/shared/storage/logs"
-    fi
+    # From inside each directory, once it is known to be where its name says
+    # (_app_dir_do): `shared` or `storage` as a symlink would otherwise aim
+    # this at a `logs` directory anywhere. chown -R walks by descriptor and,
+    # with -h, never changes what a link points at.
+    _app_dir_do "$app" logs chown -h -R --from=root "${app}:www-data" . 2>/dev/null || true
+    _app_dir_do "$app" shared/storage/logs chown -h -R --from=root "${app}:${app}" . 2>/dev/null || true
 
-    if command -v setfacl &>/dev/null && id cipi &>/dev/null; then
-        setfacl -m u:cipi:rx "${home}" 2>/dev/null || true
-        local d
-        for d in logs shared shared/storage shared/storage/logs; do
-            [[ -d "${home}/${d}" && ! -L "${home}/${d}" ]] || continue
-            setfacl -m u:cipi:rx "${home}/${d}" 2>/dev/null || true
-        done
-        if [[ -d "${home}/shared/storage/logs" && ! -L "${home}/shared/storage/logs" ]]; then
-            find "${home}/shared/storage/logs" -type f -name '*.log' -exec setfacl -m u:cipi:r {} \; 2>/dev/null || true
+    # The rest is the app user's own doing, on its own files: old ACLs off,
+    # Laravel's logs group-writable, the `cipi` user allowed to read.
+    local cipi_user=""
+    id cipi &>/dev/null && cipi_user="cipi"
+    _app_as "$app" '
+        h="$1"; cu="$2"
+        acl=false; command -v setfacl >/dev/null 2>&1 && acl=true
+        if [[ "$acl" == true ]]; then
+            if [[ -d "$h/logs" && ! -L "$h/logs" ]]; then
+                find "$h/logs" -type f -exec setfacl -b {} \; ; setfacl -k "$h/logs"
+            fi
+            if [[ -d "$h/shared/storage/logs" && ! -L "$h/shared/storage/logs" ]]; then
+                find "$h/shared/storage/logs" -type f -name "*.log" -exec setfacl -b {} \; ; setfacl -k "$h/shared/storage/logs"
+            fi
         fi
+        if [[ -d "$h/shared/storage/logs" && ! -L "$h/shared/storage/logs" ]]; then
+            chmod 664 "$h/shared/storage/logs"/*.log
+        fi
+        if [[ "$acl" == true && -n "$cu" ]]; then
+            for d in logs shared shared/storage shared/storage/logs; do
+                [[ -d "$h/$d" && ! -L "$h/$d" ]] || continue
+                setfacl -m "u:$cu:rx" "$h/$d"
+            done
+            if [[ -d "$h/shared/storage/logs" && ! -L "$h/shared/storage/logs" ]]; then
+                find "$h/shared/storage/logs" -type f -name "*.log" -exec setfacl -m "u:$cu:r" {} \;
+            fi
+        fi
+        exit 0' "$home" "$cipi_user"
+    if [[ -n "$cipi_user" ]] && command -v setfacl &>/dev/null; then
+        setfacl -m u:cipi:rx "${home}" 2>/dev/null || true
     fi
 
     app_log_links_default "$app"

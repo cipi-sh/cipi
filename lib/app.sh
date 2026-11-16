@@ -954,7 +954,7 @@ app_show() {
     fi
 
     if [[ -f "/home/${app}/.ssh/id_ed25519.pub" ]]; then
-        echo -e "\n  ${BOLD}Deploy Key${NC}\n  ${CYAN}$(cat "/home/${app}/.ssh/id_ed25519.pub")${NC}"
+        echo -e "\n  ${BOLD}Deploy Key${NC}\n  ${CYAN}$(app_read "$app" "/home/${app}/.ssh/id_ed25519.pub" || true)${NC}"
     fi
     if [[ "$is_custom" != "true" || "$runtime_show" == "node" ]] && [[ -L "/home/${app}/current" ]]; then
         echo -e "\n  ${BOLD}Release${NC}  ${CYAN}$(readlink -f "/home/${app}/current" | xargs basename)${NC}"
@@ -1028,7 +1028,7 @@ _app_change_domain() {
     reload_nginx || return 1
 
     if [[ -f "/home/${app}/shared/.env" ]]; then
-        sed -i "s|^APP_URL=.*|APP_URL=https://$(domain_url_host "$new_domain")|" "/home/${app}/shared/.env" 2>/dev/null || true
+        app_sed "$app" "/home/${app}/shared/.env" "s|^APP_URL=.*|APP_URL=https://$(domain_url_host "$new_domain")|" 2>/dev/null || true
     fi
 
     repo=$(app_get "$app" repository)
@@ -1072,7 +1072,7 @@ app_branch_set() {
     local app="$1" branch="$2" safe_branch
     app_set "$app" branch "$branch"
     safe_branch=$(printf '%s' "$branch" | sed 's/[&|\\\/]/\\&/g')
-    sed -i "s|set('branch', '.*')|set('branch', '${safe_branch}')|" "/home/${app}/.deployer/deploy.php"
+    app_sed "$app" "/home/${app}/.deployer/deploy.php" "s|set('branch', '.*')|set('branch', '${safe_branch}')|"
     if [[ "$(app_get "$app" runtime)" == "node" ]]; then
         # shellcheck source=/dev/null
         declare -f _node_webhook_config >/dev/null 2>&1 || source "${CIPI_LIB}/node.sh"
@@ -1132,11 +1132,17 @@ app_edit() {
             sed -i "s|/usr/bin/php[0-9]\.[0-9]|/usr/bin/php${np}|g" "/etc/supervisor/conf.d/${app}.conf" 2>/dev/null
             reload_supervisor
             crontab -u "$app" -l 2>/dev/null | sed "s|php${cur_php}|php${np}|g" | crontab -u "$app" -
-            sed -i "s|php${cur_php}|php${np}|g" "/home/${app}/.bashrc" "/home/${app}/.deployer/deploy.php" 2>/dev/null
-            if ! grep -q "bin/composer" "/home/${app}/.deployer/deploy.php" 2>/dev/null; then
-                sed -i "/set('bin\/php'/a set('bin/composer', '/usr/bin/php${np} /usr/local/bin/composer');" "/home/${app}/.deployer/deploy.php" 2>/dev/null
+            # The app's own files, edited as the app user (app_as in common.sh).
+            _app_own_check "$app" "/home/${app}/.bashrc"; _app_own_check "$app" "/home/${app}/.deployer/deploy.php"
+            app_as "$app" sed -i "s|php${cur_php}|php${np}|g" "/home/${app}/.bashrc" "/home/${app}/.deployer/deploy.php" 2>/dev/null < /dev/null
+            # Into a variable first: a grep that stops at its first match can
+            # leave the reader's pipe closed, and pipefail then calls that "no match".
+            local dp_now=""
+            dp_now=$(app_read "$app" "/home/${app}/.deployer/deploy.php") || dp_now=""
+            if ! grep -q "bin/composer" <<< "$dp_now"; then
+                app_sed "$app" "/home/${app}/.deployer/deploy.php" "/set('bin\/php'/a set('bin/composer', '/usr/bin/php${np} /usr/local/bin/composer');" 2>/dev/null
             fi
-            sed -i "s|^CIPI_PHP_VERSION=.*|CIPI_PHP_VERSION=${np}|" "/home/${app}/shared/.env"
+            app_sed "$app" "/home/${app}/shared/.env" "s|^CIPI_PHP_VERSION=.*|CIPI_PHP_VERSION=${np}|"
             app_set "$app" php "$np"; success "PHP → $np"; changed=true
         fi
     fi
@@ -1172,14 +1178,14 @@ app_edit() {
         else
             app_set "$app" repository "${ARG_repository}"
             local safe_repo; safe_repo=$(printf '%s' "${ARG_repository}" | sed 's/[&|\\\/]/\\&/g')
-            sed -i "s|set('repository', '.*')|set('repository', '${safe_repo}')|" "/home/${app}/.deployer/deploy.php"
+            app_sed "$app" "/home/${app}/.deployer/deploy.php" "s|set('repository', '.*')|set('repository', '${safe_repo}')|"
 
             # Migrate git provider integration only when the URL actually changes
             source "${CIPI_LIB}/git.sh"
             git_cleanup_repo "$app" "$old_repo"
             git_clear_app_data "$app"
             local pub_key=""
-            [[ -f "/home/${app}/.ssh/id_ed25519.pub" ]] && pub_key=$(cat "/home/${app}/.ssh/id_ed25519.pub")
+            [[ -f "/home/${app}/.ssh/id_ed25519.pub" ]] && pub_key=$(app_read "$app" "/home/${app}/.ssh/id_ed25519.pub" || true)
             local wt; wt=$(app_get "$app" webhook_token)
             local d; d=$(app_get "$app" domain)
             if [[ -n "$pub_key" ]]; then
@@ -1201,7 +1207,7 @@ app_edit() {
         if [[ -n "$cur_repo" ]]; then
             declare -f git_verify_repo_access >/dev/null 2>&1 || source "${CIPI_LIB}/git.sh"
             local pk="" skip=""
-            [[ -f "/home/${app}/.ssh/id_ed25519.pub" ]] && pk=$(cat "/home/${app}/.ssh/id_ed25519.pub")
+            [[ -f "/home/${app}/.ssh/id_ed25519.pub" ]] && pk=$(app_read "$app" "/home/${app}/.ssh/id_ed25519.pub" || true)
             [[ "$(app_get "$app" custom)" == "true" && "$(app_get "$app" runtime)" != "node" ]] && skip="skip_webhook"
             git_verify_repo_access "$app" "$cur_repo" "${cur_branch:-main}" "$(app_get "$app" domain)" \
                 "$(app_get "$app" webhook_token)" "$pk" "$skip" || true
@@ -1287,7 +1293,7 @@ app_edit() {
             _node_valid_major "${ARG_node_version}" || { error "--node-version must be an even (LTS) major such as 22 or 24"; exit 1; }
             node_is_installed "${ARG_node_version}" || _node_install_major "${ARG_node_version}" || exit 1
             app_set "$app" node_version "${ARG_node_version}"
-            sed -i "s|${NODE_ROOT}/[0-9]*/bin|${NODE_ROOT}/${ARG_node_version}/bin|" "/home/${app}/.bashrc" 2>/dev/null || true
+            app_sed "$app" "/home/${app}/.bashrc" "s|${NODE_ROOT}/[0-9]*/bin|${NODE_ROOT}/${ARG_node_version}/bin|" 2>/dev/null || true
             success "Node → ${ARG_node_version}"
         fi
         _node_state_write "$app"
@@ -1415,8 +1421,13 @@ _env_escape_value() {
     fi
 }
 
+# The functions below work on a path. On an app's .env, as root, each hands
+# itself to the app user first (app_of_path and app_call in common.sh): the
+# same code, with that user's rights.
+
 # Read KEY from .env file into stdout (unquoted). Exit 1 if missing.
 _env_read_key() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_read_key" _env_read_key "$@" < /dev/null; return; fi
     local file="$1" key="$2" line raw
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
@@ -1444,6 +1455,7 @@ _env_read_key() {
 
 # Emit all KEY=VALUE pairs as a JSON object on stdout.
 _env_to_json() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_to_json _env_valid_key" _env_to_json "$@" < /dev/null; return; fi
     local file="$1"
     local -a args=()
     local line key raw
@@ -1479,6 +1491,7 @@ _env_to_json() {
 
 # Set KEY=VALUE in .env (update in place or append). Preserves comments/other lines.
 _env_set_key() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_set_key _env_escape_value" _env_set_key "$@" < /dev/null; return; fi
     local file="$1" key="$2" value="$3"
     local escaped tmp found=0 line
     escaped=$(_env_escape_value "$value")
@@ -1504,6 +1517,7 @@ _env_set_key() {
 
 # Remove KEY from .env.
 _env_unset_key() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_unset_key" _env_unset_key "$@" < /dev/null; return; fi
     local file="$1" key="$2"
     local tmp line
     tmp=$(mktemp)
@@ -1553,9 +1567,14 @@ app_env() {
     local noninteractive=false
     [[ "$want_show" == "true" || -n "$get_key" || ${#sets[@]} -gt 0 || ${#unsets[@]} -gt 0 ]] && noninteractive=true
 
+    # The .env is the app user's file: the editor, the edits and the reads
+    # below run as that user (app_as in common.sh). As root they followed
+    # whatever shared/.env was — a symlink showed any file to the panel
+    # (--show, --json) and, after a --set, chown gave it to the app.
     if [[ "$noninteractive" != "true" ]]; then
-        ${EDITOR:-nano} "$env_file"
-        chown "${app}:${app}" "$env_file"; chmod 640 "$env_file"
+        _app_own_check "$app" "$env_file"
+        app_as "$app" ${EDITOR:-nano} "$env_file"
+        app_as "$app" chmod 640 "$env_file" < /dev/null
         success ".env updated"
         return 0
     fi
@@ -1574,7 +1593,7 @@ app_env() {
         _env_unset_key "$env_file" "$key"
     done
     if [[ ${#sets[@]} -gt 0 || ${#unsets[@]} -gt 0 ]]; then
-        chown "${app}:${app}" "$env_file"; chmod 640 "$env_file"
+        app_as "$app" chmod 640 "$env_file" < /dev/null
         log_action "ENV UPDATED: $app"
     fi
 
@@ -1605,7 +1624,7 @@ app_env() {
             [[ "$line" =~ ^[[:space:]]*# ]] && continue
             [[ -z "${line//[[:space:]]/}" ]] && continue
             printf '%s\n' "$line"
-        done < "$env_file"
+        done < <(app_read "$app" "$env_file")
         return 0
     fi
 
@@ -2982,7 +3001,11 @@ _create_deployer_config_from_template() {
     local dh="/home/${an}"
     local tpl="${CIPI_LIB}/deployer/${type}.php"
     [[ -f "$tpl" ]] || { error "Deployer template not found: $tpl"; return 1; }
-    mkdir -p "${dh}/.deployer"
+    # ~/.deployer and deploy.php are made and written by the app user (app_as
+    # in common.sh): the recipe is built here, in root's memory, and handed
+    # over whole. Root wrote it in place and then ran chown -R on the
+    # directory — on every regeneration, to whatever deploy.php was.
+    app_mkdir "$an" "${dh}/.deployer"
 
     local repo_safe branch_safe
     repo_safe=$(printf '%s' "$repo" | sed 's/\\/\\\\/g; s/&/\\&/g')
@@ -2999,11 +3022,10 @@ _create_deployer_config_from_template() {
             -e "s|__CIPI_NODE_VERSION__|$(app_get "$an" node_version)|g" \
             -e "s|__CIPI_NODE_MODE__|$(app_get "$an" node_mode)|g" \
             -e "s|__CIPI_NODE_OUTPUT__|$(app_get "$an" node_output)|g" \
-            "$tpl" > "${dh}/.deployer/deploy.php"
+            "$tpl" | app_write "$an" "${dh}/.deployer/deploy.php"
         deployer_audit_ensure_hook "$an" false || warn "Deploy audit hook not added to ${dh}/.deployer/deploy.php"
         declare -f _node_recipe_config_write >/dev/null 2>&1 || source "${CIPI_LIB}/node.sh"
         _node_recipe_config_write "$an"
-        chown -R "${an}:${an}" "${dh}/.deployer"
         return 0
     fi
 
@@ -3014,9 +3036,8 @@ _create_deployer_config_from_template() {
             -e "s|__CIPI_PHP_VERSION__|$v|g" \
             -e "s|__CIPI_REPOSITORY__|$repo_safe|g" \
             -e "s|__CIPI_BRANCH__|$branch_safe|g" \
-            "$tpl" > "${dh}/.deployer/deploy.php"
+            "$tpl" | app_write "$an" "${dh}/.deployer/deploy.php"
         deployer_audit_ensure_hook "$an" true || warn "Deploy audit hook not added to ${dh}/.deployer/deploy.php"
-        chown -R "${an}:${an}" "${dh}/.deployer"
         return 0
     fi
 
@@ -3073,17 +3094,18 @@ _create_deployer_config_from_template() {
         -e "s|__CIPI_HOOK_EXTRA_ARTISAN__|$h_extra|g" \
         "$tpl" > "$tmp"
 
-    : > "${dh}/.deployer/deploy.php"
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$line" == *"__CIPI_EXTRA_ARTISAN_TASK__"* ]]; then
-            [[ -n "$extra_task" ]] && printf '%s' "$extra_task" >> "${dh}/.deployer/deploy.php"
+            # An `if`, not `[[ … ]] && …`: the placeholder is the template's
+            # last line, and the loop is now one side of a pipeline — its
+            # status counts (pipefail, set -e).
+            if [[ -n "$extra_task" ]]; then printf '%s' "$extra_task"; fi
         else
-            printf '%s\n' "$line" >> "${dh}/.deployer/deploy.php"
+            printf '%s\n' "$line"
         fi
-    done < "$tmp"
+    done < "$tmp" | app_write "$an" "${dh}/.deployer/deploy.php" || { rm -f "$tmp"; return 1; }
     rm -f "$tmp"
     deployer_audit_ensure_hook "$an" false || warn "Deploy audit hook not added to ${dh}/.deployer/deploy.php"
-    chown -R "${an}:${an}" "${dh}/.deployer"
 }
 
 # Recreate deploy.php for an existing app (detects type from apps.json)
@@ -3264,17 +3286,19 @@ auth_create() {
             exit 1
         fi
     fi
-    cat > "$auth_file" <<JSON
+    # auth.json and deploy.php are the app user's files: written, read and
+    # edited as that user (app_as in common.sh), here and in the commands below.
+    app_write "$app" "$auth_file" 640 <<JSON
 {
     "users": []
 }
 JSON
-    chown "${app}:${app}" "$auth_file"
-    chmod 640 "$auth_file"
 
-    if grep -q "shared_files" "/home/${app}/.deployer/deploy.php" 2>/dev/null; then
-        if ! grep -q "auth.json" "/home/${app}/.deployer/deploy.php" 2>/dev/null; then
-            sed -i "s|add('shared_files', \['.env'\]);|add('shared_files', ['.env', 'auth.json']);|" "/home/${app}/.deployer/deploy.php"
+    local dp_text=""
+    dp_text=$(app_read "$app" "/home/${app}/.deployer/deploy.php") || dp_text=""
+    if grep -q "shared_files" <<< "$dp_text"; then
+        if ! grep -q "auth.json" <<< "$dp_text"; then
+            app_sed "$app" "/home/${app}/.deployer/deploy.php" "s|add('shared_files', \['.env'\]);|add('shared_files', ['.env', 'auth.json']);|"
             info "auth.json added to Deployer shared_files"
         fi
     fi
@@ -3302,8 +3326,7 @@ auth_edit() {
             error "Invalid JSON in ${ARG_file}"
             exit 1
         fi
-        jq . "$ARG_file" > "$auth_file"
-        chown "${app}:${app}" "$auth_file"; chmod 640 "$auth_file"
+        jq . "$ARG_file" | app_write "$app" "$auth_file" 640
         log_action "AUTH EDITED: $app"
         cipi_notify \
             "Cipi auth.json edited: ${app} on $(hostname)" \
@@ -3313,9 +3336,10 @@ auth_edit() {
         return 0
     fi
 
-    ${EDITOR:-nano} "$auth_file"
-    if jq empty "$auth_file" 2>/dev/null; then
-        chown "${app}:${app}" "$auth_file"; chmod 640 "$auth_file"
+    _app_own_check "$app" "$auth_file"
+    app_as "$app" ${EDITOR:-nano} "$auth_file"
+    if app_read "$app" "$auth_file" | jq empty 2>/dev/null; then
+        app_as "$app" chmod 640 "$auth_file" < /dev/null
         log_action "AUTH EDITED: $app"
         cipi_notify \
             "Cipi auth.json edited: ${app} on $(hostname)" \
@@ -3335,13 +3359,15 @@ auth_show() {
     app_exists "$app" || { error "App '$app' not found"; exit 1; }
     local auth_file="/home/${app}/shared/auth.json"
     [[ ! -f "$auth_file" ]] && { error "auth.json not found. Run: cipi auth create ${app}"; exit 1; }
+    local auth_text=""
+    auth_text=$(app_read "$app" "$auth_file") || auth_text=""
     if [[ "${ARG_json:-}" == "true" ]]; then
-        jq . "$auth_file"
+        jq . <<< "$auth_text"
         return 0
     fi
     echo -e "\n${BOLD}auth.json — ${app}${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    jq . "$auth_file" 2>/dev/null || cat "$auth_file"
+    jq . <<< "$auth_text" 2>/dev/null || printf '%s\n' "$auth_text"
     echo ""
 }
 
@@ -3355,10 +3381,12 @@ auth_delete() {
     if [[ "${ARG_force:-}" != "true" ]] && [[ -t 0 ]]; then
         confirm "Delete auth.json for '${app}'?" || { info "Cancelled"; return; }
     fi
-    rm -f "$auth_file"
+    app_rm "$app" "$auth_file" || true
 
-    if grep -q "auth.json" "/home/${app}/.deployer/deploy.php" 2>/dev/null; then
-        sed -i "s|add('shared_files', \['.env', 'auth.json'\]);|add('shared_files', ['.env']);|" "/home/${app}/.deployer/deploy.php"
+    local dp_text=""
+    dp_text=$(app_read "$app" "/home/${app}/.deployer/deploy.php") || dp_text=""
+    if grep -q "auth.json" <<< "$dp_text"; then
+        app_sed "$app" "/home/${app}/.deployer/deploy.php" "s|add('shared_files', \['.env', 'auth.json'\]);|add('shared_files', ['.env']);|"
         info "auth.json removed from Deployer shared_files"
     fi
 
@@ -3663,9 +3691,9 @@ app_reset_db_password() {
 
     local env_file="/home/${app}/shared/.env"
     [[ -f "$env_file" ]] || { warn ".env not found"; return; }
-    sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=${new_pass}|" "$env_file"
-    chown "${app}:${app}" "$env_file"
-    chmod 640 "$env_file"
+    # As the app user (app_as in common.sh).
+    app_sed "$app" "$env_file" "s|^DB_PASSWORD=.*|DB_PASSWORD=${new_pass}|"
+    app_as "$app" chmod 640 "$env_file" < /dev/null
     info ".env updated with new DB password"
 
     log_action "APP DB PASSWORD RESET: $app"
@@ -3692,10 +3720,15 @@ _reapply_ssl_if_present() {
 }
 
 _env_set_or_add() {
-    local file="$1" key="$2" val="$3"
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_set_or_add" _env_set_or_add "$@" < /dev/null; return; fi
+    local file="$1" key="$2" val="$3" esc
     [[ -f "$file" ]] || return 0
     if grep -qE "^${key}=" "$file" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=${val}|" "$file"
+        # The value is data, not part of the sed script: a "|" or an "&" in it
+        # (a value copied from another app's .env by `cipi app clone`) used to
+        # end the replacement early — "|e" ran what followed as a command.
+        esc=$(printf '%s' "$val" | sed 's/[\\&|]/\\&/g')
+        sed -i "s|^${key}=.*|${key}=${esc}|" "$file"
     else
         printf '\n%s=%s\n' "$key" "$val" >> "$file"
     fi
@@ -3711,10 +3744,11 @@ _env_set_or_add() {
 # `fill` = true keeps any existing non-empty value: used where Cipi derives a
 # value the application may legitimately have set for itself.
 _env_apply_group() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_apply_group _env_read_key" _env_apply_group "$@" < /dev/null; return; fi
     local file="$1" fill="$2" header="$3"; shift 3
     [[ -f "$file" ]] || return 0
     local -a missing=()
-    local pair key val cur
+    local pair key val cur esc
     for pair in "$@"; do
         key="${pair%%=*}"; val="${pair#*=}"
         if grep -qE "^${key}=" "$file" 2>/dev/null; then
@@ -3722,7 +3756,10 @@ _env_apply_group() {
                 cur=$(_env_read_key "$file" "$key" 2>/dev/null || true)
                 [[ -n "$cur" ]] && continue
             fi
-            sed -i "s|^${key}=.*|${key}=${val}|" "$file"
+            # Data, not sed script (see _env_set_or_add): some of these values
+            # were read from the app's own .env a moment ago.
+            esc=$(printf '%s' "$val" | sed 's/[\\&|]/\\&/g')
+            sed -i "s|^${key}=.*|${key}=${esc}|" "$file"
         else
             missing+=("${key}=${val}")
         fi
@@ -3739,6 +3776,7 @@ _env_apply_group() {
 }
 
 _env_remove_keys() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_remove_keys" _env_remove_keys "$@" < /dev/null; return; fi
     local file="$1"; shift
     [[ -f "$file" ]] || return 0
     local k
@@ -3792,7 +3830,6 @@ app_convert() {
             _reapply_ssl_if_present "$app"
             _env_set_or_add "$envf" "OCTANE_SERVER" "frankenphp"
             _env_set_or_add "$envf" "OCTANE_HTTPS" "true"
-            chown "${app}:${app}" "$envf" 2>/dev/null || true
             _create_deployer_config_for_app "$app"
             log_action "APP CONVERT: $app → octane port=$port"
             success "Converted to Octane (FrankenPHP) on 127.0.0.1:${port}"
@@ -3815,7 +3852,6 @@ app_convert() {
             reload_nginx || exit 1
             _reapply_ssl_if_present "$app"
             _env_remove_keys "$envf" OCTANE_SERVER OCTANE_HTTPS
-            chown "${app}:${app}" "$envf" 2>/dev/null || true
             _create_deployer_config_for_app "$app"
             log_action "APP CONVERT: $app → fpm"
             success "Converted to PHP-FPM"
@@ -3903,8 +3939,6 @@ _reverb_sync_env() {
         "VITE_REVERB_HOST=${host}" \
         "VITE_REVERB_PORT=${pub_port}" \
         "VITE_REVERB_SCHEME=${scheme}"
-
-    chown "${app}:${app}" "$envf" 2>/dev/null || true
 }
 
 # Raise the file-descriptor ceilings a WebSocket server runs into, and say what
@@ -4284,6 +4318,33 @@ app_limits() {
 
 # ── CLONE / STAGING ───────────────────────────────────────────
 
+# stdin: the source app's .env. Carries its non-secret keys into the clone's
+# (keep new APP_KEY / DB_* / CIPI_*). Runs as the clone's user.
+_app_clone_env_copy() {
+    local dst_env="$1" line key
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+        key="${line%%=*}"
+        case "$key" in
+            # REVERB_*/VITE_REVERB_* are deliberately not carried over: the
+            # clone gets its own port, its own credentials and its own
+            # domain below. Copying them would point a staging clone's
+            # frontend at the production socket and hand it the production
+            # app secret.
+            #
+            # MEILISEARCH_*/SCOUT_PREFIX are excluded for a sharper reason:
+            # the source's key is scoped to the source's index prefix, so a
+            # clone that inherited it would not fail — it would reindex
+            # straight into production's indexes. The clone gets its own
+            # key and prefix below.
+            # APP_ENV is the clone's own label (--env), already in its .env.
+            APP_KEY|APP_ENV|APP_URL|DB_*|DATABASE_URL|CIPI_*|OCTANE_*|REVERB_*|VITE_REVERB_*) continue ;;
+            MEILISEARCH_*|SCOUT_PREFIX) continue ;;
+        esac
+        _env_set_or_add "$dst_env" "$key" "${line#*=}"
+    done
+}
+
 app_clone() {
     local src="${1:-}"; shift || true
     [[ -z "$src" ]] && { error "Usage: cipi app clone <src> --domain=D [--name=] [--branch=] [--env=] [--with-db|--no-db]"; exit 1; }
@@ -4334,30 +4395,11 @@ app_clone() {
     local src_env="/home/${src}/shared/.env"
     local dst_env="/home/${name}/shared/.env"
     if [[ -f "$src_env" && -f "$dst_env" ]]; then
-        local line key
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
-            key="${line%%=*}"
-            case "$key" in
-                # REVERB_*/VITE_REVERB_* are deliberately not carried over: the
-                # clone gets its own port, its own credentials and its own
-                # domain below. Copying them would point a staging clone's
-                # frontend at the production socket and hand it the production
-                # app secret.
-                #
-                # MEILISEARCH_*/SCOUT_PREFIX are excluded for a sharper reason:
-                # the source's key is scoped to the source's index prefix, so a
-                # clone that inherited it would not fail — it would reindex
-                # straight into production's indexes. The clone gets its own
-                # key and prefix below.
-                # APP_ENV is the clone's own label (--env), already in its .env.
-                APP_KEY|APP_ENV|APP_URL|DB_*|DATABASE_URL|CIPI_*|OCTANE_*|REVERB_*|VITE_REVERB_*) continue ;;
-                MEILISEARCH_*|SCOUT_PREFIX) continue ;;
-            esac
-            _env_set_or_add "$dst_env" "$key" "${line#*=}"
-        done < "$src_env"
+        # The source .env is read as the source app's user, the clone's is
+        # written as the clone's — in one go (app_call in common.sh).
+        { app_read "$src" "$src_env" || true; } \
+            | app_call "$name" "_app_clone_env_copy _env_set_or_add" _app_clone_env_copy "$dst_env"
         _env_set_or_add "$dst_env" "APP_URL" "https://$(domain_url_host "$domain")"
-        chown "${name}:${name}" "$dst_env"
     fi
 
     # A clone of a Reverb app gets its own Reverb, the way it gets its own

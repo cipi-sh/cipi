@@ -193,7 +193,10 @@ _search_wait_health() {
 # functions. Values written here are Cipi-generated (hex key, host URL,
 # "<app>-") and need no quoting.
 
+# On an app's .env, as root, these four hand themselves to the app user first
+# (app_of_path and app_call in common.sh): same code, that user's rights.
 _search_env_get() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_search_env_get" _search_env_get "$@" < /dev/null; return; fi
     local file="$1" key="$2" line
     [[ -f "$file" ]] || return 1
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -207,16 +210,21 @@ _search_env_get() {
 }
 
 _search_env_set() {
-    local file="$1" key="$2" val="$3"
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_search_env_set" _search_env_set "$@" < /dev/null; return; fi
+    local file="$1" key="$2" val="$3" esc
     [[ -f "$file" ]] || return 0
     if grep -qE "^${key}=" "$file" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=${val}|" "$file"
+        # Data, not sed script: SCOUT_DRIVER is put back from what the app's
+        # own .env said before.
+        esc=$(printf '%s' "$val" | sed 's/[\\&|]/\\&/g')
+        sed -i "s|^${key}=.*|${key}=${esc}|" "$file"
     else
         printf '%s=%s\n' "$key" "$val" >> "$file"
     fi
 }
 
 _search_env_del() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_search_env_del" _search_env_del "$@" < /dev/null; return; fi
     local file="$1"; shift
     [[ -f "$file" ]] || return 0
     local k
@@ -228,6 +236,7 @@ _search_env_del() {
 # Write the Scout block. Missing keys arrive together under one header instead
 # of four stanzas each with its own blank line.
 _search_env_block() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_search_env_block _search_env_set" _search_env_block "$@" < /dev/null; return; fi
     local file="$1"; shift
     [[ -f "$file" ]] || return 0
     local -a missing=()
@@ -592,8 +601,7 @@ _search_enable() {
         "SCOUT_PREFIX=${prefix}" \
         "MEILISEARCH_HOST=$(_search_url)" \
         "MEILISEARCH_KEY=${key}"
-    chown "${app}:${app}" "$envf" 2>/dev/null || true
-    chmod 640 "$envf" 2>/dev/null || true
+    app_as "$app" chmod 640 "$envf" 2>/dev/null < /dev/null || true
 
     _search_cfg | jq --arg a "$app" --arg u "$uid" --arg p "$prefix" --arg d "$prev" --arg t "$(date -Is)" \
         '.apps = ((.apps // {}) + {($a): {uid:$u, prefix:$p, prev_scout_driver:$d, enabled_at:$t}})' \
@@ -681,7 +689,6 @@ _search_disable() {
     if [[ -f "$envf" ]]; then
         _search_env_set "$envf" SCOUT_DRIVER "$prev"
         _search_env_del "$envf" MEILISEARCH_KEY MEILISEARCH_HOST SCOUT_PREFIX
-        chown "${app}:${app}" "$envf" 2>/dev/null || true
     fi
 
     _search_forget_app "$app" "$purge"
@@ -750,7 +757,6 @@ _search_key_rotate() {
 
     local envf; envf=$(_search_app_env_file "$app")
     _search_env_set "$envf" MEILISEARCH_KEY "$key"
-    chown "${app}:${app}" "$envf" 2>/dev/null || true
 
     _search_cfg | jq --arg a "$app" --arg u "$uid" '.apps[$a].uid = $u' | _search_cfg_save
     _search_delete_key "$old_uid" || warn "The old key ${old_uid} could not be deleted — remove it by hand"
@@ -804,7 +810,6 @@ _search_master_rotate() {
             failed=$((failed + 1)); continue
         fi
         _search_env_set "$envf" MEILISEARCH_KEY "$key"
-        chown "${app}:${app}" "$envf" 2>/dev/null || true
         success "Rewrote MEILISEARCH_KEY for '${app}'"
     done
 
@@ -980,7 +985,6 @@ _search_upgrade() {
         key=$(printf '%s' "$created" | jq -r '.key // empty')
         [[ -n "$uid" && -n "$key" && -f "$envf" ]] || continue
         _search_env_set "$envf" MEILISEARCH_KEY "$key"
-        chown "${app}:${app}" "$envf" 2>/dev/null || true
         _search_cfg | jq --arg a "$app" --arg u "$uid" '.apps[$a].uid = $u' | _search_cfg_save
         rebuilt=$((rebuilt + 1))
     done
@@ -1131,7 +1135,6 @@ _search_remove() {
         if [[ -f "$envf" ]]; then
             _search_env_set "$envf" SCOUT_DRIVER "$prev"
             _search_env_del "$envf" MEILISEARCH_KEY MEILISEARCH_HOST SCOUT_PREFIX
-            chown "${app}:${app}" "$envf" 2>/dev/null || true
         fi
         app_exists "$app" && app_unset "$app" search
         success "Reverted '${app}' to SCOUT_DRIVER=${prev}"

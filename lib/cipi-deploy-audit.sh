@@ -41,6 +41,11 @@ fi
 id "$APP" &>/dev/null || { echo "cipi-deploy-audit: no such user ${APP}" >&2; exit 2; }
 
 HOME_DIR="/home/${APP}"
+# What is in the app's home is read as the app user. This script is root, and
+# the app user may run it whenever it likes, on whatever it has put there: a
+# REVISION or a releases_log that is a symlink, a repository whose own
+# configuration git would act on (it ran as root, with safe.directory=*).
+_as_app() { ( cd / && sudo -u "$APP" -- "$@" ) 2>/dev/null < /dev/null; }
 LOG_DIR="${CIPI_LOG:-/var/log/cipi}"
 LEDGER="${LOG_DIR}/deploys.jsonl"
 mkdir -p "$LOG_DIR" 2>/dev/null || true
@@ -55,9 +60,9 @@ if [[ -L "${HOME_DIR}/current" ]]; then
 fi
 commit=""
 if [[ -n "$release" && -f "${HOME_DIR}/releases/${release}/REVISION" ]]; then
-    commit=$(head -c 40 "${HOME_DIR}/releases/${release}/REVISION" 2>/dev/null | tr -cd '0-9a-f')
+    commit=$(_as_app head -c 40 -- "${HOME_DIR}/releases/${release}/REVISION" | tr -cd '0-9a-f')
 elif [[ -d "${HOME_DIR}/htdocs/.git" ]]; then
-    commit=$(git -c safe.directory='*' -C "${HOME_DIR}/htdocs" rev-parse HEAD 2>/dev/null | tr -cd '0-9a-f' || true)
+    commit=$(_as_app git -C "${HOME_DIR}/htdocs" rev-parse HEAD | tr -cd '0-9a-f' || true)
 fi
 
 # Deployer's own record of the run that just happened: on a failed deploy this
@@ -65,7 +70,7 @@ fi
 dep_release="" dep_user="" dep_target="" dep_created=""
 if [[ -f "${HOME_DIR}/.dep/releases_log" ]] && command -v jq >/dev/null 2>&1; then
     IFS=$'\t' read -r dep_release dep_user dep_target dep_created < <(
-        tail -n 1 "${HOME_DIR}/.dep/releases_log" 2>/dev/null \
+        _as_app tail -n 1 -- "${HOME_DIR}/.dep/releases_log" \
             | jq -r '[.release_name // "", .user // "", .target // "", .created_at // ""] | map(tostring) | @tsv' 2>/dev/null
     ) || true
 fi

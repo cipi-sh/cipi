@@ -200,7 +200,7 @@ _api_ensure_psysh_home() {
     h=$(getent passwd www-data 2>/dev/null | cut -d: -f6)
     [[ -z "$h" || ! -d "$h" ]] && return 0
     mkdir -p "${h}/.config/psysh" 2>/dev/null || true
-    chown -R www-data:www-data "${h}/.config" 2>/dev/null || true
+    chown -h -R www-data:www-data "${h}/.config" 2>/dev/null || true
 }
 
 # Package version from composer.lock — no php artisan / composer (avoids Laravel bootstrap hang on api status).

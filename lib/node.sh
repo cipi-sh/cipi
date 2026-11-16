@@ -472,12 +472,13 @@ _node_webhook_install_receiver() {
 
 # ~/.cipi/webhook.json — the secret and branch, readable by the app user only.
 _node_webhook_config() {
-    local app="$1" dir="/home/${1}/.cipi"
-    mkdir -p "$dir"
-    vault_read apps.json | jq -c --arg a "$app" '.[$a] | {token: (.webhook_token // ""), branch: (.branch // "main")}' \
-        > "${dir}/webhook.json"
-    chown -R "${app}:${app}" "$dir"
-    chmod 700 "$dir"; chmod 600 "${dir}/webhook.json"
+    local app="$1" dir="/home/${1}/.cipi" json
+    # The directory and the file are made by the app user (app_as in
+    # common.sh): root ran mkdir, a redirect, chown -R and two chmod on names
+    # in the app's home.
+    json=$(vault_read apps.json | jq -c --arg a "$app" '.[$a] | {token: (.webhook_token // ""), branch: (.branch // "main")}')
+    app_mkdir "$app" "$dir" 700
+    printf '%s\n' "$json" | app_write "$app" "${dir}/webhook.json" 600
 }
 
 # ── nginx ─────────────────────────────────────────────────────
@@ -580,18 +581,27 @@ EOF
 # (create, app edit, cipi.yml at deploy time). The build command itself lives in
 # node-build.sh; start command and ports stay in the root-only state file.
 _node_recipe_config_write() {
-    local app="$1" f="/home/${1}/.deployer/node.json"
-    mkdir -p "/home/${app}/.deployer"
+    local app="$1" f="/home/${1}/.deployer/node.json" json=""
+    # Made, written and removed as the app user (app_as in common.sh). Root
+    # wrote node.json.tmp, renamed it and chowned the result: with the .tmp a
+    # symlink, the file it pointed at was overwritten and then handed to the
+    # app — and `cipi yml node-sync`, which an app user with `cipi yml auto
+    # on` runs through sudo, ends here (5.8.6).
+    app_mkdir "$app" "/home/${app}/.deployer"
     # Laravel apps pinned with --node-version get {version} only; without a pin
     # the file goes away and they follow the server default.
     if [[ "$(app_get "$app" runtime)" != "node" ]]; then
-        if [[ -z "$(app_get "$app" node_version)" ]]; then rm -f "$f"; return 0; fi
+        if [[ -z "$(app_get "$app" node_version)" ]]; then app_rm "$app" "$f"; return 0; fi
     fi
-    vault_read apps.json | jq -c --arg a "$app" '.[$a] | if .runtime == "node" then {
+    json=$(vault_read apps.json | jq -c --arg a "$app" '.[$a] | if .runtime == "node" then {
         mode: (.node_mode // "spa"), version: (.node_version // "" | tostring), output: (.node_output // "")
-    } else {version: (.node_version | tostring)} end' > "${f}.tmp" && mv -f "${f}.tmp" "$f"
-    chown "${app}:${app}" "$f" 2>/dev/null || true
-    chmod 644 "$f"
+    } else {version: (.node_version | tostring)} end') || json=""
+    if [[ -n "$json" ]]; then
+        # Still replaced in one rename: a deploy may be reading it.
+        printf '%s\n' "$json" | _app_file_op "$app" "$f" \
+            'rm -f "$1.tmp"; ( umask 022; cat > "$1.tmp" ) && chmod 644 "$1.tmp" && mv -f "$1.tmp" "$1"' || true
+    fi
+    [[ -e "$f" ]]
 }
 
 # The node settings a cipi.yml `node:` section asks for, merged over what the

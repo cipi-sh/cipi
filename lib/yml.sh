@@ -105,7 +105,30 @@ _yml_parse() {
         echo '{"ok":false,"errors":["python3 is required to read cipi.yml"],"warnings":[]}'
         return 1
     }
-    python3 - "$file" "$app" <<'CIPIYAMLPY'
+    # A file in an app's home is read as that app's user and parsed from a
+    # copy: the parser quotes lines back in its errors, and cipi.yml as a
+    # symlink — in a release, where the app user puts it — would have shown
+    # any file of the server to whoever runs plan or apply: the panel, or the
+    # app user itself through `sudo cipi yml apply <app> --yes --auto`.
+    local _yp_owner="" _yp_copy="" _yp_rc=0
+    if [[ "${EUID:-$(id -u)}" -eq 0 && "$file" =~ ^/home/([a-z][a-z0-9]{2,31})/ ]]; then
+        _yp_owner="${BASH_REMATCH[1]}"
+        if id "$_yp_owner" &>/dev/null && declare -f app_as >/dev/null 2>&1; then
+            _yp_copy=$(mktemp) || return 1
+            if ! app_as "$_yp_owner" cat -- "$file" > "$_yp_copy" 2>/dev/null < /dev/null; then
+                rm -f "$_yp_copy"
+                # The parser's own words for a file that is not there; anything
+                # else the app user cannot read is not read for it.
+                if [[ ! -e "$file" && ! -L "$file" ]]; then
+                    jq -nc --arg f "$file" '{ok: false, errors: ["cannot read \($f): [Errno 2] No such file or directory: \u0027\($f)\u0027"], warnings: []}'
+                else
+                    jq -nc --arg f "$file" '{ok: false, errors: ["cannot read \($f): not readable by the app user"], warnings: []}'
+                fi
+                return 2
+            fi
+        fi
+    fi
+    python3 - "${_yp_copy:-$file}" "$app" <<'CIPIYAMLPY'
 #!/usr/bin/env python3
 """Cipi — cipi.yml parser and validator.
 
@@ -1697,6 +1720,9 @@ def main():
 if __name__ == "__main__":
     sys.exit(main())
 CIPIYAMLPY
+    _yp_rc=$?
+    [[ -n "$_yp_copy" ]] && rm -f "$_yp_copy"
+    return $_yp_rc
 }
 
 # The panel API (www-data) may run `cipi yml plan|apply *` through sudo, and
@@ -2162,10 +2188,13 @@ _yml_build_plan() {
         for env_cand in "/home/${app}/shared/.env" "/home/${app}/htdocs/.env" "/home/${app}/current/.env"; do
             [[ -f "$env_cand" ]] && { envf="$env_cand"; break; }
         done
+        # Read as the app user (app_as in common.sh), once.
+        local env_text=""
+        [[ -n "$envf" ]] && { env_text=$(app_read "$app" "$envf") || env_text=""; }
         while IFS= read -r ek; do
             [[ -n "$ek" ]] || continue
             ((env_total++)) || true
-            if [[ -z "$envf" ]] || ! grep -qE "^${ek}=..*" "$envf" 2>/dev/null; then
+            if [[ -z "$envf" ]] || ! grep -qE "^${ek}=..*" <<< "$env_text"; then
                 _YML_BLOCKERS+=("env.required: ${ek} is not set in the app's .env — set it once with: cipi app env ${app}")
                 ((env_missing++)) || true
             fi
@@ -2496,7 +2525,7 @@ _yml_node_sync_cmd() {
     _sync_node_build_script "$app"
     _node_state_write "$app"
     _node_recipe_config_write "$app"
-    sed -i "s|${NODE_ROOT}/[0-9]*/bin|${NODE_ROOT}/${ver}/bin|" "/home/${app}/.bashrc" 2>/dev/null || true
+    app_sed "$app" "/home/${app}/.bashrc" "s|${NODE_ROOT}/[0-9]*/bin|${NODE_ROOT}/${ver}/bin|" 2>/dev/null || true
 
     local line
     while IFS= read -r line; do echo "[cipi.yml] node ${line}"; done <<< "$changes"
@@ -3207,22 +3236,21 @@ _yml_create_database() {
     local out="/home/${app}/shared/cipi-databases.env"
     if [[ -d "/home/${app}/shared" ]]; then
         local upper; upper=$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')
-        touch "$out"
-        chown "${app}:${app}" "$out"
-        chmod 600 "$out"
-        grep -v "^${upper}_DB_" "$out" > "${out}.tmp" 2>/dev/null || true
-        mv "${out}.tmp" "$out" 2>/dev/null || true
+        # Written as the app user (app_as in common.sh). Root ran touch, chown
+        # and chmod on this path: as a symlink it gave the app any file.
+        local prev=""
+        prev=$(app_read "$app" "$out") || prev=""
         {
+            [[ -n "$prev" ]] && { grep -v "^${upper}_DB_" <<< "$prev" || true; }
             printf '%s_DB_CONNECTION=%s\n' "$upper" "$(db_engine_laravel_connection "$engine")"
             printf '%s_DB_HOST=127.0.0.1\n' "$upper"
             printf '%s_DB_PORT=%s\n' "$upper" "$(db_engine_port "$engine")"
             printf '%s_DB_DATABASE=%s\n' "$upper" "$name"
             printf '%s_DB_USERNAME=%s\n' "$upper" "$name"
             printf '%s_DB_PASSWORD=%s\n' "$upper" "$pass"
-        } >> "$out"
-        chown "${app}:${app}" "$out"
-        chmod 600 "$out"
-        info "  credentials written to ${out}"
+        } | app_write "$app" "$out" 600 \
+            && info "  credentials written to ${out}" \
+            || warn "  could not write ${out} — credentials: user=${name} password=${pass}"
     else
         warn "  no shared/ directory — credentials: user=${name} password=${pass}"
     fi
@@ -3342,7 +3370,13 @@ _yml_post_deploy_exec() {
     # Node apps build with their own Node major (lib/node.sh). ~/.deployer/node.json
     # names it and is readable by root and by the app user alike.
     local node_major
-    node_major=$(jq -r '.version // empty' "/home/${app}/.deployer/node.json" 2>/dev/null || true)
+    # Root reads it as the app user (app_as in common.sh); the app user, in
+    # cipi-app-post-deploy — which loads this file alone — reads it directly.
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]] && declare -f app_read >/dev/null 2>&1; then
+        node_major=$(app_read "$app" "/home/${app}/.deployer/node.json" | jq -r '.version // empty' 2>/dev/null || true)
+    else
+        node_major=$(jq -r '.version // empty' "/home/${app}/.deployer/node.json" 2>/dev/null || true)
+    fi
     if [[ "$node_major" =~ ^[0-9]{2}$ && -d "/opt/cipi/node/${node_major}/bin" ]]; then
         env+=("PATH=/opt/cipi/node/${node_major}/bin:/usr/local/bin:/usr/bin:/bin")
     else
@@ -4171,8 +4205,16 @@ _yml_generate_save() {
             ;;
     esac
     dir=$(dirname "$dest")
+    # In the app's home the directory and the file are made by the app user
+    # (app_as in common.sh); anywhere else it is the admin's own path.
+    local in_home=false
+    [[ "$dest" == "/home/${app}/"* ]] && in_home=true
     if [[ ! -d "$dir" ]]; then
-        mkdir -p "$dir" || { error "Cannot create ${dir}"; rm -f "$src"; exit 1; }
+        if [[ "$in_home" == true ]]; then
+            app_mkdir "$app" "$dir" || { error "Cannot create ${dir}"; rm -f "$src"; exit 1; }
+        else
+            mkdir -p "$dir" || { error "Cannot create ${dir}"; rm -f "$src"; exit 1; }
+        fi
     fi
     if [[ -d "$dest" ]]; then
         error "${dest} is a directory"
@@ -4185,13 +4227,16 @@ _yml_generate_save() {
         rm -f "$src"
         exit 1
     fi
-    tmp=$(mktemp "${dir}/.cipi.yml.XXXXXX") || { error "Cannot write ${dest}"; rm -f "$src"; exit 1; }
-    cp "$src" "$tmp"
-    chmod 644 "$tmp"
-    if [[ "$dest" == "/home/${app}/cipi.yml" || "$dest" == "/home/${app}/"* ]]; then
-        chown "${app}:${app}" "$tmp" 2>/dev/null || true
+    if [[ "$in_home" == true ]]; then
+        app_sh "$app" 't=$(mktemp "$1/.cipi.yml.XXXXXX") || exit 1
+                       cat > "$t" && chmod 644 "$t" && mv "$t" "$2" || { rm -f "$t"; exit 1; }' "$dir" "$dest" < "$src" \
+            || { error "Cannot write ${dest}"; rm -f "$src"; exit 1; }
+    else
+        tmp=$(mktemp "${dir}/.cipi.yml.XXXXXX") || { error "Cannot write ${dest}"; rm -f "$src"; exit 1; }
+        cp "$src" "$tmp"
+        chmod 644 "$tmp"
+        mv "$tmp" "$dest"
     fi
-    mv "$tmp" "$dest"
     rm -f "$src"
     success "Wrote ${dest}"
     info "Commit it at the root of the repository. Apply reads that copy, not this file."

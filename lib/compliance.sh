@@ -688,6 +688,8 @@ _cmp_ledger_rows() {
 _cmp_unaudited_releases() {
     local app="$1" since="$2" ledger="$3" rlog="/home/${1}/.dep/releases_log"
     [[ -f "$rlog" ]] || return 0
+    # Deployer's own log, not something a symlink of that name points at.
+    [[ ! -L "$rlog" && ! -L "/home/${app}/.dep" ]] || return 0
     local seen name created created_utc
     seen=$(jq -r --arg a "$app" 'select(.app == $a) | .release, (.deployer.release // "")' "$ledger" 2>/dev/null | grep -v '^$' | sort -u)
     while IFS=$'\t' read -r name created; do
@@ -798,8 +800,13 @@ _cmp_check_deploys() {
     while IFS=$'\t' read -r ts lapp trig br from res rel rc; do
         [[ -z "$ts" ]] && continue
         sha="-"
-        [[ -n "$rel" && "$rel" != "?" && -f "/home/${lapp}/releases/${rel}/REVISION" ]] \
-            && sha=$(head -c 40 "/home/${lapp}/releases/${rel}/REVISION" 2>/dev/null)
+        # A commit id and nothing else: a plain file in plain directories,
+        # and only its hex digits (this report goes to people who are not root).
+        [[ -n "$rel" && "$rel" != "?" && "$rel" != *"/"* && "$rel" != ".." \
+           && ! -L "/home/${lapp}/releases" && ! -L "/home/${lapp}/releases/${rel}" \
+           && -f "/home/${lapp}/releases/${rel}/REVISION" && ! -L "/home/${lapp}/releases/${rel}/REVISION" ]] \
+            && sha=$(head -c 40 "/home/${lapp}/releases/${rel}/REVISION" 2>/dev/null | tr -cd '0-9a-f' || true)
+        [[ -n "$sha" ]] || sha="-"
         out="${out}${out:+$'\n'}${ts}"$'\t'"${lapp}"$'\t'"${trig}"$'\t'"${br}"$'\t'"${from}"$'\t'"${rel}"$'\t'"${sha}"$'\t'"${res}"$'\t'"${rc}"
     done < <(sort <<<"$tsv")
     {

@@ -21,6 +21,37 @@ sync_command() {
 
 # ── EXPORT ────────────────────────────────────────────────────
 
+# One file of an app's home into the export, read as the app's user. A file
+# that is not there, or that its own user cannot read, is left out. The copy
+# gets the mode `cp` gave it — the file's own, under umask 022 — because
+# `cipi sync import` copies it on as it finds it.
+_sync_export_copy() {   # <app> <file> <destination>
+    local m=""
+    [[ -f "$2" ]] || return 0
+    ( umask 077; app_read "$1" "$2" > "$3" ) 2>/dev/null || { rm -f "$3"; return 0; }
+    m=$(app_as "$1" stat -L -c '%a' -- "$2" 2>/dev/null < /dev/null || true)
+    if [[ "$m" =~ ^[0-7]{3,4}$ ]]; then
+        chmod "$(printf '%o' $(( 8#$m & 8#755 )))" "$3" 2>/dev/null || true
+    fi
+    return 0
+}
+# shared/storage as a tar.gz, made by the app's user. A second try after
+# handing the tree back, for files root left there (see _app_reown).
+_sync_export_storage() {   # <app> <archive>
+    local app="$1" out="$2"
+    app_as "$app" tar -czf - -C "/home/${app}/shared" storage/ > "$out" 2>/dev/null < /dev/null && return 0
+    _app_reown "$app" "/home/${app}/shared/storage" || return 1
+    app_as "$app" tar -czf - -C "/home/${app}/shared" storage/ > "$out" 2>/dev/null < /dev/null
+}
+# shared/storage back from a tar.gz, unpacked by the app's user with the
+# modes it was packed with (-p: what tar does for root on its own).
+_sync_import_storage() {   # <app> <archive>
+    local app="$1" in="$2" dest="/home/${1}/shared/"
+    app_as "$app" tar -xzpf - -C "$dest" < "$in" 2>/dev/null && return 0
+    _app_reown "$app" "/home/${app}/shared/storage" || return 1
+    app_as "$app" tar -xzpf - -C "$dest" < "$in" 2>/dev/null
+}
+
 _sync_export() {
     parse_args "$@"
 
@@ -97,18 +128,24 @@ _sync_export() {
         mkdir -p "${ad}/ssh"
         step "Exporting '${app}'..."
 
+        # The app's files are read as the app's user (app_as in common.sh).
+        # As root, cp followed a symlink in place of .env, auth.json or a key,
+        # and tar -C went wherever `shared` led: the archive — which becomes
+        # the app's own files on the server that imports it — carried
+        # whatever they pointed at.
+
         # .env
-        [[ -f "/home/${app}/shared/.env" ]] && cp "/home/${app}/shared/.env" "${ad}/env"
+        _sync_export_copy "$app" "/home/${app}/shared/.env" "${ad}/env"
 
         # auth.json
-        [[ -f "/home/${app}/shared/auth.json" ]] && cp "/home/${app}/shared/auth.json" "${ad}/auth.json"
+        _sync_export_copy "$app" "/home/${app}/shared/auth.json" "${ad}/auth.json"
 
         # Deployer config
-        [[ -f "/home/${app}/.deployer/deploy.php" ]] && cp "/home/${app}/.deployer/deploy.php" "${ad}/deploy.php"
+        _sync_export_copy "$app" "/home/${app}/.deployer/deploy.php" "${ad}/deploy.php"
 
         # SSH keys
         for f in id_ed25519 id_ed25519.pub known_hosts config authorized_keys; do
-            [[ -f "/home/${app}/.ssh/${f}" ]] && cp "/home/${app}/.ssh/${f}" "${ad}/ssh/${f}"
+            _sync_export_copy "$app" "/home/${app}/.ssh/${f}" "${ad}/ssh/${f}"
         done
 
         # Supervisor config
@@ -137,7 +174,7 @@ _sync_export() {
         if [[ "$with_storage" == "true" ]]; then
             step "  Shared storage..."
             if [[ -d "/home/${app}/shared/storage" ]]; then
-                if tar -czf "${ad}/storage.tar.gz" -C "/home/${app}/shared" storage/ 2>/dev/null; then
+                if _sync_export_storage "$app" "${ad}/storage.tar.gz"; then
                     local sz; sz=$(du -h "${ad}/storage.tar.gz" | cut -f1)
                     success "  Storage (${sz})"
                 else
@@ -189,8 +226,11 @@ _sync_export() {
     fi
 
     archive="${archive%.tar.gz}.tar.gz.enc"
+    # The passphrase goes to openssl in its environment, not on its command
+    # line: `-pass pass:…` is in the process list, which every local user can
+    # read for as long as the export runs — and the archive is in /tmp.
     tar -czf - -C "$work" "cipi-sync-${ts}" | \
-        openssl enc -aes-256-cbc -salt -pbkdf2 -pass pass:"$passphrase" -out "$archive"
+        CIPI_SYNC_PASSPHRASE="$passphrase" openssl enc -aes-256-cbc -salt -pbkdf2 -pass env:CIPI_SYNC_PASSPHRASE -out "$archive"
     rm -rf "$work"
 
     local total_sz; total_sz=$(du -h "$archive" | cut -f1)
@@ -237,7 +277,7 @@ _sync_list() {
     local tmp; tmp=$(mktemp -d)
     if ! tar -tzf "$file" &>/dev/null; then
         [[ -z "$passphrase" ]] && { read -rsp "Archive is encrypted. Enter passphrase: " passphrase; echo; }
-        openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:"$passphrase" -in "$file" 2>/dev/null \
+        CIPI_SYNC_PASSPHRASE="$passphrase" openssl enc -d -aes-256-cbc -pbkdf2 -pass env:CIPI_SYNC_PASSPHRASE -in "$file" 2>/dev/null \
             | tar -xzf - -C "$tmp" 2>/dev/null || { error "Decryption failed or invalid archive"; rm -rf "$tmp"; exit 1; }
     else
         tar -xzf "$file" -C "$tmp" 2>/dev/null || { error "Invalid archive"; rm -rf "$tmp"; exit 1; }
@@ -320,7 +360,7 @@ _sync_import() {
     local tmp; tmp=$(mktemp -d)
     if ! tar -tzf "$file" &>/dev/null; then
         [[ -z "$passphrase" ]] && { read -rsp "Archive is encrypted. Enter passphrase: " passphrase; echo; }
-        openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:"$passphrase" -in "$file" 2>/dev/null \
+        CIPI_SYNC_PASSPHRASE="$passphrase" openssl enc -d -aes-256-cbc -pbkdf2 -pass env:CIPI_SYNC_PASSPHRASE -in "$file" 2>/dev/null \
             | tar -xzf - -C "$tmp" 2>/dev/null || { error "Decryption failed or invalid archive"; rm -rf "$tmp"; exit 1; }
     else
         tar -xzf "$file" -C "$tmp" 2>/dev/null || { error "Invalid archive"; rm -rf "$tmp"; exit 1; }
@@ -815,32 +855,39 @@ _sync_update_app() {
     # 1. .env — sync from source but preserve local DB credentials
     if [[ -f "${ad}/env" ]]; then
         step ".env..."
-        local local_db_pass local_db_user local_db_name local_db_host local_db_port local_db_conn
-        local_db_pass=$(grep -m1 '^DB_PASSWORD=' "${home}/shared/.env" 2>/dev/null | cut -d= -f2-)
-        local_db_user=$(grep -m1 '^DB_USERNAME=' "${home}/shared/.env" 2>/dev/null | cut -d= -f2-)
-        local_db_name=$(grep -m1 '^DB_DATABASE=' "${home}/shared/.env" 2>/dev/null | cut -d= -f2-)
-        local_db_host=$(grep -m1 '^DB_HOST=' "${home}/shared/.env" 2>/dev/null | cut -d= -f2-)
-        local_db_port=$(grep -m1 '^DB_PORT=' "${home}/shared/.env" 2>/dev/null | cut -d= -f2-)
-        local_db_conn=$(grep -m1 '^DB_CONNECTION=' "${home}/shared/.env" 2>/dev/null | cut -d= -f2-)
-        cp "${ad}/env" "${home}/shared/.env"
-        # Re-apply local DB credentials
-        [[ -n "$local_db_pass" ]] && sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=${local_db_pass}|" "${home}/shared/.env"
-        [[ -n "$local_db_user" ]] && sed -i "s|^DB_USERNAME=.*|DB_USERNAME=${local_db_user}|" "${home}/shared/.env"
-        [[ -n "$local_db_name" ]] && sed -i "s|^DB_DATABASE=.*|DB_DATABASE=${local_db_name}|" "${home}/shared/.env"
-        [[ -n "$local_db_host" ]] && sed -i "s|^DB_HOST=.*|DB_HOST=${local_db_host}|" "${home}/shared/.env"
-        [[ -n "$local_db_port" ]] && sed -i "s|^DB_PORT=.*|DB_PORT=${local_db_port}|" "${home}/shared/.env"
-        [[ -n "$local_db_conn" ]] && sed -i "s|^DB_CONNECTION=.*|DB_CONNECTION=${local_db_conn}|" "${home}/shared/.env"
-        chown "${app}:${app}" "${home}/shared/.env"
-        chmod 640 "${home}/shared/.env"
+        # This app exists: its .env is read and written as its own user
+        # (app_as in common.sh). And the values kept from it are data, never
+        # part of a sed script: root pasted them into one, where a "|e" in a
+        # DB_PASSWORD line of the app's .env ran a command as root.
+        local local_db_pass local_db_user local_db_name local_db_host local_db_port local_db_conn env_cur=""
+        env_cur=$(app_read "$app" "${home}/shared/.env") || env_cur=""
+        # `|| true`: a key this .env does not have (an SQLite app has no
+        # DB_HOST) is an empty value here, not the end of the command — under
+        # pipefail the failed grep stopped `cipi sync` right here, in silence.
+        local_db_pass=$(grep -m1 '^DB_PASSWORD=' <<< "$env_cur" | cut -d= -f2- || true)
+        local_db_user=$(grep -m1 '^DB_USERNAME=' <<< "$env_cur" | cut -d= -f2- || true)
+        local_db_name=$(grep -m1 '^DB_DATABASE=' <<< "$env_cur" | cut -d= -f2- || true)
+        local_db_host=$(grep -m1 '^DB_HOST=' <<< "$env_cur" | cut -d= -f2- || true)
+        local_db_port=$(grep -m1 '^DB_PORT=' <<< "$env_cur" | cut -d= -f2- || true)
+        local_db_conn=$(grep -m1 '^DB_CONNECTION=' <<< "$env_cur" | cut -d= -f2- || true)
+        # The source's .env with the local DB credentials put back, in one write.
+        CIPI_KEEP_DB_PASSWORD="$local_db_pass" CIPI_KEEP_DB_USERNAME="$local_db_user" \
+        CIPI_KEEP_DB_DATABASE="$local_db_name" CIPI_KEEP_DB_HOST="$local_db_host" \
+        CIPI_KEEP_DB_PORT="$local_db_port" CIPI_KEEP_DB_CONNECTION="$local_db_conn" \
+        awk 'BEGIN {
+                 n = split("DB_PASSWORD DB_USERNAME DB_DATABASE DB_HOST DB_PORT DB_CONNECTION", k, " ")
+                 for (i = 1; i <= n; i++) if (ENVIRON["CIPI_KEEP_" k[i]] != "") keep[k[i]] = ENVIRON["CIPI_KEEP_" k[i]]
+             }
+             { i = index($0, "="); key = (i > 1 ? substr($0, 1, i - 1) : "")
+               if (key in keep) print key "=" keep[key]; else print }' "${ad}/env" \
+            | app_write "$app" "${home}/shared/.env" 640
         laravel_app_env_single_log "$app" || true
         success ".env (synced, local DB credentials preserved)"
     fi
 
     # 2. auth.json
     if [[ -f "${ad}/auth.json" ]]; then
-        cp "${ad}/auth.json" "${home}/shared/auth.json"
-        chown "${app}:${app}" "${home}/shared/auth.json"
-        chmod 640 "${home}/shared/auth.json"
+        app_write "$app" "${home}/shared/auth.json" 640 < "${ad}/auth.json"
         success "auth.json synced"
     fi
 
@@ -860,9 +907,10 @@ _sync_update_app() {
     # 4. Storage
     if [[ -f "${ad}/storage.tar.gz" ]]; then
         step "Storage sync..."
-        tar -xzf "${ad}/storage.tar.gz" -C "${home}/shared/" 2>/dev/null && \
+        # Unpacked by the app's user: root unpacked it into shared/ and then
+        # ran chown -R on shared/storage — both through whatever `shared` was.
+        _sync_import_storage "$app" "${ad}/storage.tar.gz" && \
             success "Storage synced" || warn "Storage sync failed"
-        chown -R "${app}:${app}" "${home}/shared/storage"
         laravel_logs_unify "$app" >/dev/null || true
         ensure_app_logs_permissions "$app"
     fi
@@ -881,15 +929,17 @@ _sync_update_app() {
         sed -i "s|/usr/bin/php[0-9]\.[0-9]|/usr/bin/php${php_ver}|g" "/etc/supervisor/conf.d/${app}.conf" 2>/dev/null
         reload_supervisor
         crontab -u "$app" -l 2>/dev/null | sed "s|php${cur_php}|php${php_ver}|g" | crontab -u "$app" -
-        sed -i "s|php${cur_php}|php${php_ver}|g" "${home}/.bashrc" 2>/dev/null
-        sed -i "s|set('bin/php', '/usr/bin/php[0-9]\.[0-9]')|set('bin/php', '/usr/bin/php${php_ver}')|" \
-            "${home}/.deployer/deploy.php" 2>/dev/null
-        sed -i "s|set('bin/composer', '/usr/bin/php[0-9]\.[0-9] /usr/local/bin/composer')|set('bin/composer', '/usr/bin/php${php_ver} /usr/local/bin/composer')|" \
-            "${home}/.deployer/deploy.php" 2>/dev/null
-        if ! grep -q "bin/composer" "${home}/.deployer/deploy.php" 2>/dev/null; then
-            sed -i "/set('bin\/php'/a set('bin/composer', '/usr/bin/php${php_ver} /usr/local/bin/composer');" "${home}/.deployer/deploy.php" 2>/dev/null
+        # The app's own files, edited as the app's user.
+        app_sed "$app" "${home}/.bashrc" "s|php${cur_php}|php${php_ver}|g" 2>/dev/null
+        app_sed "$app" "${home}/.deployer/deploy.php" \
+            -e "s|set('bin/php', '/usr/bin/php[0-9]\.[0-9]')|set('bin/php', '/usr/bin/php${php_ver}')|" \
+            -e "s|set('bin/composer', '/usr/bin/php[0-9]\.[0-9] /usr/local/bin/composer')|set('bin/composer', '/usr/bin/php${php_ver} /usr/local/bin/composer')|" 2>/dev/null
+        local dp_now=""
+        dp_now=$(app_read "$app" "${home}/.deployer/deploy.php") || dp_now=""
+        if ! grep -q "bin/composer" <<< "$dp_now"; then
+            app_sed "$app" "${home}/.deployer/deploy.php" "/set('bin\/php'/a set('bin/composer', '/usr/bin/php${php_ver} /usr/local/bin/composer');" 2>/dev/null
         fi
-        sed -i "s|^CIPI_PHP_VERSION=.*|CIPI_PHP_VERSION=${php_ver}|" "${home}/shared/.env" 2>/dev/null
+        app_sed "$app" "${home}/shared/.env" "s|^CIPI_PHP_VERSION=.*|CIPI_PHP_VERSION=${php_ver}|" 2>/dev/null
         success "PHP → ${php_ver}"
     fi
 
@@ -927,20 +977,23 @@ _sync_update_app() {
     # 9. Deployer config
     if [[ -f "${ad}/deploy.php" ]]; then
         step "Deployer..."
-        cp "${ad}/deploy.php" "${home}/.deployer/deploy.php"
-        sed -i "s|set('bin/php', '/usr/bin/php[0-9]\.[0-9]')|set('bin/php', '/usr/bin/php${php_ver}')|" \
-            "${home}/.deployer/deploy.php"
-        sed -i "s|set('bin/composer', '/usr/bin/php[0-9]\.[0-9] /usr/local/bin/composer')|set('bin/composer', '/usr/bin/php${php_ver} /usr/local/bin/composer')|" \
-            "${home}/.deployer/deploy.php"
-        if ! grep -q "bin/composer" "${home}/.deployer/deploy.php" 2>/dev/null; then
-            sed -i "/set('bin\/php'/a set('bin/composer', '/usr/bin/php${php_ver} /usr/local/bin/composer');" "${home}/.deployer/deploy.php"
+        # Prepared in a file of root's, then written by the app's user.
+        local dp_tmp; dp_tmp=$(mktemp)
+        sed -e "s|set('bin/php', '/usr/bin/php[0-9]\.[0-9]')|set('bin/php', '/usr/bin/php${php_ver}')|" \
+            -e "s|set('bin/composer', '/usr/bin/php[0-9]\.[0-9] /usr/local/bin/composer')|set('bin/composer', '/usr/bin/php${php_ver} /usr/local/bin/composer')|" \
+            "${ad}/deploy.php" > "$dp_tmp"
+        if ! grep -q "bin/composer" "$dp_tmp" 2>/dev/null; then
+            sed -i "/set('bin\/php'/a set('bin/composer', '/usr/bin/php${php_ver} /usr/local/bin/composer');" "$dp_tmp"
         fi
-        chown -R "${app}:${app}" "${home}/.deployer"
+        local dp_rc=0
+        app_write "$app" "${home}/.deployer/deploy.php" < "$dp_tmp" || dp_rc=$?
+        rm -f "$dp_tmp"
+        [[ $dp_rc -eq 0 ]] || { error "Cannot write ${home}/.deployer/deploy.php"; exit 1; }
         success "Deployer synced"
     fi
 
     # 10. Fix ownership
-    chown -R "${app}:${app}" "${home}/shared" "${home}/.deployer" "${home}/.ssh" "${home}/.bashrc" 2>/dev/null
+    chown -h -R "${app}:${app}" "${home}/shared" "${home}/.deployer" "${home}/.ssh" "${home}/.bashrc" 2>/dev/null
 
     # 11. Deploy
     if [[ "$run_deploy" == "true" ]]; then

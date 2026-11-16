@@ -63,6 +63,7 @@ _render_vhost() {
         }
         vault_read() { echo "{}"; }
         _ensure_nginx_octane_map() { :; }
+        app_log_dir_ensure() { return 0; }; app_log_links_default() { :; }   # 5.8.6: the log directory, not on this machine
         source lib/app.sh
         tmp=$(mktemp -d); mkdir -p "${tmp}/etc/nginx/sites-available"
         declare -f _nginx_cipi_yml_deny_block _nginx_reverb_location_block _create_nginx_vhost _create_nginx_vhost_http _nginx_vhost_tls \

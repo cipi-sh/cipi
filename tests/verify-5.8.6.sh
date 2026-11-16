@@ -2,11 +2,20 @@
 # Local regression checks for 5.8.6 — app users out of www-data, the stock
 # www pool socket 0600, the panel sudoers written only with a panel, root's
 # temp directories from mktemp, cipi-app-notify validating its arguments
-# (the -eq arithmetic injection) and parse_args refusing an option name that
-# is not one (the same injection through `printf -v`). Pure bash + coreutils:
-# cipi-app-notify and parse_args are run for real, and so is the migration —
-# against a fake root under the temp dir, with getent, gpasswd, systemctl and
-# supervisorctl stubbed (that part needs jq and is skipped without it).
+# (the -eq arithmetic injection), parse_args refusing an option name that
+# is not one (the same injection through `printf -v`), the logs root writes
+# for an app moved out of the app's home (/var/log/cipi-apps/<app>), the log
+# readers dropping to the app user, `cipi node restart` under sudo, the swap
+# line of root's crontab and the SSH default of a new server.
+# Pure bash + coreutils: cipi-app-notify, parse_args, the log helpers and
+# cipi-read-app-logs are run for real, and so is the migration — against a
+# fake root under the temp dir, with every command that would act on the
+# machine (getent, id, gpasswd, systemctl, supervisorctl, nginx, php-fpm,
+# sudo, install, chown, crontab, cipi-node-switch) stubbed; that part needs
+# jq and is skipped without it. It covers the move going well, a second
+# run, and nginx, supervisor or PHP-FPM refusing the new configuration.
+# What needs real accounts — root following, or not, a symlink an app user
+# planted — is not here: it was run by hand for the release (CHANGELOG).
 # Nothing outside the temp dir is touched and no mail is sent.
 # Run from repo root: bash tests/verify-5.8.6.sh
 set -uo pipefail
@@ -214,62 +223,239 @@ out=$(pa "--x=\$(touch ${TMP}/pwned)" "--name=a[\$(touch ${TMP}/pwned)]")
 [[ ! -e "${TMP}/pwned" && "$out" == "||||a[\$(touch ${TMP}/pwned)]|\$(touch ${TMP}/pwned)" ]] \
     && pass "values are stored as text, never evaluated" || fail "a value was evaluated: ${out}"
 
-# ── 8. functional: migration 5.8.6 against a fake root ──────
+# ── 8. static: what root writes for an app is not in the app's home ──
+echo "--- static: app logs in /var/log/cipi-apps"
+[[ "$(grep -c 'access_log /var/log/cipi-apps/\${app}/nginx-access.log;' "${LIB}/app.sh")" -eq 6 \
+   && "$(grep -c 'access_log /var/log/cipi-apps/\${app}/nginx-access.log;' "${LIB}/node.sh")" -eq 2 ]] \
+    && pass "every vhost template (6 PHP, 2 Node) logs to /var/log/cipi-apps/<app>" || fail "a vhost template does not log to /var/log/cipi-apps"
+grep -qE '(access_log|error_log) /home/' "${LIB}/app.sh" "${LIB}/node.sh" \
+    && fail "a vhost template still logs under /home" || pass "no vhost template logs under /home"
+grep -q 'stdout_logfile=/home/\|stdout_logfile=\${HOME_DIR}/logs' "${LIB}/common.sh" "${LIB}/cipi-node-switch.sh" \
+    && fail "a supervisor program still logs under the app's home" || pass "no supervisor program logs under the app's home"
+[[ "$(grep -c 'stdout_logfile=/var/log/cipi-apps/\${app}/' "${LIB}/common.sh")" -ge 4 ]] && grep -q 'stdout_logfile=\${LOG_DIR}/node-' "${LIB}/cipi-node-switch.sh" \
+    && pass "workers, octane, reverb, horizon and the Node slots log to /var/log/cipi-apps/<app>" || fail "supervisor log paths"
+fn deploy.sh deploy_log_file >/dev/null; grep -q '^deploy_log_file() { echo "/var/log/cipi-apps/\${1:-}/deploy.log"; }' "${LIB}/deploy.sh" \
+    && pass "cipi deploy (root) writes deploy.log in /var/log/cipi-apps/<app>" || fail "deploy_log_file still under the app's home"
+grep -qF 'php_admin_value[open_basedir] = /home/${app}/:/var/log/cipi-apps/${app}/:/tmp/:/proc/' "${LIB}/app.sh" \
+    && pass "the app's pool may read its own log directory (open_basedir)" || fail "pool open_basedir lacks /var/log/cipi-apps/<app>"
+fn common.sh ensure_app_logs_permissions | grep -qE 'chmod 2775|^[[:space:]]*mkdir -p "\$\{home\}/logs"|chown "\$\{app\}:www-data" "\$\{home\}/logs"' \
+    && fail "ensure_app_logs_permissions still runs mkdir/chown/chmod as root on ~/logs" || pass "root no longer runs mkdir, a plain chown or chmod on ~/logs"
+[[ "$(fn common.sh ensure_app_permissions | sed '/_app_as "\$app" /,$d' | grep -vE '^[[:space:]]*#' | grep -c 'chmod')" -eq 1 ]] \
+    && fn common.sh ensure_app_permissions | sed -n '/_app_as "\$app" /,$p' | grep -q 'chmod 600' \
+    && pass "ensure_app_permissions: root chmods the home itself, everything inside is done as the app user" || fail "ensure_app_permissions still chmods files of the home as root"
+fn common.sh ensure_app_permissions | grep -q 'chown -h -R "\${app}:\${app}" "\$home"' \
+    && ! fn common.sh ensure_app_logs_permissions | grep -vE '^[[:space:]]*#' | grep -q 'find .* -exec chown' \
+    && pass "ensure_app_permissions: ownership through chown -h -R (no symlink followed)" || fail "ensure_app_permissions: chown may follow a symlink"
+grep -q 'exec sudo -u "\$app" /bin/bash -c' "${LIB}/cipi-read-app-logs.sh" \
+    && pass "cipi-read-app-logs reads as the app user" || fail "cipi-read-app-logs still reads as root"
+fn app.sh _cipi_emit_log_page | grep -q 'sudo -u "\$app"' && fn app.sh _app_logs_follow | grep -q 'sudo -u "\$app"' \
+    && pass "cipi app logs reads as the app user" || fail "cipi app logs still reads as root"
+grep -q '/var/log/cipi-apps/\*/nginx-access.log' "${ROOT}/setup.sh" && grep -q '/var/log/cipi-apps/\*/worker-\*.log' "${ROOT}/setup.sh" \
+    && ! grep -qE '^/home/\*/logs/(nginx-|worker-|deploy)' "${ROOT}/setup.sh" \
+    && pass "setup.sh: logrotate follows the logs to /var/log/cipi-apps" || fail "setup.sh logrotate paths"
+grep -q 'app_logs_relocate --fpm=defer' "$M" && fn app.sh app_fix_permissions | grep -q 'app_logs_relocate' \
+    && pass "the move runs in migration 5.8.6 and again from cipi app fix-permissions" || fail "app_logs_relocate not wired in"
+bash -n "${LIB}/app-logs.sh" && bash -n "${LIB}/cipi-read-app-logs.sh" && bash -n "${LIB}/cipi-node-switch.sh" && bash -n "${LIB}/node.sh" && bash -n "${LIB}/deploy.sh" \
+    && pass "app-logs.sh, cipi-read-app-logs.sh, cipi-node-switch.sh, node.sh, deploy.sh parse" || fail "a changed script does not parse"
+
+# ── 9. static + functional: the rest of this release ────────
+echo "--- node restart under sudo, swap cron, SSH default, temp dirs"
+grep -q '^_node_switch() { env -u SUDO_USER /usr/local/bin/cipi-node-switch "\$@"; }' "${LIB}/node.sh" \
+    && [[ "$(grep -vE '^[[:space:]]*#' "${LIB}/node.sh" | grep -c '/usr/local/bin/cipi-node-switch')" -eq 1 ]] \
+    && pass "node.sh calls cipi-node-switch only through _node_switch (SUDO_USER dropped)" || fail "node.sh still calls cipi-node-switch with the caller's SUDO_USER"
+cat > "${TMP}/switch-stub" <<'STUB'
+#!/bin/bash
+echo "SUDO_USER=${SUDO_USER:-unset} args=$*"
+STUB
+chmod +x "${TMP}/switch-stub"
+out=$(SUDO_USER=cipi bash -c "$(fn node.sh _node_switch | sed "s#/usr/local/bin/cipi-node-switch#${TMP}/switch-stub#"); _node_switch myapp current")
+[[ "$out" == "SUDO_USER=unset args=myapp current" ]] && pass "_node_switch: the switch does not see the sudo caller" || fail "_node_switch passed: ${out}"
+if [[ "$(id -u)" -eq 0 ]]; then
+    out=$(SUDO_USER=cipi bash "${LIB}/cipi-node-switch.sh" myapp current 2>&1; echo "rc=$?")
+    grep -q 'cipi cannot manage myapp' <<< "$out" \
+        && pass "…which it refuses (what sudo cipi node restart ran into before)" || fail "cipi-node-switch accepted a foreign SUDO_USER: ${out}"
+else
+    grep -q 'cannot manage \${APP}' "${LIB}/cipi-node-switch.sh" \
+        && pass "…which it refuses (read from the script: running it needs root)" || fail "cipi-node-switch no longer checks SUDO_USER"
+fi
+
+cronline=$(grep -F 'swapoff -a && swapon -a' "${ROOT}/setup.sh" | grep -F '/proc/meminfo' | head -1)
+[[ -n "$cronline" ]] && pass "setup.sh: the swap reset checks /proc/meminfo first" || fail "setup.sh: swapoff -a without a memory check"
+grep -q "^50 5 \* \* \* echo 3 > /proc/sys/vm/drop_caches && swapoff -a && swapon -a" "${ROOT}/setup.sh" \
+    && fail "setup.sh still installs the unguarded swap line" || pass "setup.sh: no unguarded swapoff -a"
+guard=$(sed -n "s/.*\(awk '[^']*'\) \/proc\/meminfo.*/\1/p" <<< "$cronline")
+swap_ok() { printf 'MemAvailable: %s kB\nSwapTotal: %s kB\nSwapFree: %s kB\n' "$1" "$2" "$3" > "${TMP}/meminfo"; eval "$guard \"${TMP}/meminfo\""; }
+if [[ -n "$guard" ]]; then
+    swap_ok 4000000 2000000 1500000 && pass "swap guard: 500 MB in swap, 4 GB available → swap is emptied" || fail "swap guard refuses a safe reset"
+    swap_ok 800000 2000000 1500000 && fail "swap guard: 500 MB in swap, 800 MB available → should not run swapoff" || pass "swap guard: not enough RAM for twice the swap in use → swapoff is skipped"
+    swap_ok 4000000 2000000 2000000 && fail "swap guard: nothing in swap → should not run swapoff" || pass "swap guard: nothing in swap → skipped"
+    swap_ok 4000000 0 0 && fail "swap guard: no swap at all → should not run swapoff" || pass "swap guard: no swap configured → skipped"
+else
+    fail "swap guard: could not read the awk program out of setup.sh"
+fi
+grep -q 'awk' <<< "$(grep -n 'swapoff -a' "$M")" && grep -q 'crontab -' "$M" \
+    && pass "migration rewrites the swap line of root's crontab" || fail "migration leaves the old swap line"
+
+grep -q 'app_ssh_default: "disabled"' "${ROOT}/setup.sh" && grep -q 'fresh_server' "${ROOT}/setup.sh" \
+    && pass "setup.sh: a new server starts with SSH/SFTP for app users closed from outside" || fail "setup.sh: no app_ssh_default on a new server"
+grep -q 'app_ssh_default' "$M" \
+    && fail "migration changes app SSH access on existing servers" || pass "migration does not touch app SSH access on existing servers"
+
+grep -q 'mktemp -d /tmp/cipi-gui-pkg.XXXXXXXXXX' "${LIB}/gui.sh" && ! grep -vE '^[[:space:]]*#' "${LIB}/gui.sh" | grep -q 'cipi-gui-pkg-\$\$' \
+    && pass "gui.sh: the path-package copy goes into a mktemp directory" || fail "gui.sh still uses /tmp/cipi-gui-pkg-\$\$"
+grep -q 'mktemp -d /tmp/cipi-sync.XXXXXXXXXX' "${LIB}/sync.sh" && ! grep -qE 'tmp="/tmp/cipi-sync-\$\{?ts' "${LIB}/sync.sh" \
+    && pass "sync export stages its files in a mktemp directory, mode 700" || fail "sync export still stages in /tmp/cipi-sync-<time>"
+
+# ── 10. functional: helpers and the log reader ──────────────
+echo "--- functional: log links and cipi-read-app-logs"
+H="${TMP}/h"; V="${TMP}/v"; SB="${TMP}/sbin"; mkdir -p "$H/demo/logs" "$H/demo/shared/storage/logs" "$V" "$SB"
+printf '#!/bin/bash\n[[ "$1" == -u ]] && { echo "$2" >> "%s/sudo-users"; shift 2; }\nexec "$@"\n' "$TMP" > "$SB/sudo"
+printf '#!/bin/bash\ncase "$1" in -gn) echo "$2";; esac\ncase "${@: -1}" in demo) exit 0;; *) exit 1;; esac\n' > "$SB/id"
+chmod +x "$SB/sudo" "$SB/id"
+links() {   # app_log_links, on the fake home
+    PATH="$SB:$PATH" bash -c "$(fn common.sh _app_as; fn common.sh app_log_links | sed "s#/var/log/cipi-apps/#${V}/#; s#\"/home/\${app}/logs\"#\"${H}/\${app}/logs\"#"); app_log_links \"\$@\"" _ "$@"
+}
+echo "old lines" > "$H/demo/logs/nginx-access.log"; ln -s /etc/hostname "$H/demo/logs/worker-default.log"; ln -s "$V/demo/deploy.log" "$H/demo/logs/deploy.log"
+links demo nginx-access.log worker-default.log deploy.log '../evil' 'a/b'
+[[ "$(readlink "$H/demo/logs/nginx-access.log")" == "$V/demo/nginx-access.log" && "$(cat "$H/demo/logs/nginx-access.log.old")" == "old lines" ]] \
+    && pass "app_log_links: a regular log becomes <name>.old, the name a symlink to root's directory" || fail "app_log_links: regular file"
+[[ "$(readlink "$H/demo/logs/worker-default.log")" == "$V/demo/worker-default.log" && ! -e "$H/demo/logs/worker-default.log.old" ]] \
+    && pass "app_log_links: a symlink that points elsewhere is replaced" || fail "app_log_links: foreign symlink"
+[[ "$(readlink "$H/demo/logs/deploy.log")" == "$V/demo/deploy.log" && "$(ls "$H/demo/logs" | wc -l)" -eq 4 && ! -e "$H/demo/evil" ]] \
+    && pass "app_log_links: a link already right is left; names that are not plain file names are skipped" || fail "app_log_links: $(ls "$H/demo/logs" | tr '\n' ' ')"
+grep -qx demo "${TMP}/sudo-users" && pass "app_log_links works as the app user (sudo -u), not as root" || fail "app_log_links did not drop to the app user"
+
+sed "s#\^/home/#^${H}/#" "${LIB}/cipi-read-app-logs.sh" > "${TMP}/read.sh"
+rd() { ( PATH="$SB:$PATH" bash "${TMP}/read.sh" "$@" ) 2>/dev/null; }
+for i in $(seq 1 25); do echo "line $i"; done > "$H/demo/shared/storage/logs/laravel.log"
+: > "${TMP}/sudo-users"
+out=$(rd "$H/demo/shared/storage/logs/laravel.log" 2 10); rc=$?
+[[ "$rc" -eq 0 && "$(sed -n 1p <<< "$out")" == "===CIPI_LOG_FILE:$H/demo/shared/storage/logs/laravel.log:25===" && "$(sed -n 2p <<< "$out")" == "line 6" \
+   && "$(sed -n 11p <<< "$out")" == "line 15" && "$(sed -n 12p <<< "$out")" == "===CIPI_LOG_END===" ]] \
+    && pass "cipi-read-app-logs: same pages and markers as before" || fail "cipi-read-app-logs output changed: rc=${rc} $(head -3 <<< "$out" | tr '\n' '|')"
+grep -qx demo "${TMP}/sudo-users" && pass "cipi-read-app-logs reads through sudo -u <app>" || fail "cipi-read-app-logs did not drop to the app user"
+out=$(rd "$H/demo/logs/../../../etc/hostname" 1 50); rc=$?
+[[ "$rc" -ne 0 && -z "$out" ]] && pass "cipi-read-app-logs refuses '..' in the pattern (it printed any file before)" || fail "cipi-read-app-logs followed '..': rc=${rc}"
+out=$(rd "$H/demo/logs/x.log /etc/hostname" 1 50); rc=$?
+[[ "$rc" -ne 0 && -z "$out" ]] && pass "cipi-read-app-logs refuses a second path after a space" || fail "cipi-read-app-logs took two paths: rc=${rc}"
+rd "/etc/hostname" 1 50 >/dev/null; [[ $? -ne 0 ]] && pass "cipi-read-app-logs refuses a path outside an app's log directories" || fail "cipi-read-app-logs read /etc/hostname"
+rd "$H/demo/logs/nginx-access.log" 1 '5; id' >/dev/null; [[ $? -ne 0 ]] && pass "cipi-read-app-logs refuses a page size that is not a number" || fail "cipi-read-app-logs took a non-numeric page size"
+rd "$H/nouser/logs/x.log" 1 5 >/dev/null; [[ $? -ne 0 ]] && pass "cipi-read-app-logs refuses a home with no such user" || fail "cipi-read-app-logs ran for a user that does not exist"
+
+# ── 11. functional: migration 5.8.6 against a fake root ─────
 echo "--- functional: migration 5.8.6 (fake root)"
 if ! command -v jq >/dev/null 2>&1; then
     echo "  SKIP: jq not installed — migration dry run not executed"
 else
     R="${TMP}/root"
-    mkdir -p "$R"/{lib,bin,cfg,log,etc/php/8.3/fpm/pool.d,etc/supervisor/conf.d,etc/sudoers.d,var/lib/cipi/node,run/lock,home/nodeapp/releases/7,home/staticnode}
-    cp "${LIB}"/*.sh "$R/lib/"
-    cp "$M" "$R/migration.sh"
-    # Absolute paths → the fake root.
-    sed -i -e "s#/etc/php/#$R/etc/php/#g" -e "s#/etc/supervisor/conf.d/#$R/etc/supervisor/conf.d/#g" \
-        -e "s#/var/lib/cipi/node/#$R/var/lib/cipi/node/#g" -e "s#\"/home/\${u}/current\"#\"$R/home/\${u}/current\"#g" \
-        -e "s#/run/lock/#$R/run/lock/#g" -e "s#/usr/local/bin/cipi-node-switch#$R/bin/cipi-node-switch#g" \
-        -e "s#/etc/sudoers.d/cipi-api#$R/etc/sudoers.d/cipi-api#g" -e "s#/etc/nginx/sites-available/#$R/etc/nginx/sites-available/#g" \
-        -e "s#/etc/systemd/system/cipi-queue.service#$R/etc/systemd/system/cipi-queue.service#g" -e "s#/etc/cron.d/cipi-#$R/etc/cron.d/cipi-#g" \
-        "$R/migration.sh" "$R/lib/cipi-api-sudoers.sh"
+    # A server as 5.8.5 left it, under $R. Every absolute path the migration and
+    # its helpers name is rewritten to $R (in two passes, so a temp dir whose own
+    # path contains /home/ or /etc/ is not rewritten twice) and every command
+    # that would act on the machine is a stub in $R/bin that logs to $R/calls.
+    build_root() {
+        rm -rf "$R"
+        mkdir -p "$R"/{lib,bin,cfg,log,etc/php/8.3/fpm/pool.d,etc/php/8.4/fpm/pool.d,etc/supervisor/conf.d,etc/sudoers.d,etc/nginx/sites-available,etc/nginx/conf.d,etc/logrotate.d,etc/crowdsec/acquis.d,var/lib/cipi/node,var/log,run/lock,home/nodeapp/releases/7,home/staticnode}
+        cp "${LIB}"/*.sh "$R/lib/"
+        cp "$M" "$R/migration.sh"
+        local files=("$R/migration.sh" "$R/lib/app-logs.sh" "$R/lib/common.sh" "$R/lib/cipi-api-sudoers.sh")
+        sed -i -e "s#/etc/php/#@@R@@/etc/php/#g" -e "s#/etc/supervisor/conf.d/#@@R@@/etc/supervisor/conf.d/#g" \
+            -e "s#/etc/nginx/#@@R@@/etc/nginx/#g" -e "s#/etc/logrotate.d/#@@R@@/etc/logrotate.d/#g" -e "s#/etc/crowdsec/#@@R@@/etc/crowdsec/#g" \
+            -e "s#/var/lib/cipi/#@@R@@/var/lib/cipi/#g" -e "s#/var/log/cipi-apps#@@R@@/var/log/cipi-apps#g" \
+            -e "s#/home/#@@R@@/home/#g" -e "s#/run/lock/#@@R@@/run/lock/#g" -e "s#/usr/local/bin/cipi-node-switch#@@R@@/bin/cipi-node-switch#g" \
+            -e "s#/etc/sudoers.d/cipi-api#@@R@@/etc/sudoers.d/cipi-api#g" -e "s#/etc/systemd/system/cipi-queue.service#@@R@@/etc/systemd/system/cipi-queue.service#g" \
+            -e "s#/etc/cron.d/cipi-#@@R@@/etc/cron.d/cipi-#g" "${files[@]}"
+        sed -i "s#@@R@@#$R#g" "${files[@]}"
 
-    # Four apps (one not in www-data, one Node SSR, one Node static), an app
-    # with a reserved name, and an account that is in www-data and not an app.
-    echo '{"appa":{},"appb":{},"nodeapp":{},"staticnode":{},"admin":{}}' > "$R/cfg/apps.json"
-    printf 'cipi-apps:x:1001:appa,appb,nodeapp,staticnode\n' > "$R/group.cipi-apps"
-    printf 'www-data:x:33:appa,nodeapp,staticnode,admin,sysuser\n' > "$R/group.www-data"
-    printf '[www]\nuser = www-data\ngroup = www-data\nlisten = /run/php/php8.3-fpm.sock\nlisten.owner = www-data\nlisten.group = www-data\npm = ondemand\n' \
-        > "$R/etc/php/8.3/fpm/pool.d/www.conf"
-    printf '[program:appa-worker-default]\ncommand=x\n[program:appa-horizon]\ncommand=y\n' > "$R/etc/supervisor/conf.d/appa.conf"
-    : > "$R/etc/supervisor/conf.d/nodeapp-node.conf"; : > "$R/etc/supervisor/conf.d/staticnode-node.conf"
-    echo '{"mode":"ssr","active":0}' > "$R/var/lib/cipi/node/nodeapp.json"
-    echo '{"mode":"static"}' > "$R/var/lib/cipi/node/staticnode.json"
-    ln -s releases/7 "$R/home/nodeapp/current"; ln -s . "$R/home/staticnode/current"
-    echo 'www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi ssh add *' > "$R/etc/sudoers.d/cipi-api"
-
-    stub() { printf '#!/bin/bash\n%s\n' "$2" > "$R/bin/$1"; chmod +x "$R/bin/$1"; }
-    stub getent  "f=\"$R/group.\$2\"; [[ \"\$1\" == group && -f \"\$f\" ]] && cat \"\$f\" || exit 2"
-    stub id      'case "${@: -1}" in appa|appb|nodeapp|staticnode|admin|sysuser|root|cipi|www-data) exit 0;; *) exit 1;; esac'
-    stub gpasswd "echo \"gpasswd \$*\" >> \"$R/calls\"; [[ \"\$1\" == -d ]] && sed -i -E \"s/(:|,)\$2(,|\\\$)/\\\\1\\\\2/; s/,\\\$//; s/:,/:/\" \"$R/group.\$3\""
-    stub dpkg    '[[ "$2" == php8.3-fpm ]]'
-    stub systemctl "echo \"systemctl \$*\" >> \"$R/calls\"; exit 0"
-    stub php-fpm8.3 'exit 0'
-    stub supervisorctl "echo \"supervisorctl \$*\" >> \"$R/calls\"
+        stub() { printf '#!/bin/bash\n%s\n' "$2" > "$R/bin/$1"; chmod +x "$R/bin/$1"; }
+        stub getent  "f=\"$R/group.\$2\"; [[ \"\$1\" == group && -f \"\$f\" ]] && cat \"\$f\" || exit 2"
+        stub id      'case "$1" in -gn) echo "$2";; esac; case "${@: -1}" in appa|appb|nodeapp|staticnode|newapp|admin|sysuser|root|cipi|www-data) exit 0;; *) exit 1;; esac'
+        stub gpasswd "echo \"gpasswd \$*\" >> \"$R/calls\"; [[ \"\$1\" == -d ]] && sed -i -E \"s/(:|,)\$2(,|\\\$)/\\\\1\\\\2/; s/,\\\$//; s/:,/:/\" \"$R/group.\$3\""
+        stub dpkg    '[[ "$2" == php8.3-fpm || "$2" == php8.4-fpm ]]'
+        stub systemctl "echo \"systemctl \$*\" >> \"$R/calls\"; exit 0"
+        stub php-fpm8.3 "echo \"php-fpm8.3 \$*\" >> \"$R/calls\"; exit \${FPM83_T_RC:-0}"
+        stub php-fpm8.4 "echo \"php-fpm8.4 \$*\" >> \"$R/calls\"; exit 0"
+        # nginx -t fails when told to: always (NGINX_T_RC), or as soon as appa's vhost names the new directory (NGINX_REJECT_NEW)
+        stub nginx   "echo \"nginx \$*\" >> \"$R/calls\"; [[ -n \"\${NGINX_T_RC:-}\" ]] && exit \"\$NGINX_T_RC\"; if [[ -n \"\${NGINX_REJECT_NEW:-}\" ]] && grep -qs 'cipi-apps/appa/' \"$R/etc/nginx/sites-available/appa\"; then exit 1; fi; exit 0"
+        stub supervisorctl "echo \"supervisorctl \$*\" >> \"$R/calls\"
 case \"\$1 \$2\" in
+  'reread '*) exit \${SUP_REREAD_RC:-0};;
+  'update appa-worker-default') printf 'appa-worker-default: stopped\nappa-worker-default: updated process group\n';;
   'status appa-worker-default:*') printf 'appa-worker-default:appa-worker-default_00   RUNNING   pid 11, uptime 1:00:00\nappa-worker-default:appa-worker-default_01   RUNNING   pid 12, uptime 1:00:00\n';;
+  'status appa-reverb:*')         printf 'appa-reverb                      RUNNING   pid 13, uptime 1:00:00\n';;
   'status appa-horizon:*')        printf 'appa-horizon                     STOPPED   Not started\n'; exit 3;;
   status*) echo \"\$2: ERROR (no such group)\"; exit 4;;
 esac"
-    stub cipi-node-switch "echo \"node-switch \$* SUDO_USER=\${SUDO_USER:-unset}\" >> \"$R/calls\"; exit \${NODE_SWITCH_RC:-0}"
+        # the real switch rewrites the two slots' configuration itself: so does this one
+        stub cipi-node-switch "echo \"node-switch \$* SUDO_USER=\${SUDO_USER:-unset}\" >> \"$R/calls\"; [[ \"\${NODE_SWITCH_RC:-0}\" == 0 ]] || exit \"\$NODE_SWITCH_RC\"; sed -i \"s#^stdout_logfile=$R/home/\$1/logs/#stdout_logfile=$R/var/log/cipi-apps/\$1/#\" \"$R/etc/supervisor/conf.d/\$1-node.conf\""
+        # the drop to the app user, ownership and ACLs: here everything is the user running the test
+        stub sudo    'if [[ "$1" == -u ]]; then shift 2; fi; exec "$@"'
+        stub install 'args=(); while [[ $# -gt 0 ]]; do case "$1" in -o|-g) shift 2;; *) args+=("$1"); shift;; esac; done; exec /usr/bin/install "${args[@]}"'
+        stub chown   'exit 0'
+        stub setfacl 'exit 0'
+        stub crontab "if [[ \"\$1\" == -l ]]; then cat \"$R/crontab\" 2>/dev/null; elif [[ \"\$1\" == - ]]; then cat > \"$R/crontab\"; echo 'crontab -' >> \"$R/calls\"; fi"
 
-    migrate() {
+        # Five apps — appa (Laravel: workers, horizon, a pool on 8.3), appb (not
+        # in www-data, a pool someone rewrote), nodeapp (Node SSR), staticnode
+        # (Node static), newapp (created on 5.8.6) — an app with a reserved
+        # name, and an account that is in www-data and is not an app.
+        echo '{"appa":{},"appb":{},"nodeapp":{},"staticnode":{},"newapp":{},"admin":{}}' > "$R/cfg/apps.json"
+        printf 'cipi-apps:x:1001:appa,appb,nodeapp,staticnode,newapp\n' > "$R/group.cipi-apps"
+        printf 'www-data:x:33:appa,nodeapp,staticnode,admin,sysuser\n' > "$R/group.www-data"
+        printf '[www]\nuser = www-data\ngroup = www-data\nlisten = /run/php/php8.3-fpm.sock\nlisten.owner = www-data\nlisten.group = www-data\npm = ondemand\n' \
+            > "$R/etc/php/8.3/fpm/pool.d/www.conf"
+        local a
+        for a in appa appb nodeapp newapp; do
+            mkdir -p "$R/home/$a/logs"
+            printf 'server {\n    listen 443 ssl;\n    server_name %s.example.com;\n    access_log %s/home/%s/logs/nginx-access.log;\n    error_log %s/home/%s/logs/nginx-error.log;\n}\n\nserver {\n    listen 80;\n    server_name %s.example.com;\n    access_log %s/home/%s/logs/nginx-access.log;\n    error_log %s/home/%s/logs/nginx-error.log;\n    return 301 https://$host$request_uri;\n}\n' \
+                "$a" "$R" "$a" "$R" "$a" "$a" "$R" "$a" "$R" "$a" > "$R/etc/nginx/sites-available/$a"
+        done
+        sed -i "s#$R/home/newapp/logs/#$R/var/log/cipi-apps/newapp/#" "$R/etc/nginx/sites-available/newapp"
+        printf '[program:appa-worker-default]\ncommand=/usr/bin/php8.3 artisan queue:work\nuser=appa\nnumprocs=2\nstdout_logfile=%s/home/appa/logs/worker-default.log\nstdout_logfile_maxbytes=10MB\n[program:appa-horizon]\ncommand=/usr/bin/php8.3 artisan horizon\nuser=appa\nstdout_logfile=%s/home/appa/logs/horizon.log\n[program:appa-reverb]\ncommand=/usr/bin/php8.3 artisan reverb:start\nuser=appa\nstdout_logfile=/var/log/custom/appa-reverb.log\n' \
+            "$R" "$R" > "$R/etc/supervisor/conf.d/appa.conf"
+        printf '[program:nodeapp-node-blue]\nstdout_logfile=%s/home/nodeapp/logs/node-blue.log\n[program:nodeapp-node-green]\nstdout_logfile=%s/home/nodeapp/logs/node-green.log\n' "$R" "$R" \
+            > "$R/etc/supervisor/conf.d/nodeapp-node.conf"
+        : > "$R/etc/supervisor/conf.d/staticnode-node.conf"
+        echo '{"mode":"ssr","active":0}' > "$R/var/lib/cipi/node/nodeapp.json"
+        echo '{"mode":"static"}' > "$R/var/lib/cipi/node/staticnode.json"
+        ln -s releases/7 "$R/home/nodeapp/current"; ln -s . "$R/home/staticnode/current"
+        printf '[appa]\nuser = appa\nlisten = /run/php/appa.sock\nphp_admin_value[open_basedir] = %s/home/appa/:/tmp/:/proc/\nphp_admin_value[error_log] = %s/home/appa/logs/php-fpm-error.log\n' "$R" "$R" \
+            > "$R/etc/php/8.3/fpm/pool.d/appa.conf"
+        printf '[appb]\nuser = appb\nphp_admin_value[open_basedir] = %s/home/appb/htdocs/:/srv/shared/\n' "$R" > "$R/etc/php/8.4/fpm/pool.d/appb.conf"
+        echo 'old access line' > "$R/home/appa/logs/nginx-access.log"; echo 'old error line' > "$R/home/appa/logs/nginx-error.log"
+        echo '[2026-11-01 10:00:00] ===== deploy OK  app=appa =====' > "$R/home/appa/logs/deploy.log"
+        echo 'old worker line' > "$R/home/appa/logs/worker-default.log"; echo 'fpm line' > "$R/home/appa/logs/php-fpm-error.log"
+        printf '%s/home/*/shared/storage/logs/*[!0-9].log\n%s/home/*/logs/php-fpm-*.log\n%s/home/*/logs/worker-*.log\n%s/home/*/logs/deploy.log\n/var/log/cipi/*.log {\n    daily\n    copytruncate\n}\n' "$R" "$R" "$R" "$R" > "$R/etc/logrotate.d/cipi-app-logs"
+        printf '%s/home/*/logs/nginx-access.log\n%s/home/*/logs/nginx-error.log\n/var/log/nginx/*.log {\n    daily\n    copytruncate\n}\n' "$R" "$R" > "$R/etc/logrotate.d/cipi-http-logs"
+        printf 'filenames:\n  - /var/log/nginx/access.log\n  - %s/home/*/logs/nginx-access.log\n  - %s/home/*/logs/nginx-error.log\nlabels:\n  type: nginx\n' "$R" "$R" > "$R/etc/crowdsec/acquis.d/cipi-nginx.yaml"
+        printf '# === CIPI CRON JOBS ===\n50 3 * * * /usr/local/bin/cipi-cron-notify self-update /usr/local/bin/cipi self-update >> /var/log/cipi/cipi.log 2>&1\n50 5 * * * echo 3 > /proc/sys/vm/drop_caches && swapoff -a && swapon -a 2>/dev/null\n0 1 * * * /root/my-own-job.sh\n' > "$R/crontab"
+        echo 'www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi ssh add *' > "$R/etc/sudoers.d/cipi-api"
         : > "$R/calls"
-        ( cd "$R" && PATH="$R/bin:$PATH" CIPI_LIB="$R/lib" CIPI_CONFIG="$R/cfg" CIPI_LOG="$R/log" \
+    }
+    migrate() {   # [VAR=value…]
+        : > "$R/calls"
+        ( cd "$R" && env "$@" PATH="$R/bin:$PATH" CIPI_LIB="$R/lib" CIPI_CONFIG="$R/cfg" CIPI_LOG="$R/log" \
             CIPI_API_ROOT="$R/opt/api" CIPI_GUI_ROOT="$R/opt/gui" SUDO_USER=cipi bash "$R/migration.sh" ) > "$R/out" 2>&1
     }
+    relocate() {   # [VAR=value…] -- [app_logs_relocate arguments]  — what `cipi app fix-permissions` calls
+        local -a ev=()
+        while [[ $# -gt 0 && "$1" != -- ]]; do ev+=("$1"); shift; done
+        [[ "${1:-}" == -- ]] && shift
+        : > "$R/calls"
+        ( cd "$R" && env "${ev[@]}" PATH="$R/bin:$PATH" CIPI_LIB="$R/lib" CIPI_CONFIG="$R/cfg" CIPI_LOG="$R/log" SUDO_USER=cipi \
+            bash -c 'set -euo pipefail; source "$CIPI_LIB/common.sh"; source "$CIPI_LIB/app-logs.sh"; app_logs_relocate "$@"; echo "LEFT=${APP_LOGS_LEFT}"' _ "$@" ) > "$R/out" 2>&1
+    }
+    snap()   { ( cd "$R" && find etc/nginx etc/supervisor etc/php etc/logrotate.d etc/crowdsec -type f -exec cksum {} + | sort -k3; cksum crontab ); }
+    called() { grep -qx -- "$1" "$R/calls"; }
+    ncalls() { grep -c -- "$1" "$R/calls"; }
+    old_in() { grep -c "$R/home/$1/logs/$2" "$3" 2>/dev/null; }
+    new_in() { grep -c "$R/var/log/cipi-apps/$1/$2" "$3" 2>/dev/null; }
+    islink() { [[ -L "$R/home/$1/logs/$2" && "$(readlink "$R/home/$1/logs/$2")" == "$R/var/log/cipi-apps/$1/$2" ]]; }
 
+    build_root
+    cp "$R/etc/nginx/sites-available/newapp" "$R/newapp.before"; cp "$R/etc/php/8.4/fpm/pool.d/appb.conf" "$R/appb-pool.before"
     migrate; rc=$?
     [[ "$rc" -eq 0 ]] && grep -q 'Migration 5.8.6 complete' "$R/out" && pass "migration runs to the end (exit 0)" || { fail "migration aborted (rc=${rc})"; sed 's/^/    /' "$R/out" >&2; }
-    [[ "$(grep -c '^gpasswd -d' "$R/calls")" -eq 3 ]] && grep -q '^gpasswd -d appa www-data$' "$R/calls" \
-        && grep -q '^gpasswd -d nodeapp www-data$' "$R/calls" && grep -q '^gpasswd -d staticnode www-data$' "$R/calls" \
+    [[ "$(ncalls '^gpasswd -d')" -eq 3 ]] && called 'gpasswd -d appa www-data' && called 'gpasswd -d nodeapp www-data' && called 'gpasswd -d staticnode www-data' \
         && pass "the three app users in www-data are removed, and only they" || fail "wrong gpasswd calls: $(tr '\n' ';' < "$R/calls")"
     [[ "$(cut -d: -f4 "$R/group.www-data")" == "admin,sysuser" ]] \
         && pass "an account that is not an app stays in www-data" || fail "www-data members after: $(cat "$R/group.www-data")"
@@ -277,29 +463,114 @@ esac"
         && pass "an app with a reserved name is reported, not skipped in silence" || fail "reserved-name app skipped without a word"
     grep -q '^listen.mode = 0600$' "$R/etc/php/8.3/fpm/pool.d/www.conf" && pass "www pool gets listen.mode = 0600" || fail "www.conf not updated"
     [[ ! -e "$R/etc/sudoers.d/cipi-api" ]] && pass "panel sudoers removed on a server with no panel" || fail "panel sudoers left behind"
-    grep -q '^systemctl restart php8.3-fpm$' "$R/calls" && pass "PHP-FPM restarted" || fail "PHP-FPM not restarted"
-    grep -q '^supervisorctl restart appa-worker-default:appa-worker-default_00$' "$R/calls" \
-        && grep -q '^supervisorctl restart appa-worker-default:appa-worker-default_01$' "$R/calls" \
-        && pass "running workers are restarted" || fail "running workers not restarted"
-    grep -q '^supervisorctl restart appa-horizon' "$R/calls" \
-        && fail "a stopped program was started by the migration" || pass "a stopped program stays stopped"
-    [[ "$(grep -c '^node-switch' "$R/calls")" -eq 1 ]] && grep -q '^node-switch nodeapp current SUDO_USER=unset$' "$R/calls" \
-        && pass "the Node SSR app is switched blue/green, without the caller's SUDO_USER; the static one is left alone" \
-        || fail "node switch calls: $(grep '^node-switch' "$R/calls" | tr '\n' ';')"
+    [[ "$(ncalls '^systemctl restart php8.3-fpm$')" -eq 1 ]] && pass "PHP-FPM restarted, once" || fail "PHP-FPM 8.3 restarts: $(ncalls '^systemctl restart php8.3-fpm$')"
 
+    # nginx
+    [[ "$(old_in appa nginx- "$R/etc/nginx/sites-available/appa")" -eq 0 && "$(new_in appa nginx- "$R/etc/nginx/sites-available/appa")" -eq 4 \
+       && "$(old_in appb nginx- "$R/etc/nginx/sites-available/appb")" -eq 0 && "$(old_in nodeapp nginx- "$R/etc/nginx/sites-available/nodeapp")" -eq 0 ]] \
+        && pass "vhosts: every access_log and error_log now names /var/log/cipi-apps/<app>" || fail "vhosts not rewritten"
+    cmp -s "$R/etc/nginx/sites-available/newapp" "$R/newapp.before" && pass "a vhost already on the new directory is not touched" || fail "newapp vhost changed"
+    [[ "$(ncalls '^nginx -t$')" -eq 2 && "$(ncalls '^systemctl reload nginx$')" -eq 1 ]] \
+        && [[ "$(grep -n -m1 '^systemctl reload nginx$' "$R/calls" | cut -d: -f1)" -gt "$(grep -n '^nginx -t$' "$R/calls" | tail -1 | cut -d: -f1)" ]] \
+        && pass "nginx -t before the edit and after it, then one reload" || fail "nginx calls: $(grep -E '^nginx|nginx$' "$R/calls" | tr '\n' ';')"
+    islink appa nginx-access.log && islink appa nginx-error.log && [[ "$(cat "$R/home/appa/logs/nginx-access.log.old")" == "old access line" ]] \
+        && pass "~/logs/nginx-*.log are symlinks to the new files; the old logs are kept as .old" || fail "appa ~/logs: $(ls -l "$R/home/appa/logs" | awk '{print $9,$10,$11}' | tr '\n' ';')"
+
+    # supervisor
+    [[ "$(old_in appa '' "$R/etc/supervisor/conf.d/appa.conf")" -eq 0 && "$(new_in appa worker-default.log "$R/etc/supervisor/conf.d/appa.conf")" -eq 1 \
+       && "$(new_in appa horizon.log "$R/etc/supervisor/conf.d/appa.conf")" -eq 1 ]] && grep -qx 'stdout_logfile=/var/log/custom/appa-reverb.log' "$R/etc/supervisor/conf.d/appa.conf" \
+        && pass "supervisor: the programs that logged to ~/logs log to /var/log/cipi-apps/<app>; a log elsewhere is left where it is" || fail "supervisor conf: $(grep stdout_logfile= "$R/etc/supervisor/conf.d/appa.conf" | tr '\n' ';')"
+    called 'supervisorctl reread' && called 'supervisorctl update appa-worker-default' && [[ "$(ncalls '^supervisorctl restart appa-worker-default')" -eq 0 ]] \
+        && pass "a running worker is restarted once, on its new configuration (supervisorctl update <group>)" || fail "worker restart: $(grep '^supervisorctl' "$R/calls" | tr '\n' ';')"
+    called 'supervisorctl restart appa-reverb' \
+        && pass "a running program the move did not restart is restarted for its new groups" || fail "appa-reverb keeps the old groups"
+    [[ "$(ncalls '^supervisorctl \(restart\|update\|start\) appa-horizon')" -eq 0 ]] \
+        && pass "a stopped program stays stopped" || fail "a stopped program was started by the migration"
+    islink appa worker-default.log && islink appa horizon.log && [[ "$(cat "$R/home/appa/logs/worker-default.log.old")" == "old worker line" ]] \
+        && pass "~/logs/worker-*.log and horizon.log are symlinks; the old worker log is kept as .old" || fail "worker log links"
+
+    # Node
+    [[ "$(ncalls '^node-switch')" -eq 1 ]] && called 'node-switch nodeapp current SUDO_USER=unset' \
+        && pass "the Node SSR app is switched blue/green once, without the caller's SUDO_USER; the static one is left alone" \
+        || fail "node switch calls: $(grep '^node-switch' "$R/calls" | tr '\n' ';')"
+    [[ "$(old_in nodeapp node- "$R/etc/supervisor/conf.d/nodeapp-node.conf")" -eq 0 ]] && pass "the Node slots log to /var/log/cipi-apps/<app>" || fail "node conf not moved"
+
+    # PHP pools, deploy log, logrotate, CrowdSec, cron
+    grep -qxF "php_admin_value[open_basedir] = $R/home/appa/:$R/var/log/cipi-apps/appa/:/tmp/:/proc/" "$R/etc/php/8.3/fpm/pool.d/appa.conf" \
+        && pass "the app's pool may read /var/log/cipi-apps/<app> (cipi/agent reads ~/logs from PHP)" || fail "appa open_basedir: $(grep open_basedir "$R/etc/php/8.3/fpm/pool.d/appa.conf")"
+    cmp -s "$R/etc/php/8.4/fpm/pool.d/appb.conf" "$R/appb-pool.before" && pass "a pool whose open_basedir someone rewrote is left alone" || fail "appb pool changed"
+    [[ "$(grep -n -m1 '^php-fpm8.3 -t$' "$R/calls" | cut -d: -f1)" -lt "$(grep -n -m1 '^systemctl restart php8.3-fpm$' "$R/calls" | cut -d: -f1)" ]] \
+        && pass "the FPM configuration is tested before the restart" || fail "FPM restarted untested"
+    islink appa deploy.log && [[ "$(head -1 "$R/var/log/cipi-apps/appa/deploy.log")" == '[2026-11-01 10:00:00] ===== deploy OK  app=appa =====' ]] \
+        && pass "deploy.log moves too, and starts from the old one's lines" || fail "deploy.log not carried over"
+    [[ "$(cat "$R/home/appa/logs/php-fpm-error.log")" == "fpm line" && ! -L "$R/home/appa/logs/php-fpm-error.log" ]] \
+        && pass "the app's own logs (php-fpm-error.log) stay in ~/logs" || fail "php-fpm-error.log was touched"
+    ! grep -qE '/home/\*/logs/(nginx-|worker-|deploy)' "$R/etc/logrotate.d/cipi-app-logs" "$R/etc/logrotate.d/cipi-http-logs" \
+        && grep -qxF "$R/var/log/cipi-apps/*/nginx-access.log" "$R/etc/logrotate.d/cipi-http-logs" && grep -qxF "$R/var/log/cipi-apps/*/worker-*.log" "$R/etc/logrotate.d/cipi-app-logs" \
+        && grep -qxF "$R/home/*/logs/php-fpm-*.log" "$R/etc/logrotate.d/cipi-app-logs" \
+        && pass "logrotate rotates the logs where they are now" || fail "logrotate: $(cat "$R/etc/logrotate.d/cipi-http-logs" | head -3 | tr '\n' ';')"
+    grep -qF -- "- $R/var/log/cipi-apps/*/nginx-access.log" "$R/etc/crowdsec/acquis.d/cipi-nginx.yaml" && ! grep -q '/home/\*/logs' "$R/etc/crowdsec/acquis.d/cipi-nginx.yaml" \
+        && called 'systemctl reload crowdsec' && pass "CrowdSec reads the nginx logs where they are now" || fail "crowdsec acquis not updated"
+    [[ "$(wc -l < "$R/crontab")" -eq 4 ]] && grep -q '^50 5 \* \* \* echo 3 > /proc/sys/vm/drop_caches && awk .*/proc/meminfo && swapoff -a && swapon -a' "$R/crontab" \
+        && grep -qx '0 1 \* \* \* /root/my-own-job.sh' "$R/crontab" && grep -q 'cipi self-update' "$R/crontab" \
+        && pass "root's crontab: the swap line gets its memory check, every other line is as it was" || fail "crontab: $(cat "$R/crontab" | cut -c1-80 | tr '\n' ';')"
+    [[ -n "$(find "$R/var/lib/cipi/app-logs-backup" -type f -name 'appa.conf' 2>/dev/null)" && "$(find "$R/var/lib/cipi/app-logs-backup" -type f | wc -l)" -eq 5 ]] \
+        && pass "every file edited has a copy in /var/lib/cipi/app-logs-backup" || fail "backups: $(find "$R/var/lib/cipi/app-logs-backup" -type f | wc -l) file(s)"
+
+    snap > "$R/snap.1"
     migrate; rc=$?
-    [[ "$rc" -eq 0 && ! -s "$R/calls" ]] && grep -q 'No app user in www-data' "$R/out" \
+    snap > "$R/snap.2"
+    [[ "$rc" -eq 0 && ! -s "$R/calls" ]] && grep -q 'No app user in www-data' "$R/out" && cmp -s "$R/snap.1" "$R/snap.2" \
         && pass "second run changes nothing (idempotent)" || fail "second run: rc=${rc}, calls=$(tr '\n' ';' < "$R/calls")"
 
     # A Node process that does not come up, and a panel that is installed.
     printf 'www-data:x:33:nodeapp\n' > "$R/group.www-data"
     echo '{"domain":"panel.example.com"}' > "$R/cfg/api.json"
     echo 'kept' > "$R/etc/sudoers.d/cipi-api"
-    NODE_SWITCH_RC=1 migrate; rc=$?
+    migrate NODE_SWITCH_RC=1; rc=$?
     [[ "$rc" -eq 0 ]] && grep -q 'WARNING: nodeapp: Node process not restarted' "$R/out" \
         && pass "a Node switch that fails is a warning, not an aborted migration" || fail "failed node switch: rc=${rc}"
     [[ "$(cat "$R/etc/sudoers.d/cipi-api" 2>/dev/null)" == "kept" ]] \
         && pass "panel sudoers untouched where a panel is installed" || fail "panel sudoers changed on a server with a panel"
+
+    # ── the move, when a service says no: everything goes back ──
+    build_root; cp -r "$R/etc/nginx" "$R/nginx.before"; cp "$R/etc/crowdsec/acquis.d/cipi-nginx.yaml" "$R/acquis.before"
+    migrate NGINX_REJECT_NEW=1; rc=$?
+    [[ "$rc" -eq 0 ]] && grep -q 'WARNING: nginx refused the vhosts with the new log directory' "$R/out" && diff -r "$R/etc/nginx" "$R/nginx.before" >/dev/null \
+        && [[ "$(ncalls '^systemctl reload nginx$')" -eq 0 ]] \
+        && pass "nginx refuses the new vhosts → every vhost byte for byte as before, no reload, migration goes on" || fail "nginx refusal: rc=${rc}"
+    [[ ! -L "$R/home/appa/logs/nginx-access.log" && "$(cat "$R/home/appa/logs/nginx-access.log")" == "old access line" ]] && cmp -s "$R/etc/crowdsec/acquis.d/cipi-nginx.yaml" "$R/acquis.before" \
+        && grep -qxF "$R/home/*/logs/nginx-access.log" "$R/etc/logrotate.d/cipi-http-logs" \
+        && pass "…and the nginx logs, their rotation and CrowdSec stay on ~/logs" || fail "nginx refusal left ~/logs half moved"
+    grep -q 'still log to ~/logs' "$R/out" && pass "…and the migration says what is left and how to retry" || fail "nothing said about what is left"
+    relocate --; rc=$?
+    [[ "$rc" -eq 0 && "$(old_in appa nginx- "$R/etc/nginx/sites-available/appa")" -eq 0 ]] && grep -qx 'LEFT=0' "$R/out" && islink appa nginx-access.log \
+        && ! grep -q '/home/\*/logs/nginx-' "$R/etc/logrotate.d/cipi-http-logs" \
+        && pass "cipi app fix-permissions finishes the move once nginx accepts it" || fail "retry: rc=${rc} $(tail -1 "$R/out")"
+
+    build_root; cp -r "$R/etc/nginx" "$R/nginx.before"
+    relocate NGINX_T_RC=1 --; rc=$?
+    [[ "$rc" -eq 0 && "$(ncalls '^nginx -t$')" -eq 1 && "$(ncalls 'reload nginx')" -eq 0 ]] && diff -r "$R/etc/nginx" "$R/nginx.before" >/dev/null \
+        && grep -q "does not pass 'nginx -t' as it is" "$R/out" \
+        && pass "an nginx configuration that was already broken is not touched" || fail "broken nginx: rc=${rc}"
+
+    build_root; cp "$R/etc/supervisor/conf.d/appa.conf" "$R/appa-sup.before"
+    relocate SUP_REREAD_RC=1 --; rc=$?
+    [[ "$rc" -eq 0 ]] && cmp -s "$R/etc/supervisor/conf.d/appa.conf" "$R/appa-sup.before" && [[ ! -L "$R/home/appa/logs/worker-default.log" ]] \
+        && [[ "$(ncalls '^supervisorctl update')" -eq 0 ]] && grep -qxF "$R/home/*/logs/worker-*.log" "$R/etc/logrotate.d/cipi-app-logs" \
+        && pass "supervisorctl reread fails → the program files go back, no worker is restarted, its log stays a file in ~/logs" || fail "supervisor failure: rc=${rc}"
+
+    build_root; cp "$R/etc/php/8.3/fpm/pool.d/appa.conf" "$R/appa-pool.before"
+    relocate FPM83_T_RC=1 --; rc=$?
+    [[ "$rc" -eq 0 ]] && cmp -s "$R/etc/php/8.3/fpm/pool.d/appa.conf" "$R/appa-pool.before" && [[ "$(ncalls 'php8.3-fpm$')" -eq 0 ]] \
+        && pass "php-fpm -t fails with the new open_basedir → the pool goes back, FPM is not reloaded" || fail "fpm failure: rc=${rc}"
+
+    build_root
+    relocate -- appa; rc=$?
+    [[ "$rc" -eq 0 && "$(old_in appa nginx- "$R/etc/nginx/sites-available/appa")" -eq 0 && "$(old_in appb nginx- "$R/etc/nginx/sites-available/appb")" -eq 4 \
+       && "$(ncalls '^node-switch')" -eq 0 ]] && called 'systemctl reload php8.3-fpm' \
+        && grep -qxF "$R/home/*/logs/nginx-access.log" "$R/etc/logrotate.d/cipi-http-logs" && grep -qxF "$R/var/log/cipi-apps/*/nginx-access.log" "$R/etc/logrotate.d/cipi-http-logs" \
+        && pass "cipi app fix-permissions <app> moves that app only; logrotate covers both places while other apps are on ~/logs" || fail "single app: rc=${rc}"
 fi
 
 echo ""

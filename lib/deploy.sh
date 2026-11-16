@@ -33,7 +33,11 @@ _deploy_assert_php_compat() {
 # `set -u` a missing one would kill the whole process with an opaque
 # "$1: unbound variable" instead of failing where the mistake is.
 deploy_app_home() { echo "/home/${1:-}"; }
-deploy_log_file() { echo "$(deploy_app_home "${1:-}")/logs/deploy.log"; }
+# The deploy log lives in root's /var/log/cipi-apps/<app> since 5.8.6
+# (~/logs/deploy.log is a symlink to it): `cipi deploy` appends to it as root
+# and used to chown it afterwards — in ~/logs, on whatever a symlink called
+# deploy.log pointed at. See app_log_dir in common.sh.
+deploy_log_file() { echo "/var/log/cipi-apps/${1:-}/deploy.log"; }
 
 # Release directory the `current` symlink points at ("54"), empty before the
 # first successful deploy or for custom apps (no releases/).
@@ -60,6 +64,10 @@ deploy_log_tee() {
 deploy_log_open() {
     local app="$1" trigger="$2" branch="$3" from="$4" lf
     lf=$(deploy_log_file "$app")
+    if declare -f app_log_dir_ensure >/dev/null 2>&1; then
+        app_log_dir_ensure "$app" || true
+        app_log_links "$app" deploy.log || true
+    fi
     mkdir -p "$(dirname "$lf")" 2>/dev/null || true
     touch "$lf" 2>/dev/null || true
     printf '[%(%Y-%m-%d %H:%M:%S)T] ===== deploy start  app=%s trigger=%s branch=%s from-release=%s =====\n' \

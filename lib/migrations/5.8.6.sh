@@ -17,7 +17,18 @@
 #     API nor the GUI installed: setup.sh wrote it everywhere, and it lets
 #     www-data run `cipi ssh add`, i.e. become root. Servers with a panel
 #     keep it as it is; `cipi api` / `cipi gui` write it from now on.
-#  4. Restarts PHP-FPM, then what each of those apps has running under
+#  4. Moves the logs root writes for each app — nginx access/error,
+#     supervisor programs, deploy.log — from /home/<app>/logs, which the app
+#     user owns, to /var/log/cipi-apps/<app>, which it only reads: a symlink
+#     put in ~/logs in place of a log was followed by root (lib/app-logs.sh
+#     has the whole of it; common.sh, app_log_dir, the why). Vhosts are
+#     tested with nginx -t before the reload and put back if refused;
+#     running supervisor programs are restarted on the new path, stopped
+#     ones are not started (they take it, and start, at the next deploy);
+#     ~/logs keeps a symlink per moved log.
+#  5. Root's crontab: the daily `swapoff -a && swapon -a` runs only when
+#     what is in swap fits in the available RAM twice over.
+#  6. Restarts PHP-FPM, then what each of those apps has running under
 #     supervisor (queue workers, Horizon, Octane, Reverb — what every
 #     deploy restarts anyway): a running process keeps the groups it
 #     started with, so without this the old membership would live on in
@@ -41,8 +52,11 @@ export CIPI_CONFIG="${CIPI_CONFIG:-/etc/cipi}"
 export CIPI_LOG="${CIPI_LOG:-/var/log/cipi}"
 export CIPI_API_ROOT="${CIPI_API_ROOT:-/opt/cipi/api}"
 export CIPI_GUI_ROOT="${CIPI_GUI_ROOT:-/opt/cipi/gui}"
+# common.sh's warn/info print with these: unset, a helper that spoke would
+# abort the migration under set -u.
+RED="${RED:-}"; GREEN="${GREEN:-}"; YELLOW="${YELLOW:-}"; CYAN="${CYAN:-}"; DIM="${DIM:-}"; BOLD="${BOLD:-}"; NC="${NC:-}"
 
-echo "Migration 5.8.6 — app users out of www-data, www pool socket, panel sudoers..."
+echo "Migration 5.8.6 — app users out of www-data, www pool socket, panel sudoers, root-written logs out of ~/logs..."
 
 # shellcheck source=/dev/null
 source "${CIPI_LIB}/common.sh"
@@ -136,9 +150,47 @@ if [[ -f "${CIPI_LIB}/cipi-api-sudoers.sh" ]]; then
     fi
 fi
 
-# ── 4. Restart PHP-FPM and the apps' workers ─────────────────
+# ── 4. Root-written logs out of ~/logs ───────────────────────
+# After step 1 on purpose: a supervisor program restarted here on its new
+# log path starts without www-data, so step 6 does not restart it again.
+APP_LOGS_FPM_VERSIONS=""; APP_LOGS_UPDATED=""; APP_LOGS_NODE_SWITCHED=""; APP_LOGS_LEFT=0
+if [[ -f "${CIPI_LIB}/app-logs.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${CIPI_LIB}/app-logs.sh"
+    app_logs_relocate --fpm=defer || echo "  WARNING: moving the logs stopped early — run: cipi app fix-permissions"
+    restart="${restart} ${APP_LOGS_FPM_VERSIONS}"
+    if (( APP_LOGS_LEFT > 0 )); then
+        echo "  WARNING: ${APP_LOGS_LEFT} thing(s) still log to ~/logs — see above; retry with: cipi app fix-permissions"
+    fi
+else
+    echo "  WARNING: ${CIPI_LIB}/app-logs.sh not found — logs not moved"
+fi
+
+# ── 5. Root crontab: swap emptied only when it fits in RAM ───
+old_swap='50 5 * * * echo 3 > /proc/sys/vm/drop_caches && swapoff -a && swapon -a 2>/dev/null'
+IFS= read -r new_swap <<'CRON' || true
+50 5 * * * echo 3 > /proc/sys/vm/drop_caches && awk '/^MemAvailable:/{a=$2} /^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{exit !(t>f && a>(t-f)*2)}' /proc/meminfo && swapoff -a && swapon -a 2>/dev/null
+CRON
+cron_now=$(crontab -l 2>/dev/null || true)
+if grep -qxF -- "$old_swap" <<< "$cron_now"; then
+    # The one line, replaced whole; a crontab that would come out shorter or
+    # empty is not installed.
+    cron_new=$(awk -v old="$old_swap" -v new="$new_swap" '$0 == old { print new; next } { print }' <<< "$cron_now" || true)
+    if [[ -n "$cron_new" && "$(wc -l <<< "$cron_new")" == "$(wc -l <<< "$cron_now")" ]] \
+       && grep -qxF -- "$new_swap" <<< "$cron_new" && crontab - <<< "$cron_new" 2>/dev/null; then
+        echo "  cron: the daily swap flush runs only when the RAM can take back what is in swap"
+    else
+        echo "  WARNING: could not rewrite the root crontab — the 05:50 'swapoff -a && swapon -a' line is unchanged"
+    fi
+elif grep -F 'swapoff -a' <<< "$cron_now" | grep -qvF '/proc/meminfo'; then
+    # Not the line Cipi installed, word for word: someone's, or edited.
+    echo "  NOTE: root's crontab has a 'swapoff -a' line that is not the one Cipi wrote — left as it is (it runs without a memory check)"
+fi
+
+# ── 6. Restart PHP-FPM and the apps' workers ─────────────────
 # FPM: every installed version when a user left www-data (its workers
-# were forked with the old groups), otherwise only where www.conf changed.
+# were forked with the old groups), otherwise only where www.conf or an
+# app's pool (open_basedir, step 4) changed.
 if (( n_removed > 0 )); then
     for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
         php_is_installed "$v" && restart="${restart} ${v}"
@@ -165,6 +217,8 @@ if (( n_removed > 0 )) && command -v supervisorctl &>/dev/null; then
         for group in $(grep '^\[program:' "$conf" 2>/dev/null | sed 's/\[program://;s/\]//'); do
             # Only what is running. A process that is not there holds no old
             # group, and a program someone stopped must not come back at night.
+            # Restarted by step 4 on its new log path, after it left www-data.
+            [[ " ${APP_LOGS_UPDATED} " == *" ${group} "* ]] && continue
             running=$(supervisorctl status "${group}:*" 2>/dev/null \
                 | awk '$2 == "RUNNING" || $2 == "STARTING" { print $1 }' || true)
             [[ -n "$running" ]] || continue
@@ -186,6 +240,8 @@ if (( n_removed > 0 )) && command -v supervisorctl &>/dev/null; then
     # is root's own maintenance, whoever typed `sudo cipi self-update`.
     if [[ -x /usr/local/bin/cipi-node-switch ]]; then
         for u in $removed; do
+            # Switched by step 4 already (new log path), after it left www-data.
+            [[ " ${APP_LOGS_NODE_SWITCHED} " == *" ${u} "* ]] && continue
             state="/var/lib/cipi/node/${u}.json"
             [[ -f "$state" && -f "/etc/supervisor/conf.d/${u}-node.conf" && -L "/home/${u}/current" ]] || continue
             [[ "$(jq -r '.mode // "ssr"' "$state" 2>/dev/null || true)" == "ssr" ]] || continue

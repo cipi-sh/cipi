@@ -449,10 +449,20 @@ setup_ssh() {
 
     # Save root password in server.json (create if missing)
     mkdir -p /etc/cipi
-    [ -f /etc/cipi/server.json ] || echo '{}' > /etc/cipi/server.json
+    # A server installed from 5.8.6 on starts with SSH/SFTP from outside off
+    # for app users (`cipi ssh apps enable <app>` or `enable --all` opens it;
+    # deploys go through ssh localhost and are not affected). Only on a first
+    # install: a server.json that is already there keeps what it says, and a
+    # server installed before keeps its default, enabled.
+    local fresh_server=false
+    [ -f /etc/cipi/server.json ] || { echo '{}' > /etc/cipi/server.json; fresh_server=true; }
     local tmp
     tmp=$(mktemp)
-    jq --arg p "$ROOT_PASS" '. + {root_password: $p}' /etc/cipi/server.json > "$tmp"
+    if [ "$fresh_server" = true ]; then
+        jq --arg p "$ROOT_PASS" '. + {root_password: $p, app_ssh_default: "disabled"}' /etc/cipi/server.json > "$tmp"
+    else
+        jq --arg p "$ROOT_PASS" '. + {root_password: $p}' /etc/cipi/server.json > "$tmp"
+    fi
     mv "$tmp" /etc/cipi/server.json
     chmod 600 /etc/cipi/server.json
 
@@ -466,6 +476,9 @@ setup_ssh() {
     # SSH access groups
     groupadd -f cipi-ssh
     groupadd -f cipi-apps
+    # App users without SSH/SFTP from outside (cipi ssh apps): see the Match
+    # block below and lib/ssh.sh.
+    groupadd -f cipi-nossh
     usermod -aG cipi-ssh cipi
 
     # 2. The owner's keys (interactive login): every key accepted at the start
@@ -531,10 +544,45 @@ Match Group cipi-apps
 MATCHEOF
     fi
 
+    # The rule `cipi ssh apps disable` relies on, the same text lib/ssh.sh
+    # writes: members of cipi-nossh log in from the server itself only. New
+    # app users are put in that group (app_ssh_default above) until someone
+    # enables them.
+    if ! grep -q '^Match Group cipi-nossh ' "$SSHD"; then
+        cat >> "$SSHD" <<'MATCHEOF'
+
+# cipi ssh apps — no SSH/SFTP from outside for members of cipi-nossh.
+# Logins from the server itself stay allowed: deploys run over ssh localhost.
+Match Group cipi-nossh Address *,!127.0.0.1,!::1
+    DenyUsers *
+MATCHEOF
+        # A block sshd does not accept must not stop SSH from coming back —
+        # and without the rule the default goes back to enabled, so that
+        # what `cipi app create` says about a new app is true.
+        if ! sshd -t -f "$SSHD" >/dev/null 2>&1 && ! /usr/sbin/sshd -t -f "$SSHD" >/dev/null 2>&1; then
+            sed -i '/^# cipi ssh apps — no SSH\/SFTP from outside/,$d' "$SSHD"
+            if [ "$fresh_server" = true ]; then
+                tmp=$(mktemp)
+                if jq 'del(.app_ssh_default)' /etc/cipi/server.json > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+                    mv "$tmp" /etc/cipi/server.json
+                    chmod 600 /etc/cipi/server.json
+                else
+                    rm -f "$tmp"
+                fi
+                fresh_server=false
+            fi
+            echo -e "${YELLOW}! sshd refused the cipi-nossh rule — app users keep SSH/SFTP from outside (cipi ssh apps disable --all)${NC}"
+        fi
+    fi
+
     # 6. Restart SSH
     systemctl restart ssh || systemctl restart sshd
 
-    echo -e "${GREEN}✓ SSH hardened (key-only for cipi, password for app users)${NC}"
+    if [ "$fresh_server" = true ]; then
+        echo -e "${GREEN}✓ SSH hardened (key-only for cipi; app users: no SSH/SFTP from outside until 'cipi ssh apps enable <app>')${NC}"
+    else
+        echo -e "${GREEN}✓ SSH hardened (key-only for cipi, password for app users)${NC}"
+    fi
 }
 
 # ── NGINX ─────────────────────────────────────────────────────
@@ -1320,22 +1368,27 @@ AUEOF
 #   cipi nginx upgrade / cipi db upgrade / cipi service upgrade valkey
 # Weekly apt cache cleanup (Sunday 5 AM)
 0 5 * * 0 apt-get clean && apt-get autoclean >> /var/log/cipi/updates.log 2>&1
-# Clear RAM cache (daily 5:50 AM)
-50 5 * * * echo 3 > /proc/sys/vm/drop_caches && swapoff -a && swapon -a 2>/dev/null
+# Clear RAM cache (daily 5:50 AM). Swap is emptied only when what is in it fits
+# in the available RAM with room to spare — on a small server whose swap is in
+# real use, swapoff pushed everything back at once and the OOM killer chose.
+50 5 * * * echo 3 > /proc/sys/vm/drop_caches && awk '/^MemAvailable:/{a=$2} /^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{exit !(t>f && a>(t-f)*2)}' /proc/meminfo && swapoff -a && swapon -a 2>/dev/null
 CRONEOF
     ) | crontab -
 
     # ── GDPR-compliant log rotation ──
 
     # Application logs (Laravel, PHP-FPM, workers, deploy) — 12 months
+    # What root writes for an app (nginx, supervisor workers, deploy.log) is in
+    # /var/log/cipi-apps/<app>, not in ~/logs: see app_log_dir in lib/common.sh.
+    install -d -m 755 -o root -g root /var/log/cipi-apps
     # *[!0-9].log leaves out files that end in a date (laravel-2026-01-31.log):
     # those belong to Laravel's `daily` channel, which names and prunes them
     # itself. Rotating them too left a .log.1 per day that never expired.
     cat > /etc/logrotate.d/cipi-app-logs <<'EOF'
 /home/*/shared/storage/logs/*[!0-9].log
 /home/*/logs/php-fpm-*.log
-/home/*/logs/worker-*.log
-/home/*/logs/deploy.log
+/var/log/cipi-apps/*/worker-*.log
+/var/log/cipi-apps/*/deploy.log
 /var/log/cipi/*.log
 /var/log/cipi-queue.log {
     daily
@@ -1350,8 +1403,8 @@ EOF
 
     # HTTP / Navigation logs (nginx access & error) — 90 days
     cat > /etc/logrotate.d/cipi-http-logs <<'EOF'
-/home/*/logs/nginx-access.log
-/home/*/logs/nginx-error.log
+/var/log/cipi-apps/*/nginx-access.log
+/var/log/cipi-apps/*/nginx-error.log
 /var/log/nginx/*.log {
     daily
     missingok

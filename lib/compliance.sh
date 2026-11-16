@@ -789,7 +789,7 @@ _cmp_check_deploys() {
     # ── deploy.log banners (human-readable log; history from before the ledger)
     local tsv="" log lrows
     shopt -s nullglob
-    for log in /home/*/logs/deploy.log; do
+    for log in /var/log/cipi-apps/*/deploy.log; do
         lrows=$(_cmp_parse_deploy_log "$log" "$since")
         [[ -n "$lrows" ]] && tsv="${tsv}${tsv:+$'\n'}${lrows}"
     done

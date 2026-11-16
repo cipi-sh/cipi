@@ -520,20 +520,26 @@ _crowdsec_write_bitbucket_whitelist() {
     fi
 }
 
-# Every Cipi vhost overrides access_log to /home/<app>/logs/nginx-access.log
-# (lib/app.sh), so /var/log/nginx holds only the catch-all server block. Reading
+# Every Cipi vhost overrides access_log to /var/log/cipi-apps/<app>/nginx-access.log
+# (lib/app.sh; /home/<app>/logs before 5.8.6 — a vhost still there is read through
+# its old path, never both: the symlink in ~/logs would deliver every line twice),
+# so /var/log/nginx holds only the catch-all server block. Reading
 # just that made the whole nginx half of CrowdSec inert: no app traffic, no
 # http-probing / bad-user-agent / bruteforce scenario ever fires. Globs pick up
 # apps created after `crowdsec enable` on their own.
 _crowdsec_write_nginx_acquis() {
     _crowdsec_ensure_config_writable
     mkdir -p "$CROWDSEC_ACQUIS_DIR" || return 1
-    cat > "${CROWDSEC_ACQUIS_DIR}/cipi-nginx.yaml" <<'EOF'
+    local app_logs='/var/log/cipi-apps/*'
+    if grep -rqsE '/home/[a-z][a-z0-9]*/logs/nginx-' /etc/nginx/sites-available /etc/nginx/conf.d 2>/dev/null; then
+        app_logs='/home/*/logs'
+    fi
+    cat > "${CROWDSEC_ACQUIS_DIR}/cipi-nginx.yaml" <<EOF
 filenames:
   - /var/log/nginx/access.log
   - /var/log/nginx/error.log
-  - /home/*/logs/nginx-access.log
-  - /home/*/logs/nginx-error.log
+  - ${app_logs}/nginx-access.log
+  - ${app_logs}/nginx-error.log
 labels:
   type: nginx
 EOF

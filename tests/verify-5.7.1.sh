@@ -94,6 +94,7 @@ SUPLOG="${TMP}/supervisorctl.log"
     cat "${TMP}/gen-funcs.sh"
     cat <<'EOF'
 _app_limit() { echo 2; }
+_supervisor_log_ready() { :; }   # 5.8.6: the log directory, not on this machine
 warn() { echo "WARN $*"; }
 id() { return 0; }
 vault_read() { cat "${CIPI_CONFIG}/apps.json"; }

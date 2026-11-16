@@ -178,7 +178,8 @@ grep -q '_alias_cert_hint "$app" "$WWW_PAIR_ADDED"' "${LIB}/app.sh" \
 # ── 5. deploy --releases durations ───────────────────────────
 echo "--- deploy durations"
 DEPFN="${TMP}/dep.sh"
-{ extract deploy.sh deploy_app_home | sed "s|/home/|${TMP}/home/|"; extract deploy.sh deploy_log_file
+# deploy.log lives in /var/log/cipi-apps/<app> since 5.8.6: here, under the temp dir like the home
+{ extract deploy.sh deploy_app_home | sed "s|/home/|${TMP}/home/|"; echo "deploy_log_file() { echo \"${TMP}/home/\${1:-}/logs/deploy.log\"; }"
   extract deploy.sh _deploy_fmt_secs; extract deploy.sh _deploy_release_took; } > "$DEPFN"
 mkdir -p "${TMP}/home/demo/logs"
 cat > "${TMP}/home/demo/logs/deploy.log" <<'EOF'

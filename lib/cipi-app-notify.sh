@@ -34,12 +34,14 @@ fi
 [[ "$LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$ ]] || exit 2
 # An exit status is 0-255. Never -eq / (( )) on it: see the header.
 [[ "$EXIT_CODE" =~ ^[0-9]{1,3}$ ]] || exit 2
-# The log is the app's own: a regular file that resolves under its home
-# (symlinks followed, so a link to /etc/shadow does not qualify). Anything
-# else is read as "no log", not as a reason to drop the notification.
+# The log is the app's own: a regular file that resolves under its home or
+# under /var/log/cipi-apps/<app>, where the deploy log lives (symlinks
+# followed, so a link to /etc/shadow does not qualify). Anything else is read
+# as "no log", not as a reason to drop the notification.
 if [[ -n "$LOG_FILE" ]]; then
     _resolved=$(realpath -e -- "$LOG_FILE" 2>/dev/null || true)
-    if [[ -z "$_resolved" || "$_resolved" != "/home/${APP}/"* || ! -f "$_resolved" ]]; then
+    if [[ -z "$_resolved" || ! -f "$_resolved" ]] \
+       || [[ "$_resolved" != "/home/${APP}/"* && "$_resolved" != "/var/log/cipi-apps/${APP}/"* ]]; then
         LOG_FILE=""
     else
         LOG_FILE="$_resolved"
@@ -82,9 +84,15 @@ else
     [[ "$LABEL_LC" == "deploy" ]] && NOTIFY_TRIGGER="deploy_fail"
     SUBJECT="Cipi ${LABEL} failed: ${APP} (${HOSTNAME})"
 
+    # Read as the app user: the path was checked above, but under the app's
+    # home it can be swapped between that check and this read.
     OUTPUT="<no output>"
     if [[ -n "$LOG_FILE" && -f "$LOG_FILE" ]]; then
-        OUTPUT=$(tail -30 "$LOG_FILE" 2>/dev/null || echo "<could not read log>")
+        if id "$APP" &>/dev/null; then
+            OUTPUT=$(cd / && sudo -u "$APP" tail -n 30 -- "$LOG_FILE" 2>/dev/null || echo "<could not read log>")
+        else
+            OUTPUT=$(tail -n 30 -- "$LOG_FILE" 2>/dev/null || echo "<could not read log>")
+        fi
     fi
 
     BODY="${LABEL^} for '${APP}' failed with exit code ${EXIT_CODE} on ${HOSTNAME} at $(date '+%Y-%m-%d %H:%M:%S').

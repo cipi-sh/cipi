@@ -3457,7 +3457,8 @@ _yml_post_deploy_cmd() {
     app_exists "$app" || { error "App '${app}' not found"; exit 1; }
     local php_ver; php_ver=$(app_get "$app" php)
     [[ -n "$php_ver" ]] || { error "App '${app}' has no PHP version configured"; exit 1; }
-    local lf="/home/${app}/logs/deploy.log"
+    local lf="/var/log/cipi-apps/${app}/deploy.log"
+    declare -f app_log_dir_ensure >/dev/null 2>&1 && { app_log_dir_ensure "$app" || true; }
     local summary rc=0
     summary=$(_yml_post_deploy_run "$app" "$php_ver" "$lf" "$quiet") || rc=$?
     [[ "$quiet" == "true" ]] || success "Post-deploy: ${summary}"

@@ -1618,16 +1618,36 @@ app_logs() {
     [[ -z "$app" ]] && { error "Usage: cipi app logs <app> [--type=nginx|php|worker|deploy|laravel|all]"; exit 1; }
     app_exists "$app" || { error "Not found"; exit 1; }
     parse_args "$@"
-    local laravel_dir="/home/${app}/shared/storage/logs"
+    local laravel_dir="/home/${app}/shared/storage/logs" logs="/home/${app}/logs"
     local is_custom; is_custom=$(app_get "$app" custom)
     case "${ARG_type:-all}" in
-        nginx)   tail -f "/home/${app}/logs/nginx-"*.log ;;
-        php)     tail -f "/home/${app}/logs/php-fpm-"*.log ;;
-        worker)  tail -f "/home/${app}/logs/worker-"*.log ;;
-        deploy)  tail -f "/home/${app}/logs/deploy.log" ;;
-        laravel) [[ "$is_custom" != "true" ]] && [[ -d "$laravel_dir" ]] && tail -f "${laravel_dir}/"*.log || tail -f "/home/${app}/logs/"*.log ;;
-        all)     if [[ "$is_custom" == "true" ]] || [[ ! -d "$laravel_dir" ]]; then tail -f "/home/${app}/logs/"*.log; else tail -f "/home/${app}/logs/"*.log "${laravel_dir}/"*.log; fi ;;
+        nginx)   _app_logs_follow "$app" "${logs}/nginx-*.log" ;;
+        php)     _app_logs_follow "$app" "${logs}/php-fpm-*.log" ;;
+        worker)  _app_logs_follow "$app" "${logs}/worker-*.log" ;;
+        deploy)  _app_logs_follow "$app" "${logs}/deploy.log" ;;
+        laravel) if [[ "$is_custom" != "true" && -d "$laravel_dir" ]]; then
+                     _app_logs_follow "$app" "${laravel_dir}/*.log" || _app_logs_follow "$app" "${logs}/*.log"
+                 else
+                     _app_logs_follow "$app" "${logs}/*.log"
+                 fi ;;
+        all)     if [[ "$is_custom" == "true" ]] || [[ ! -d "$laravel_dir" ]]; then _app_logs_follow "$app" "${logs}/*.log"; else _app_logs_follow "$app" "${logs}/*.log" "${laravel_dir}/*.log"; fi ;;
     esac
+}
+
+# tail -f on the app's logs, as the app user. ~/logs and storage/logs belong
+# to the app: read as root, a symlink there called x.log was a way to read
+# any file of the server — on the admin's terminal here, in the panel for
+# `cipi app logs read`. The logs root writes (nginx, supervisor, deploy) are
+# reached through the symlinks in ~/logs, which the app user can read (5.8.6).
+# Returns 1 when no file matches.
+_app_logs_follow() {   # <app> <glob>…
+    local app="$1"; shift
+    (cd / && sudo -u "$app" /bin/bash -c '
+        shopt -s nullglob
+        files=()
+        for p in "$@"; do for f in $p; do [[ -f "$f" && -r "$f" ]] && files+=("$f"); done; done
+        (( ${#files[@]} > 0 )) || { echo "No log files yet" >&2; exit 1; }
+        exec tail -f -- "${files[@]}"' _ "$@")
 }
 
 # Non-following paginated snapshot for the panel API (open_basedir blocks PHP reads under /home).
@@ -1675,23 +1695,23 @@ app_logs_read() {
 
     local pattern
     for pattern in "${patterns[@]}"; do
-        _cipi_emit_log_page "$pattern" "$page" "$per_page"
+        _cipi_emit_log_page "$app" "$pattern" "$page" "$per_page"
     done
 }
 
+# One page of every file a glob matches, read as the app user (see
+# _app_logs_follow). <page> and <per-page> are digits: checked by the caller.
 _cipi_emit_log_page() {
-    local pattern="$1" page="$2" per_page="$3"
-    shopt -s nullglob
-    local f
-    for f in $pattern; do
-        [[ -f "$f" ]] || continue
-        local total from_end
-        total=$(wc -l < "$f" | tr -d ' \n')
-        from_end=$(( page * per_page ))
-        echo "===CIPI_LOG_FILE:${f}:${total}==="
-        /usr/bin/tail -n "$from_end" "$f" | /usr/bin/head -n "$per_page"
-        echo "===CIPI_LOG_END==="
-    done
+    local app="$1" pattern="$2" page="$3" per_page="$4"
+    (cd / && sudo -u "$app" /bin/bash -c '
+        shopt -s nullglob
+        for f in $1; do
+            [[ -f "$f" && -r "$f" ]] || continue
+            total=$(wc -l < "$f" | tr -d " \n")
+            echo "===CIPI_LOG_FILE:${f}:${total}==="
+            /usr/bin/tail -n "$(( $2 * $3 ))" "$f" | /usr/bin/head -n "$3"
+            echo "===CIPI_LOG_END==="
+        done' _ "$pattern" "$page" "$per_page") 2>/dev/null || true
 }
 
 app_tinker() {
@@ -2360,7 +2380,7 @@ pm.min_spare_servers = 1
 pm.max_spare_servers = ${start_servers}
 pm.max_requests = 500
 request_terminate_timeout = 300
-php_admin_value[open_basedir] = /home/${app}/:/tmp/:/proc/
+php_admin_value[open_basedir] = /home/${app}/:/var/log/cipi-apps/${app}/:/tmp/:/proc/
 php_admin_value[error_log] = /home/${app}/logs/php-fpm-error.log
 php_admin_flag[log_errors] = on
 $(fpm_pool_hardening "$v")
@@ -2625,7 +2645,7 @@ _nginx_vhost_tls() {
         warn "Could not write ${CIPI_NGINX_SSL_SNIPPET} — '${app}' is served over HTTP only"
         return 0
     fi
-    if ! nginx_vhost_apply_tls "$vhost" "$cert" "$key" "$mode" "/home/${app}/logs"; then
+    if ! nginx_vhost_apply_tls "$vhost" "$cert" "$key" "$mode" "/var/log/cipi-apps/${app}"; then
         warn "Could not add HTTPS to ${vhost} — '${app}' is served over HTTP only"
     fi
     return 0
@@ -2633,6 +2653,11 @@ _nginx_vhost_tls() {
 
 _create_nginx_vhost_http() {
     local app="$1" domain="$2" v="$3"
+    # access_log / error_log go to /var/log/cipi-apps/<app> (root's directory:
+    # see app_log_dir in common.sh). nginx refuses a configuration whose log
+    # directory is missing, so it is made here, before any vhost is written.
+    app_log_dir_ensure "$app" || warn "Could not create $(app_log_dir "$app") — nginx will refuse the vhost of '${app}' until it exists"
+    app_log_links_default "$app"
     local names aliases_raw vhost_type docroot
     if [[ $# -ge 4 ]]; then
         aliases_raw="${4:-}"
@@ -2664,8 +2689,8 @@ server {
     listen [::]:80;
     server_name ${names};
     root ${SUSPENDED_DIR};
-    access_log /home/${app}/logs/nginx-access.log;
-    error_log /home/${app}/logs/nginx-error.log;
+    access_log /var/log/cipi-apps/${app}/nginx-access.log;
+    error_log /var/log/cipi-apps/${app}/nginx-error.log;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Cache-Control "no-store, no-cache, must-revalidate" always;
@@ -2722,8 +2747,8 @@ server {
     listen 80;
     listen [::]:80;
     server_name ${names};
-    access_log /home/${app}/logs/nginx-access.log;
-    error_log /home/${app}/logs/nginx-error.log;
+    access_log /var/log/cipi-apps/${app}/nginx-access.log;
+    error_log /var/log/cipi-apps/${app}/nginx-error.log;
     location ^~ /.well-known/acme-challenge/ {
         default_type "text/plain";
         root /var/www/html;
@@ -2765,8 +2790,8 @@ server {
     listen 80;
     listen [::]:80;
     server_name ${redirect_from};
-    access_log /home/${app}/logs/nginx-access.log;
-    error_log /home/${app}/logs/nginx-error.log;
+    access_log /var/log/cipi-apps/${app}/nginx-access.log;
+    error_log /var/log/cipi-apps/${app}/nginx-error.log;
     location ^~ /.well-known/acme-challenge/ {
         default_type "text/plain";
         root /var/www/html;
@@ -2812,8 +2837,8 @@ ${www_redirect_block}server {
     server_name ${names};
     root ${root_path};
     index index.html index.php;
-    access_log /home/${app}/logs/nginx-access.log;
-    error_log /home/${app}/logs/nginx-error.log;
+    access_log /var/log/cipi-apps/${app}/nginx-access.log;
+    error_log /var/log/cipi-apps/${app}/nginx-error.log;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -2843,8 +2868,8 @@ ${www_redirect_block}server {
     server_name ${names};
     root /home/${app}/current/public;
     index index.php;
-    access_log /home/${app}/logs/nginx-access.log;
-    error_log /home/${app}/logs/nginx-error.log;
+    access_log /var/log/cipi-apps/${app}/nginx-access.log;
+    error_log /var/log/cipi-apps/${app}/nginx-error.log;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -2886,8 +2911,8 @@ ${www_redirect_block}server {
     server_name ${names};
     root /home/${app}/current/public;
     index index.php;
-    access_log /home/${app}/logs/nginx-access.log;
-    error_log /home/${app}/logs/nginx-error.log;
+    access_log /var/log/cipi-apps/${app}/nginx-access.log;
+    error_log /var/log/cipi-apps/${app}/nginx-error.log;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -4398,14 +4423,20 @@ app_webhook_recreate() {
     git_recreate_webhook "$app" "$@" || exit 1
 }
 
-# Restore home / .ssh / .env / storage / logs ownership and modes.
+# Restore home / .ssh / .env / storage / logs ownership and modes, and make
+# sure nginx, supervisor and the PHP pool use /var/log/cipi-apps/<app> for the
+# logs root writes (lib/app-logs.sh — what migration 5.8.6 does for every app;
+# this is the way to run it again after a step it had to leave alone).
 # Usage: cipi app fix-permissions [app]
 app_fix_permissions() {
     local app="${1:-}"
+    # shellcheck source=/dev/null
+    source "${CIPI_LIB}/app-logs.sh"
     if [[ -n "$app" ]]; then
         app_exists "$app" || { error "App '${app}' not found"; exit 1; }
         step "Restoring permissions for ${app}..."
         ensure_app_permissions "$app"
+        app_logs_relocate "$app"
         log_action "APP PERMISSIONS RESTORED: ${app}"
         success "Permissions restored for ${app}"
         return 0
@@ -4431,6 +4462,7 @@ app_fix_permissions() {
         success "${app}"
         n=$((n + 1))
     done <<< "$apps"
+    app_logs_relocate
     log_action "APP PERMISSIONS RESTORED: all apps (${n})"
     success "Permissions restored for ${n} app(s)"
 }

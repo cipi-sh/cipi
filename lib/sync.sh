@@ -31,7 +31,6 @@ _sync_export() {
     local internal_push="${ARG_internal_push:-false}"
     local ts; ts=$(date +%Y%m%d_%H%M%S)
     local hostname; hostname=$(hostname 2>/dev/null || echo "unknown")
-    local tmp="/tmp/cipi-sync-${ts}"
     local archive="${output:-/tmp/cipi-sync-${hostname}-${ts}.tar.gz}"
 
     # Collect app names: positional args (excluding --flags)
@@ -60,6 +59,14 @@ _sync_export() {
     [[ "$with_storage" == "true" ]] && info "Including shared storage"
     echo ""
 
+    # Staged in a private directory. It was /tmp/cipi-sync-<time>, world-readable,
+    # for as long as the export ran: every app's .env, the decrypted apps.json,
+    # databases.json, smtp.json and the database dumps, open to any local user
+    # (5.8.6). The archive keeps its top-level name, cipi-sync-<time>.
+    local work tmp
+    work=$(mktemp -d /tmp/cipi-sync.XXXXXXXXXX) && [[ -n "$work" && -d "$work" ]] || { error "Cannot create a temporary directory under /tmp"; exit 1; }
+    chmod 700 "$work"
+    tmp="${work}/cipi-sync-${ts}"
     mkdir -p "${tmp}/config" "${tmp}/apps"
 
     # 1. Filter apps.json to only included apps (decrypt for export)
@@ -176,15 +183,15 @@ _sync_export() {
         done
         local passphrase2=""
         read -rsp "  Confirm passphrase: " passphrase2; echo
-        [[ "$passphrase" != "$passphrase2" ]] && { error "Passphrases do not match"; rm -rf "$tmp"; exit 1; }
+        [[ "$passphrase" != "$passphrase2" ]] && { error "Passphrases do not match"; rm -rf "$work"; exit 1; }
     else
-        [[ ${#passphrase} -lt 8 ]] && { error "Passphrase must be at least 8 characters"; rm -rf "$tmp"; exit 1; }
+        [[ ${#passphrase} -lt 8 ]] && { error "Passphrase must be at least 8 characters"; rm -rf "$work"; exit 1; }
     fi
 
     archive="${archive%.tar.gz}.tar.gz.enc"
-    tar -czf - -C /tmp "cipi-sync-${ts}" | \
+    tar -czf - -C "$work" "cipi-sync-${ts}" | \
         openssl enc -aes-256-cbc -salt -pbkdf2 -pass pass:"$passphrase" -out "$archive"
-    rm -rf "$tmp"
+    rm -rf "$work"
 
     local total_sz; total_sz=$(du -h "$archive" | cut -f1)
     echo ""
@@ -523,6 +530,18 @@ _sync_yml_auto_sudoers() {
 
 # ── CREATE APP (fresh import) ─────────────────────────────────
 
+# ~/logs/<name> → /var/log/cipi-apps/<app>/<name> for every log the app's
+# restored supervisor file names.
+_sync_supervisor_log_links() {
+    local app="$1" n
+    local -a names=()
+    while IFS= read -r n; do
+        [[ -n "$n" ]] && names+=("$n")
+    done < <(sed -n "s#^stdout_logfile=/var/log/cipi-apps/${app}/\\([A-Za-z0-9._-]*\\)\$#\\1#p" "/etc/supervisor/conf.d/${app}.conf" 2>/dev/null | sort -u)
+    [[ ${#names[@]} -gt 0 ]] && app_log_links "$app" "${names[@]}"
+    return 0
+}
+
 _sync_create_app() {
     local app="$1" ad="$2" dir="$3" php_ver="$4" domain="$5" branch="$6" repository="$7" dbr="$8" run_deploy="$9"
     local home="/home/${app}"
@@ -678,8 +697,13 @@ BASH
     # 13. Supervisor
     step "Workers..."
     if [[ -f "${ad}/supervisor.conf" ]] && [[ -s "${ad}/supervisor.conf" ]]; then
-        sed "s|/usr/bin/php[0-9]\.[0-9]|/usr/bin/php${php_ver}|g" "${ad}/supervisor.conf" \
+        # A file exported before 5.8.6 logs to ~/logs: root's directory instead
+        # (app_log_dir in common.sh), with the symlinks in ~/logs.
+        app_log_dir_ensure "$app" || true
+        sed -e "s|/usr/bin/php[0-9]\.[0-9]|/usr/bin/php${php_ver}|g" \
+            -e "s|^stdout_logfile=/home/${app}/logs/|stdout_logfile=/var/log/cipi-apps/${app}/|" "${ad}/supervisor.conf" \
             > "/etc/supervisor/conf.d/${app}.conf"
+        _sync_supervisor_log_links "$app"
         success "Workers (restored)"
     else
         echo "" > "/etc/supervisor/conf.d/${app}.conf"
@@ -891,8 +915,11 @@ _sync_update_app() {
     # 8. Supervisor (restore if changed)
     if [[ -f "${ad}/supervisor.conf" ]] && [[ -s "${ad}/supervisor.conf" ]]; then
         step "Workers..."
-        sed "s|/usr/bin/php[0-9]\.[0-9]|/usr/bin/php${php_ver}|g" "${ad}/supervisor.conf" \
+        app_log_dir_ensure "$app" || true
+        sed -e "s|/usr/bin/php[0-9]\.[0-9]|/usr/bin/php${php_ver}|g" \
+            -e "s|^stdout_logfile=/home/${app}/logs/|stdout_logfile=/var/log/cipi-apps/${app}/|" "${ad}/supervisor.conf" \
             > "/etc/supervisor/conf.d/${app}.conf"
+        _sync_supervisor_log_links "$app"
         reload_supervisor
         success "Workers synced"
     fi

@@ -612,6 +612,7 @@ source "${LIB}/app.sh" 2>/dev/null
 source "${LIB}/yml.sh"
 node_is_installed() { [[ "\$1" == 22 ]]; }
 _ensure_nginx_octane_map() { :; }; _nginx_reapply_ssl() { :; }; reload_nginx() { :; }
+app_log_dir_ensure() { return 0; }; app_log_links_default() { :; }   # 5.8.6: the log directory, not on this machine
 node_app_cleanup() { echo cleanup >> "${NS}/calls"; }
 for fn in _yml_node_sync_cmd _sync_node_build_script _node_recipe_config_write _create_nginx_vhost _create_nginx_vhost_http _nginx_vhost_tls _node_nginx_vhost _node_upstream_ensure; do
     eval "\$(declare -f \$fn | sed -e 's|/home/|${NS}/home/|g' -e 's|/etc/nginx/sites-available/|${NS}/sites/|g' -e 's|/etc/nginx/conf.d/|${NS}/|g')"
@@ -816,11 +817,15 @@ EOF
 printf '#!/bin/bash\necho "${CURL_CODE:-200}"\n' > "${SW}/bin/curl"
 printf '#!/bin/bash\nexit 0\n' > "${SW}/bin/nginx"
 for c in systemctl flock sleep ss; do printf '#!/bin/bash\nexit 0\n' > "${SW}/bin/${c}"; done
+# 5.8.6: the slots log to /var/log/cipi-apps/<app>, a directory root makes (install -o/-g) and links from ~/logs as the app user (sudo -u)
+printf '#!/bin/bash\nargs=(); while [[ $# -gt 0 ]]; do case "$1" in -o|-g) shift 2;; *) args+=("$1"); shift;; esac; done\nexec /usr/bin/install "${args[@]}"\n' > "${SW}/bin/install"
+printf '#!/bin/bash\n[[ "$1" == -u ]] && shift 2\nexec "$@"\n' > "${SW}/bin/sudo"
 printf '#!/bin/bash\n[[ "$1" == -e ]] && shift\n[[ -e "$1" ]] || exit 1\npython3 -c "import os,sys;print(os.path.realpath(sys.argv[1]))" "$1"\n' > "${SW}/bin/realpath"
 chmod +x "${SW}"/bin/*
 sed -e "s|/var/lib/cipi/node/|${SW}/state/|g" -e "s|/etc/supervisor/conf.d/|${SW}/|g" -e "s|/etc/nginx/conf.d/|${SW}/|g" \
     -e "s|/run/lock/|${SW}/|g" -e "s|HOME_DIR=\"/home/\${APP}\"|HOME_DIR=\"${SW}/home/\${APP}\"|" \
     -e "s|\^/home/\${APP}/releases/|^${SW}/home/\${APP}/releases/|" -e "s|/opt/cipi/node/|${SW}/node/|g" \
+    -e "s|/var/log/cipi-apps|${SW}/var/log/cipi-apps|g" \
     "${LIB}/cipi-node-switch.sh" > "${SW}/switch.sh"
 echo '{"app":"shop","mode":"ssr","version":"22","start":"node build","health":"/","health_timeout":2,"drain":0,"ports":[3100,3101],"domain":"shop.test","active":-1,"releases":["",""]}' > "${SW}/state/shop.json"
 swrun() { local e=(); while [[ "$1" == *=* ]]; do e+=("$1"); shift; done

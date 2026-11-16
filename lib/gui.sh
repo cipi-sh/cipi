@@ -60,12 +60,15 @@ EOF
 _gui_sync_path_package() {
     local branch="${CIPI_GUI_BRANCH:-main}"
     local dest="/opt/cipi/cipi-gui"
-    local tmp="/tmp/cipi-gui-pkg-$$"
+    local tmp
     local url="https://github.com/cipi-sh/gui/archive/refs/heads/${branch}.tar.gz"
     local extracted=""
 
-    rm -rf "$tmp"
-    mkdir -p "$tmp" || return 1
+    # mktemp, not /tmp/cipi-gui-pkg-$$ removed and made again with mkdir -p:
+    # a local user who recreated that name in between owned the directory the
+    # package is unpacked in and moved to /opt/cipi/cipi-gui from (5.8.6).
+    tmp=$(mktemp -d /tmp/cipi-gui-pkg.XXXXXXXXXX) && [[ -n "$tmp" && -d "$tmp" ]] || return 1
+    chmod 700 "$tmp"
 
     # Always close stdin: with an interactive TTY, `timeout --foreground curl -s`
     # can stop on SIGTTIN (looks "hung" until Enter). Curl has its own timeouts.

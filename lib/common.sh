@@ -1035,6 +1035,8 @@ remove_app_linux_user() {
     groupdel "$app" 2>/dev/null || true
     # Absolute cleanup — home + SSH keys must not linger after a partial userdel
     [[ -e "/home/${app}" ]] && rm -rf "/home/${app}"
+    # The logs root wrote for it (nginx, supervisor, deploy.log — 5.8.6).
+    [[ -d "/var/log/cipi-apps/${app}" ]] && rm -rf "/var/log/cipi-apps/${app}"
     return 0
 }
 
@@ -1184,12 +1186,105 @@ reload_supervisor() {
     supervisorctl update 2>&1 || warn "Supervisor update had issues (worker may start after first deploy)"
 }
 
+# ── Logs that root writes: /var/log/cipi-apps/<app> ──────────
+#
+# /home/<app>/logs belongs to the app user, and three things wrote there as
+# root: nginx (the master opens every access_log / error_log while it loads its
+# configuration), supervisord (it opens a program's stdout_logfile each time
+# it starts the program) and `cipi deploy` (it appended to deploy.log and then
+# chowned it to the app). None of them looks at what it opens: a symlink put
+# there in place of a log was followed. `cipi deploy` handed the file it
+# pointed at to the app user — /etc/passwd, say; supervisord appended a
+# worker's output to it, on `sudo cipi-worker restart`, which every app user
+# may run. Any app user to root (5.8.6).
+#
+# Those logs now live in /var/log/cipi-apps/<app>: root's directory, which the
+# app user reads (it is the directory's group) and cannot add to, rename in or
+# remove from. ~/logs stays the app's own, for what the app itself writes
+# (php-fpm-error.log, cron.log, anything of its own), and holds one symlink
+# per moved log, so every path people and tools know still reads. Root never
+# creates, renames or follows anything inside ~/logs: what has to happen
+# there is done as the app user (_app_as), and root reads an app's logs as
+# the app user too.
+app_log_dir() { echo "/var/log/cipi-apps/${1:-}"; }
+
+# Run a bash script as the app user, from / (root's working directory may be
+# one the app user cannot enter). Never fails the caller.
+_app_as() {   # <app> <script> [args…]
+    local app="$1" script="$2"; shift 2
+    (cd / && sudo -u "$app" /bin/bash -c "$script" _ "$@") 2>/dev/null || true
+}
+
+# The directory, and deploy.log in it — the one log both root (`cipi deploy`)
+# and the app user (the webhook deploy) append to: the app user owns the file
+# and cannot replace it. The first time, it starts from the last lines of the
+# old ~/logs/deploy.log, read as the app user, so the panel still shows the
+# deploys from before the move. Idempotent; returns 1 when the directory
+# could not be made (callers then leave the old path alone).
+app_log_dir_ensure() {
+    local app="${1:-}" dir grp
+    [[ "$app" =~ ^[a-z][a-z0-9]{2,31}$ ]] || return 1
+    id "$app" &>/dev/null || return 1
+    dir="/var/log/cipi-apps/${app}"
+    grp=$(id -gn "$app" 2>/dev/null) || return 1
+    [[ -d /var/log/cipi-apps ]] || install -d -m 755 -o root -g root /var/log/cipi-apps 2>/dev/null || return 1
+    if [[ ! -d "$dir" || -L "$dir" || "$(stat -c '%U:%G:%a' "$dir" 2>/dev/null)" != "root:${grp}:750" ]]; then
+        [[ -L "$dir" ]] && rm -f "$dir"
+        install -d -m 750 -o root -g "$grp" "$dir" 2>/dev/null || return 1
+        if command -v setfacl &>/dev/null && id cipi &>/dev/null; then
+            setfacl -m u:cipi:rx "$dir" 2>/dev/null || true
+        fi
+    fi
+    if [[ ! -f "${dir}/deploy.log" || -L "${dir}/deploy.log" ]]; then
+        rm -f "${dir}/deploy.log" 2>/dev/null || true
+        ( umask 077; : > "${dir}/deploy.log" ) 2>/dev/null || return 1
+        # Quoted in the script, read as the app user: a symlink there gives
+        # the app nothing it could not read already.
+        (cd / && sudo -u "$app" /bin/bash -c '[[ -f "$1" && ! -L "$1" ]] && tail -n 20000 "$1"' _ "/home/${app}/logs/deploy.log") \
+            >> "${dir}/deploy.log" 2>/dev/null || true
+        chown "${app}:www-data" "${dir}/deploy.log" 2>/dev/null || chown "${app}:${grp}" "${dir}/deploy.log" 2>/dev/null || true
+        chmod 664 "${dir}/deploy.log" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# ~/logs/<name> → /var/log/cipi-apps/<app>/<name>, for each name given. Made
+# by the app user itself. A regular file already there — the log from before
+# the move — is kept as <name>.old; a symlink that points elsewhere is
+# replaced. Names are plain file names: anything else is skipped.
+app_log_links() {   # <app> <name>…
+    local app="${1:-}"; shift || true
+    [[ "$app" =~ ^[a-z][a-z0-9]{2,31}$ && $# -gt 0 ]] || return 0
+    id "$app" &>/dev/null || return 0
+    _app_as "$app" '
+        dir="$1"; logs="$2"; shift 2
+        [[ -d "$logs" ]] || mkdir -p "$logs" || exit 0
+        for n in "$@"; do
+            [[ "$n" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || continue
+            l="${logs}/${n}"
+            [[ -L "$l" && "$(readlink "$l")" == "${dir}/${n}" ]] && continue
+            if [[ -L "$l" ]]; then rm -f "$l"
+            elif [[ -e "$l" ]]; then mv -f "$l" "${l}.old" || continue
+            fi
+            ln -s "${dir}/${n}" "$l"
+        done' "/var/log/cipi-apps/${app}" "/home/${app}/logs" "$@"
+}
+
+# The symlinks every app has: the two nginx logs and the deploy log.
+app_log_links_default() { app_log_links "${1:-}" nginx-access.log nginx-error.log deploy.log; }
+
 # App home is 750 (app:app): user cipi cannot traverse /home/<app>/ without ACLs.
-# Nginx writes vhost logs as www-data; directory uses setgid www-data so new files stay group-readable.
 #
 # Do NOT apply setfacl -R or default ACLs on shared/storage/logs — Deployer chmod on Laravel log
 # files fails with "Operation not permitted" when per-file ACLs exist. Strip any file ACLs left
 # from older Cipi versions, then re-apply directory ACLs only.
+#
+# Everything under the home is the app user's to rename: as root, nothing here
+# dereferences a name found there. ~/logs is created by the app user when it
+# is missing and otherwise left as it is (before 5.8.6 root ran mkdir, chown
+# app:www-data and chmod 2775 on it — on whatever a symlink called "logs"
+# pointed at); chown is -h; a path that is a symlink is skipped; chmod on the
+# app's own files is done as the app user.
 ensure_app_logs_permissions() {
     local app="${1:-}"
     [[ -z "$app" || "$app" == "cipi" ]] && return 0
@@ -1197,44 +1292,50 @@ ensure_app_logs_permissions() {
     [[ -d "$home" ]] || return 0
     id "$app" &>/dev/null || return 0
 
+    app_log_dir_ensure "$app" || true
+
+    if [[ ! -e "${home}/logs" && ! -L "${home}/logs" ]]; then
+        _app_as "$app" 'mkdir -p "$1"' "${home}/logs"
+    fi
+
     if command -v setfacl &>/dev/null; then
-        if [[ -d "${home}/logs" ]]; then
+        if [[ -d "${home}/logs" && ! -L "${home}/logs" ]]; then
             find "${home}/logs" -type f -exec setfacl -b {} \; 2>/dev/null || true
             setfacl -k "${home}/logs" 2>/dev/null || true
         fi
-        if [[ -d "${home}/shared/storage/logs" ]]; then
+        if [[ -d "${home}/shared/storage/logs" && ! -L "${home}/shared/storage/logs" ]]; then
             find "${home}/shared/storage/logs" -type f -name '*.log' -exec setfacl -b {} \; 2>/dev/null || true
             setfacl -k "${home}/shared/storage/logs" 2>/dev/null || true
         fi
     fi
 
-    mkdir -p "${home}/logs"
-    chown "${app}:www-data" "${home}/logs"
-    chmod 2775 "${home}/logs"
-
-    # Reclaim root-owned log files left by old logrotate "create" rules
-    if [[ -d "${home}/logs" ]]; then
-        find "${home}/logs" -type f -user root -exec chown "${app}:www-data" {} \; 2>/dev/null || true
+    # Reclaim root-owned log files left by old logrotate "create" rules — and,
+    # since 5.8.6, the logs nginx and supervisor wrote here before the move.
+    # chown -R --from=root, not find … -exec chown <path>: the app user can
+    # rename what is in these directories, and a path is resolved again when
+    # chown runs — `logs` swapped for a symlink in between would aim it at a
+    # root-owned file of the same name anywhere. -R walks by descriptor.
+    if [[ -d "${home}/logs" && ! -L "${home}/logs" ]]; then
+        chown -h -R --from=root "${app}:www-data" "${home}/logs" 2>/dev/null || true
     fi
-    if [[ -d "${home}/shared/storage/logs" ]]; then
-        find "${home}/shared/storage/logs" -type f -user root -exec chown "${app}:${app}" {} \; 2>/dev/null || true
-        chmod 664 "${home}/shared/storage/logs"/*.log 2>/dev/null || true
+    if [[ -d "${home}/shared/storage/logs" && ! -L "${home}/shared/storage/logs" ]]; then
+        chown -h -R --from=root "${app}:${app}" "${home}/shared/storage/logs" 2>/dev/null || true
+        _app_as "$app" 'chmod 664 "$1"/*.log' "${home}/shared/storage/logs"
     fi
 
     if command -v setfacl &>/dev/null && id cipi &>/dev/null; then
         setfacl -m u:cipi:rx "${home}" 2>/dev/null || true
-        setfacl -m u:cipi:rx "${home}/logs" 2>/dev/null || true
-        if [[ -d "${home}/shared" ]]; then
-            setfacl -m u:cipi:rx "${home}/shared" 2>/dev/null || true
-        fi
-        if [[ -d "${home}/shared/storage" ]]; then
-            setfacl -m u:cipi:rx "${home}/shared/storage" 2>/dev/null || true
-        fi
-        if [[ -d "${home}/shared/storage/logs" ]]; then
-            setfacl -m u:cipi:rx "${home}/shared/storage/logs" 2>/dev/null || true
+        local d
+        for d in logs shared shared/storage shared/storage/logs; do
+            [[ -d "${home}/${d}" && ! -L "${home}/${d}" ]] || continue
+            setfacl -m u:cipi:rx "${home}/${d}" 2>/dev/null || true
+        done
+        if [[ -d "${home}/shared/storage/logs" && ! -L "${home}/shared/storage/logs" ]]; then
             find "${home}/shared/storage/logs" -type f -name '*.log' -exec setfacl -m u:cipi:r {} \; 2>/dev/null || true
         fi
     fi
+
+    app_log_links_default "$app"
 }
 
 # Laravel apps log to one file, storage/logs/laravel.log, which logrotate
@@ -1401,9 +1502,15 @@ app_ssh_apply_default() {
 }
 
 # Restore the permission model `cipi app create` left behind. Do NOT chown -R
-# the whole home as app:app: nginx writes vhost logs as www-data into logs/
-# (2775 setgid), and a 700 home would lock www-data out of the docroot
-# (www-data is in the app group so 750 is enough).
+# the whole home as app:app with a plain chown: a 700 home would lock www-data
+# out of the docroot (www-data is in the app group so 750 is enough).
+#
+# Root, in a directory the app user owns: every chown is -h (the name, never
+# what a symlink of that name points at) and every chmod is done as the app
+# user, who owns what the chowns just gave back. Before 5.8.6 these were
+# plain chown and chmod as root, which follow a symlink: `x.pub ->
+# /etc/shadow` in ~/.ssh made shadow 644, `shared/storage -> /etc` gave /etc
+# to the app (chown -R alone is harmless there: it changes the link).
 ensure_app_permissions() {
     local app="${1:-}"
     [[ -z "$app" || "$app" == "cipi" ]] && return 0
@@ -1414,64 +1521,63 @@ ensure_app_permissions() {
     chown "${app}:${app}" "$home" 2>/dev/null || true
     chmod 750 "$home"
 
-    # Own everything except logs/ (nginx). -h: do not follow `current` → a release.
-    find "$home" -mindepth 1 \( -path "${home}/logs" -o -path "${home}/logs/*" \) -prune \
-        -o -exec chown -h "${app}:${app}" {} + 2>/dev/null || true
+    # Own everything, logs/ included. -h: do not follow `current` → a release,
+    # nor any other symlink. chown -R walks the tree through directory
+    # descriptors, so a directory swapped for a symlink while it runs is not
+    # followed either (find … -exec chown passed whole paths, which are
+    # resolved again at each call).
+    chown -h -R "${app}:${app}" "$home" 2>/dev/null || true
 
-    if [[ -d "${home}/.ssh" ]]; then
-        chown -R "${app}:${app}" "${home}/.ssh" 2>/dev/null || true
-        chmod 700 "${home}/.ssh"
-        local f
-        for f in authorized_keys id_ed25519 id_rsa known_hosts config; do
-            [[ -f "${home}/.ssh/${f}" ]] && chmod 600 "${home}/.ssh/${f}"
-        done
-        for f in "${home}/.ssh/"*.pub; do
-            [[ -f "$f" ]] && chmod 644 "$f"
-        done
-    fi
-
-    [[ -f "${home}/shared/.env" ]] && chmod 640 "${home}/shared/.env"
-    [[ -f "${home}/shared/auth.json" ]] && chmod 640 "${home}/shared/auth.json"
-    [[ -f "${home}/shared/cipi-databases.env" ]] && chmod 600 "${home}/shared/cipi-databases.env"
-
-    local d
-    for d in \
-        shared/storage \
-        shared/storage/app \
-        shared/storage/app/public \
-        shared/storage/framework \
-        shared/storage/framework/cache \
-        shared/storage/framework/cache/data \
-        shared/storage/framework/sessions \
-        shared/storage/framework/views \
-        shared/storage/logs
-    do
-        if [[ -d "${home}/${d}" ]]; then
-            chown "${app}:${app}" "${home}/${d}" 2>/dev/null || true
-            chmod 775 "${home}/${d}"
+    _app_as "$app" '
+        home="$1"
+        if [[ -d "${home}/.ssh" && ! -L "${home}/.ssh" ]]; then
+            chmod 700 "${home}/.ssh"
+            for f in authorized_keys id_ed25519 id_rsa known_hosts config; do
+                [[ -f "${home}/.ssh/${f}" && ! -L "${home}/.ssh/${f}" ]] && chmod 600 "${home}/.ssh/${f}"
+            done
+            for f in "${home}/.ssh/"*.pub; do
+                [[ -f "$f" && ! -L "$f" ]] && chmod 644 "$f"
+            done
         fi
-    done
-
-    if [[ -d "${home}/releases" ]]; then
-        find "${home}/releases" -type d -path '*/bootstrap/cache' -exec chmod 775 {} \; 2>/dev/null || true
-    fi
-
-    if [[ -d "${home}/.deployer" ]]; then
-        chown -R "${app}:${app}" "${home}/.deployer" 2>/dev/null || true
-        find "${home}/.deployer" -maxdepth 1 -type f -name '*.sh' -exec chmod 755 {} \; 2>/dev/null || true
-    fi
-
-    # logs/ is nginx's (www-data); group www-data + setgid is applied next.
-    if [[ -d "${home}/logs" ]]; then
-        chown -R "${app}:www-data" "${home}/logs" 2>/dev/null || true
-    fi
+        [[ -f "${home}/shared/.env" && ! -L "${home}/shared/.env" ]] && chmod 640 "${home}/shared/.env"
+        [[ -f "${home}/shared/auth.json" && ! -L "${home}/shared/auth.json" ]] && chmod 640 "${home}/shared/auth.json"
+        [[ -f "${home}/shared/cipi-databases.env" && ! -L "${home}/shared/cipi-databases.env" ]] && chmod 600 "${home}/shared/cipi-databases.env"
+        for d in \
+            shared/storage \
+            shared/storage/app \
+            shared/storage/app/public \
+            shared/storage/framework \
+            shared/storage/framework/cache \
+            shared/storage/framework/cache/data \
+            shared/storage/framework/sessions \
+            shared/storage/framework/views \
+            shared/storage/logs
+        do
+            [[ -d "${home}/${d}" && ! -L "${home}/${d}" ]] && chmod 775 "${home}/${d}"
+        done
+        if [[ -d "${home}/releases" && ! -L "${home}/releases" ]]; then
+            find "${home}/releases" -type d -path "*/bootstrap/cache" -exec chmod 775 {} \;
+        fi
+        if [[ -d "${home}/.deployer" && ! -L "${home}/.deployer" ]]; then
+            find "${home}/.deployer" -maxdepth 1 -type f -name "*.sh" -exec chmod 755 {} \;
+        fi
+        exit 0' "$home"
 
     ensure_app_logs_permissions "$app"
+}
+
+# A supervisor program logs to /var/log/cipi-apps/<app>/<name> (supervisord
+# opens the file as root: see app_log_dir). The directory must exist before
+# supervisord reads the program, and ~/logs/<name> points at the log.
+_supervisor_log_ready() {   # <app> <log file name>
+    app_log_dir_ensure "$1" || warn "Could not create $(app_log_dir "$1") — '${1}' programs will not start until it exists (cipi app fix-permissions ${1})"
+    app_log_links "$1" "$2"
 }
 
 _create_supervisor_worker() {
     local app="$1" v="$2" queue="${3:-default}" procs="${4:-}" tries="${5:-3}" timeout="${6:-3600}"
     [[ -z "$procs" ]] && procs=$(_app_limit "$app" worker_procs 1 20)
+    _supervisor_log_ready "$app" "worker-${queue}.log"
     cat >> "/etc/supervisor/conf.d/${app}.conf" <<EOF
 [program:${app}-worker-${queue}]
 process_name=%(program_name)s_%(process_num)02d
@@ -1485,7 +1591,7 @@ killasgroup=true
 user=${app}
 numprocs=${procs}
 redirect_stderr=true
-stdout_logfile=/home/${app}/logs/worker-${queue}.log
+stdout_logfile=/var/log/cipi-apps/${app}/worker-${queue}.log
 stdout_logfile_maxbytes=10MB
 stopwaitsecs=${timeout}
 EOF
@@ -1543,6 +1649,7 @@ _create_supervisor_octane() {
     local workers
     workers=$(_app_limit "$app" octane_workers 2 16)
     octane_php_ini_ensure || warn "Could not write ${OCTANE_INI_DIR} — '${app}' runs Octane without the PHP hardening"
+    _supervisor_log_ready "$app" octane.log
     cat >> "/etc/supervisor/conf.d/${app}.conf" <<EOF
 [program:${app}-octane]
 process_name=%(program_name)s
@@ -1557,7 +1664,7 @@ killasgroup=true
 user=${app}
 numprocs=1
 redirect_stderr=true
-stdout_logfile=/home/${app}/logs/octane.log
+stdout_logfile=/var/log/cipi-apps/${app}/octane.log
 stdout_logfile_maxbytes=10MB
 stopwaitsecs=3600
 EOF
@@ -1566,6 +1673,7 @@ EOF
 # Supervisor program for Laravel Reverb (WebSockets).
 _create_supervisor_reverb() {
     local app="$1" v="$2" port="$3"
+    _supervisor_log_ready "$app" reverb.log
     cat >> "/etc/supervisor/conf.d/${app}.conf" <<EOF
 [program:${app}-reverb]
 process_name=%(program_name)s
@@ -1579,7 +1687,7 @@ killasgroup=true
 user=${app}
 numprocs=1
 redirect_stderr=true
-stdout_logfile=/home/${app}/logs/reverb.log
+stdout_logfile=/var/log/cipi-apps/${app}/reverb.log
 stdout_logfile_maxbytes=10MB
 stopwaitsecs=3600
 EOF
@@ -1588,6 +1696,7 @@ EOF
 # Supervisor program for Laravel Horizon (mutually exclusive with queue:work workers).
 _create_supervisor_horizon() {
     local app="$1" v="$2"
+    _supervisor_log_ready "$app" horizon.log
     cat >> "/etc/supervisor/conf.d/${app}.conf" <<EOF
 [program:${app}-horizon]
 process_name=%(program_name)s
@@ -1601,7 +1710,7 @@ killasgroup=true
 user=${app}
 numprocs=1
 redirect_stderr=true
-stdout_logfile=/home/${app}/logs/horizon.log
+stdout_logfile=/var/log/cipi-apps/${app}/horizon.log
 stdout_logfile_maxbytes=10MB
 stopwaitsecs=3600
 EOF

@@ -92,9 +92,13 @@ fi
 _gui_cd_safe(){ :; }
 EOS
     for f in parse_args validate_domain domain_is_used_by_other_app panel_domain domain_is_used_by_panel \
-             panel_domain_check panel_cert_names panel_cert_delete; do
+             panel_domain_check panel_cert_names panel_cert_delete panel_env_set _panel_env_set_do panel_env_read; do
         fn "${LIB}/common.sh" "$f"
     done
+    # 5.8.6: in the live trees a .env is edited as www-data (panel_env_set in
+    # common.sh — exercised with real users in verify-5.8.6.sh). Here the
+    # tree is a temporary directory of the test's own.
+    echo '_panel_tree_is_www(){ return 1; }'
     for f in api_setup api_ssl _api_ssl_issue _api_create_nginx_vhost _api_set_app_url api_move _api_is_installed api_remove; do
         fn "${LIB}/api.sh" "$f"
     done

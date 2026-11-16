@@ -14,7 +14,7 @@ app_create() {
     local env_label="${ARG_env:-production}"
     local is_custom="${ARG_custom:-false}"
     local db_engine="${ARG_engine:-}"
-    local octane_server="" octane_port=""
+    local octane_server="" octane_port="" valkey_port=""
 
     # Wizard, first step: what kind of app. Asked on a terminal when no flag
     # already says it (--custom, --octane, --node, --framework); the panel API
@@ -62,6 +62,12 @@ app_create() {
     # App type: laravel (default), custom, or node
     local app_type="laravel"
     [[ "$is_custom" == "true" ]] && app_type="custom"
+
+    # Valkey: an instance of its own (default) or the server's shared one.
+    case "${ARG_valkey:-own}" in
+        own|shared) ;;
+        *) error "Invalid --valkey value. Use: own (default) or shared"; exit 1 ;;
+    esac
 
     # Optional Laravel Octane (FrankenPHP) — parallel to PHP-FPM apps
     if [[ -n "${ARG_octane+x}" ]]; then
@@ -400,9 +406,25 @@ BASH
     # 5. Config: .env (Laravel only)
     if [[ "$app_type" == "laravel" ]]; then
         step ".env..."
-        local db_env redis_env
+        local db_env redis_env=""
         db_env=$(db_laravel_env_block "$db_engine" "$app_user" "$app_user" "$db_pass")
-        redis_env=$(_app_redis_env_block)
+        # A Valkey of its own (lib/valkey.sh): its own port and password, so
+        # no other app can read this one's cache, sessions and queues. The
+        # server's shared instance with --valkey=shared, or when an instance
+        # cannot be started — the app then works as it did before 5.8.6.
+        if [[ "${ARG_valkey:-own}" != "shared" && -f "${CIPI_LIB}/valkey.sh" ]]; then
+            # shellcheck source=/dev/null
+            source "${CIPI_LIB}/valkey.sh"
+            if valkey_available; then
+                if valkey_instance_create "$app_user"; then
+                    valkey_port="$VALKEY_NEW_PORT"
+                    redis_env=$(valkey_env_block "$VALKEY_NEW_PORT" "$VALKEY_NEW_PASS")
+                else
+                    warn "Could not start a Valkey instance for '${app_user}' — it gets the shared one (later: cipi valkey isolate ${app_user})"
+                fi
+            fi
+        fi
+        [[ -n "$redis_env" ]] || redis_env=$(_app_redis_env_block)
         cat > "${home}/shared/.env" <<ENV
 APP_NAME="${app_user}"
 APP_ENV=${env_label}
@@ -437,7 +459,7 @@ ENV
         fi
         chown "${app_user}:${app_user}" "${home}/shared/.env"
         chmod 640 "${home}/shared/.env"
-        success ".env with DB${redis_env:+, Valkey} + webhook"
+        success ".env with DB${redis_env:+, Valkey${valkey_port:+ (own instance, 127.0.0.1:${valkey_port})}} + webhook"
     fi
 
     # 6. PHP-FPM pool (Laravel and custom) — skipped for Octane apps
@@ -533,6 +555,9 @@ JSON
         git_save_app_data "$app_user" "$GIT_PROVIDER" "${GIT_DEPLOY_KEY_ID:-}" "${GIT_WEBHOOK_ID:-}"
     fi
     [[ -n "$node_build" ]] && app_set "$app_user" node_build "$node_build"
+    if [[ -n "$valkey_port" ]]; then
+        app_set_json "$app_user" valkey_port "$valkey_port"
+    fi
     log_action "APP CREATED: $app_user domain=$domain env=${env_label} php=$php_ver engine=${db_engine:-none} octane=${octane_server:-none}${NODE_OPT_MODE:+ node=${NODE_OPT_MODE}/${NODE_OPT_VERSION}}${node_build:+ build=${node_build}}"
 
     # Email notification
@@ -666,7 +691,13 @@ SUDO
     echo ""
     echo -e "  ${BOLD}SSH${NC}         ${CYAN}${app_user}${NC} / ${CYAN}${user_pass}${NC}"
     if id -nG "$app_user" 2>/dev/null | tr ' ' '\n' | grep -qx cipi-nossh; then
-        echo -e "              ${YELLOW}SSH/SFTP from outside is disabled for new apps${NC} ${DIM}— cipi ssh apps enable ${app_user}${NC}"
+        echo -e "              ${YELLOW}Password and SFTP from outside are disabled for new apps${NC} ${DIM}— cipi ssh apps enable ${app_user}${NC}"
+        echo -e "              ${DIM}The server's SSH keys (cipi ssh list) already work: ssh ${app_user}@${server_ip:-<server>}${NC}"
+    else
+        echo -e "              ${DIM}The server's SSH keys (cipi ssh list) work too: ssh ${app_user}@${server_ip:-<server>}${NC}"
+    fi
+    if [[ -n "${valkey_port:-}" ]]; then
+        echo -e "  ${BOLD}Valkey${NC}      ${CYAN}127.0.0.1:${valkey_port}${NC}  ${DIM}(its own instance — REDIS_* in .env)${NC}"
     fi
     if [[ "$app_type" == "laravel" ]]; then
         echo -e "  ${BOLD}Database${NC}    ${CYAN}${app_user}${NC} / ${CYAN}${db_pass}${NC}  ${DIM}($(db_engine_label "$db_engine"))${NC}"
@@ -1382,6 +1413,14 @@ app_delete() {
     fi
     step "Crontab...";     crontab -u "$app" -r 2>/dev/null||true
     step "Sudoers...";     rm -f "/etc/sudoers.d/cipi-${app}" "/etc/sudoers.d/cipi-${app}-yml"
+    app_logrotate_remove "$app"
+    if [[ -f "${CIPI_LIB}/valkey.sh" ]]; then
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/valkey.sh"
+        if valkey_has_instance "$app"; then
+            step "Valkey instance..."; valkey_instance_remove "$app"
+        fi
+    fi
     step "Basic auth...";  rm -f "/etc/nginx/cipi-basicauth/${app}.htpasswd"
     step "SSL...";         certbot delete --cert-name "$(domain_cert_name "$d")" --non-interactive 2>/dev/null||true
     step "User & files..."
@@ -1390,6 +1429,8 @@ app_delete() {
     step "Config...";      app_remove "$app"
     # Sweep leftovers not in apps.json (failed prior deletes / partial userdel)
     purge_orphan_app_users || true
+    app_logrotate_sweep || true
+    declare -f valkey_instances_sweep >/dev/null && { valkey_instances_sweep || true; }
 
     log_action "APP DELETED: $app"
 
@@ -3309,7 +3350,14 @@ JSON
         "Composer auth.json was created.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         auth_create
     success "auth.json created at ${auth_file}"
-    info "Edit it with: cipi auth edit ${app}"
+    # On a terminal the editor opens right away: an auth.json with no
+    # credentials in it is of no use, and it took a second command to get
+    # there. Not for the panel or a script (no terminal), nor with --no-edit.
+    if [[ -t 0 && -t 1 && "${ARG_no_edit:-}" != "true" ]]; then
+        auth_edit "$app"
+    else
+        info "Edit it with: cipi auth edit ${app}"
+    fi
 }
 
 auth_edit() {
@@ -4340,6 +4388,10 @@ _app_clone_env_copy() {
             # APP_ENV is the clone's own label (--env), already in its .env.
             APP_KEY|APP_ENV|APP_URL|DB_*|DATABASE_URL|CIPI_*|OCTANE_*|REVERB_*|VITE_REVERB_*) continue ;;
             MEILISEARCH_*|SCOUT_PREFIX) continue ;;
+            # The clone has a Valkey of its own (or the shared one, as its
+            # .env already says): the source's host, port and password would
+            # put a staging copy on production's cache, sessions and queues.
+            REDIS_HOST|REDIS_PORT|REDIS_PASSWORD|REDIS_USERNAME|REDIS_URL) continue ;;
         esac
         _env_set_or_add "$dst_env" "$key" "${line#*=}"
     done
@@ -4505,6 +4557,13 @@ app_fix_permissions() {
         n=$((n + 1))
     done <<< "$apps"
     app_logs_relocate
+    # shellcheck disable=SC2086
+    app_logrotate_all $apps || true
+    local lr_err
+    if ! lr_err=$(logrotate_cipi_check); then
+        warn "logrotate reports a problem with Cipi's rules:"
+        printf '%s\n' "$lr_err" | sed 's/^/    /'
+    fi
     log_action "APP PERMISSIONS RESTORED: all apps (${n})"
     success "Permissions restored for ${n} app(s)"
 }

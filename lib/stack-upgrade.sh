@@ -3,11 +3,12 @@
 # Cipi — Manual stack package upgrades
 #
 # Nginx, MariaDB, PostgreSQL and Valkey are blacklisted from
-# unattended-upgrades: a database restart is not something to do at 4am
-# unattended. PHP has its own daily cron (`cipi php upgrade`). These
-# helpers are the operator-facing equivalent — patch-level only
-# (`apt --only-upgrade` of packages already installed), Cipi configs
-# kept (`--force-confold`), confirmation unless `--yes`.
+# unattended-upgrades, which would restart them whenever it runs. PHP has
+# its own daily cron (`cipi php upgrade`). These helpers patch the four —
+# patch-level only (`apt --only-upgrade` of packages already installed),
+# Cipi configs kept (`--force-confold`), confirmation unless `--yes` — and
+# since 5.8.6 `cipi autoupdate` runs them every night (lib/autoupdate.sh),
+# one after the other, a database only while no dump or deploy is running.
 #
 # Entry points:
 #   cipi nginx upgrade [--yes]
@@ -182,6 +183,14 @@ _stack_upgrade_reload() {
                 systemctl start "$unit" 2>/dev/null \
                     || { error "${unit} is not running after the upgrade"; return 1; }
             fi
+            # apt restarted valkey-server only: the apps' own instances
+            # (cipi-valkey@<app>) keep the old binary until restarted.
+            if [[ "$kind" == "valkey" && -f "${CIPI_LIB}/valkey.sh" ]]; then
+                # shellcheck source=/dev/null
+                source "${CIPI_LIB}/valkey.sh"
+                step "Restarting the apps' own Valkey instances..."
+                valkey_instances_restart_all
+            fi
             ;;
     esac
     return 0
@@ -197,7 +206,7 @@ _stack_upgrade_usage() {
 # (no update) so `cipi service upgrade` with no argument is a cheap look.
 _stack_upgrade_status() {
     local kind unit ver cand label
-    echo -e "\n${BOLD}Stack upgrades${NC} ${DIM}(manual — not unattended)${NC}"
+    echo -e "\n${BOLD}Stack upgrades${NC} ${DIM}(nightly: cipi autoupdate)${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     for kind in nginx mariadb pgsql valkey; do
         label=$(_stack_upgrade_label "$kind")

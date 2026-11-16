@@ -9,7 +9,11 @@
 # line of root's crontab, the SSH default of a new server, and root no longer
 # writing, reading or chowning by path inside an existing app's home (the
 # app_as helpers, the .env functions that take a value as data, the sync
-# .env merge, the integrity hashing, the Laravel recipe under set -e).
+# .env merge, the integrity hashing, the Laravel recipe under set -e); and
+# the second half of the release: logrotate rules per app (su), cipi pending
+# / autoupdate / reboot, one Valkey per app, the panel's trees worked on as
+# www-data, the sshd section that gives the server's keys to app users,
+# full-access API tokens, the deploy lock released on failure.
 # Pure bash + coreutils: cipi-app-notify, parse_args, the log helpers and
 # cipi-read-app-logs are run for real, and so is the migration — against a
 # fake root under the temp dir, with every command that would act on the
@@ -744,6 +748,253 @@ if command -v jq >/dev/null 2>&1; then
         && pass "Laravel recipe with no extra artisan task: written, hook added, and the command goes on (the template ends on that placeholder)" \
         || fail "recipe under set -e: $(tail -n 2 <<< "$out" | tr '\n' ' ')"
 fi
+
+# ── 13. logrotate: each app's own logs, as the app user ─────
+echo ""
+echo "--- logrotate per app"
+L13="$TMP/lr"; mkdir -p "$L13/d" "$L13/bin"
+cat > "$L13/bin/install" <<'EOF'
+#!/bin/bash
+# install -m MODE -o OWNER -g GROUP SRC DST — here: a copy, the mode kept in a side file
+src="${@: -2:1}"; dst="${@: -1}"; cp "$src" "$dst" && echo "$*" >> "${dst%/*}/.install-calls"
+EOF
+cat > "$L13/bin/id" <<'EOF'
+#!/bin/bash
+u="${@: -1}"; case "$u" in shop|blog|logs) ;; *) exit 1 ;; esac
+case "$1" in -gn) echo "$u" ;; -u) echo 2001 ;; *) echo "uid=2001($u)" ;; esac
+EOF
+chmod +x "$L13/bin/"*
+# common.sh whole: app_logrotate_rule holds a here-document with a "}" in the
+# first column, which fn() would take for the end of the function.
+lr() { PATH="$L13/bin:$PATH" CIPI_LOGROTATE_D="$L13/d" CIPI_CONFIG="$L13/etc" CIPI_LOG="$L13/log" CIPI_LIB="$LIB" bash -c "
+    RED=''; GREEN=''; YELLOW=''; CYAN=''; DIM=''; NC=''; BOLD=''
+    source '${LIB}/common.sh' 2>/dev/null
+    set -euo pipefail
+    _app_as() { echo \"as \$1\" >> '$L13/calls'; }
+    $1" 2>&1; }
+shared_old() { printf '%s\n' '/home/*/shared/storage/logs/*[!0-9].log' '/home/*/logs/php-fpm-*.log' '/var/log/cipi-apps/*/worker-*.log' '/var/log/cipi/*.log {' '    daily' '    copytruncate' '}' > "$L13/d/cipi-app-logs"; }
+shared_old
+lr 'app_logrotate_rule shop'
+[[ ! -e "$L13/d/cipi-home-shop" ]] && pass "no per-app rule while the shared rule still names /home/* (a log named twice makes logrotate drop a file)" || fail "per-app rule written next to the /home/* lines"
+out=$(lr 'app_logrotate_all shop blog; echo rc=$?')
+grep -q 'rc=0' <<< "$out" && ! grep -q '/home/' "$L13/d/cipi-app-logs" && [[ "$(grep -c '' "$L13/d/cipi-app-logs")" == "5" ]] && grep -qx '/var/log/cipi-apps/\*/worker-\*.log' "$L13/d/cipi-app-logs" \
+    && pass "the two /home/* lines leave the shared rule, the rest of it stays" || fail "shared rule after the strip: $(cat "$L13/d/cipi-app-logs") / ${out}"
+r="$L13/d/cipi-home-shop"
+[[ -f "$r" && -f "$L13/d/cipi-home-blog" ]] && grep -qx '    su shop shop' "$r" && grep -qx '/home/shop/shared/storage/logs/\*\[!0-9\].log' "$r" && grep -qx '/home/shop/logs/php-fpm-\*.log {' "$r" \
+    && pass "each app has its rule: its two paths, rotated with su <app> <group>" || fail "per-app rule: $(cat "$r" 2>&1)"
+for o in daily missingok 'rotate 365' compress delaycompress notifempty copytruncate; do grep -qx "    $o" "$r" || fail "per-app rule lost the option: $o"; done
+! grep -qE 'postrotate|prerotate|firstaction|lastaction|sharedscripts|create ' "$r" && pass "no script in the rule (logrotate runs those as root even with su), no create" || fail "script or create in the per-app rule"
+grep -q -- '-m 644 -o root -g root' "$L13/d/.install-calls" && pass "the rule file is root:root 0644 (anything else and logrotate ignores it)" || fail "rule file not installed root:root 0644"
+before=$(ls -l --time-style=full-iso "$r"); sleep 1; lr 'app_logrotate_rule shop'; [[ "$(ls -l --time-style=full-iso "$r")" == "$before" ]] && pass "a second run rewrites nothing" || fail "rule rewritten on a second run"
+grep -q 'as shop' "$L13/calls" && pass "the logs' group is put right by the app user itself" || fail "group not normalised as the app user"
+: > "$L13/d/cipi-home-ghost"; lr 'app_logrotate_sweep'
+[[ ! -e "$L13/d/cipi-home-ghost" && -e "$r" ]] && pass "a rule left by a user that no longer exists is swept (its su line is an error at every run)" || fail "sweep wrong: $(ls "$L13/d")"
+lr 'app_logrotate_rule logs'; [[ -f "$L13/d/cipi-home-logs" && -f "$L13/d/cipi-app-logs" ]] && ! grep -q 'su logs' "$L13/d/cipi-app-logs" \
+    && pass "an app named 'logs' does not collide with the shared rule (cipi-home-<app>, not cipi-app-<app>)" || fail "app 'logs' collides with cipi-app-logs"
+lr 'app_logrotate_remove shop'; [[ ! -e "$r" ]] && pass "the rule goes with the app" || fail "rule left after remove"
+printf '%s\n' '/home/*/shared/storage/logs/*[!0-9].log /home/*/logs/php-fpm-*.log {' '    weekly' '}' > "$L13/d/cipi-app-logs"; rm -f "$L13/d"/cipi-home-*
+out=$(lr 'app_logrotate_all shop || echo rc=1')
+grep -q 'rc=1' <<< "$out" && grep -q 'not the rule Cipi wrote' <<< "$out" && grep -q '/home/\*' "$L13/d/cipi-app-logs" && [[ -z "$(ls "$L13/d" | grep cipi-home || true)" ]] \
+    && pass "a shared rule someone rearranged is left as it is, said, and no per-app rule is written" || fail "rearranged shared rule: ${out} / $(ls "$L13/d")"
+! grep -q '^/home/\*/' "${ROOT}/setup.sh" && pass "setup.sh: the shared rule of a new server names no home" || fail "setup.sh still rotates /home/*"
+grep -q 'app_logrotate_rule "$app" || true' "${LIB}/common.sh" && grep -q 'app_logrotate_remove "$app"' "${LIB}/app.sh" && grep -q 'app_logrotate_all \$lr_apps' "${LIB}/migrations/5.8.6.sh" \
+    && pass "the rule is written with the app's permissions (create, deploy, import), removed with the app, and for every app by the migration" || fail "logrotate hooks missing"
+grep -q 'find "\$d" -maxdepth 1 -type f -name "\*.log\*" ! -group "\$g" -exec chgrp "\$g" {} +' "${LIB}/common.sh" \
+    && pass "ensure_app_logs_permissions: logs in a group the app user is not in (www-data, before 5.8.6) go to its own — logrotate cannot give a copy a group its user is not in" || fail "group normalisation missing"
+
+# ── 14. pending, autoupdate, reboot ─────────────────────────
+echo ""
+echo "--- pending / autoupdate / reboot"
+P14="$TMP/pend"; mkdir -p "$P14/bin" "$P14/etc" "$P14/boot"
+pe() { PATH="$P14/bin:$PATH" CIPI_CONFIG="$P14/etc" CIPI_LIB="$LIB" REBOOT_FLAG="$P14/reboot-required" REBOOT_CRON="$P14/cron-reboot" PENDING_CRON="$P14/cron-pending" PENDING_CACHE="$P14/pending.cache" \
+       PENDING_STATE="$P14/pending.state" AUTOUPDATE_CRON="$P14/cron-autoupdate" AUTOUPDATE_STATE="$P14/autoupdate.state" AUTOUPDATE_LOCK="$P14/lock" bash -c "
+    set -euo pipefail
+    RED=''; GREEN=''; YELLOW=''; CYAN=''; DIM=''; NC=''; BOLD=''
+    info(){ echo \"INFO \$*\"; }; warn(){ echo \"WARN \$*\"; }; success(){ echo \"OK \$*\"; }; error(){ echo \"ERR \$*\" >&2; }; step(){ :; }
+    log_action(){ echo \"log \$*\" >> '$P14/calls'; }; cipi_notify(){ echo \"notify \$3 | \$1\" >> '$P14/calls'; }
+    vault_read(){ [[ -f \"\${CIPI_CONFIG}/\$1\" ]] && cat \"\${CIPI_CONFIG}/\$1\" || echo '{}'; }
+    vault_write(){ cat > \"\${CIPI_CONFIG}/\$1\"; }
+    $(fn common.sh parse_args); $(fn common.sh version_at_least)
+    $(sed -n '/^composer_security_floor()/p;/^node_security_floor() {/,/^}/p;/^php_security_floor() {/,/^}/p' "${LIB}/common.sh")
+    source '${LIB}/autoupdate.sh'; source '${LIB}/pending.sh'
+    $1" 2>&1; }
+is14() { [[ "$2" == "$3" ]] && pass "$1" || fail "$1 (got: [$2] want: [$3])"; }
+is14 "autoupdate: on for every component nobody decided about" "$(pe 'for c in $AUTOUPDATE_COMPONENTS; do autoupdate_enabled $c && printf 1 || printf 0; done')" "111111"
+pe '_autoupdate_set mariadb false' >/dev/null
+is14 "…off for one leaves the others on" "$(pe 'for c in nginx mariadb pgsql; do autoupdate_enabled $c && printf 1 || printf 0; done')" "101"
+is14 "component names and aliases" "$(pe 'for n in nginx mysql postgres redis nodejs composer; do _autoupdate_normalize $n; done | paste -sd" " -; _autoupdate_normalize all || echo refused')" "nginx mariadb pgsql valkey node composer
+refused"
+is14 "the databases come last in a run" "$(pe 'echo $AUTOUPDATE_COMPONENTS')" "composer node nginx valkey pgsql mariadb"
+pe 'mkdir -p /nonexistent 2>/dev/null; [[ -d /etc/cron.d ]] || exit 0; autoupdate_cron_write' >/dev/null
+if [[ -f "$P14/cron-autoupdate" ]]; then
+    grep -qx '20 4 \* \* \* root /usr/local/bin/cipi-cron-notify autoupdate /usr/local/bin/cipi autoupdate run >> /var/log/cipi/autoupdate.log 2>&1' "$P14/cron-autoupdate" && grep -q '^PATH=.*/usr/sbin' "$P14/cron-autoupdate" \
+        && pass "the nightly job: 04:20, as root, through cipi-cron-notify, with sbin on its PATH (nginx -t)" || fail "autoupdate cron: $(cat "$P14/cron-autoupdate")"
+fi
+diff <(sed -n '/cat > \/etc\/cron.d\/cipi-autoupdate/,/^EOF/p' "${ROOT}/setup.sh" | sed '1d;$d') <(sed -n '/cat > "\$AUTOUPDATE_CRON"/,/^EOF/p' "${LIB}/autoupdate.sh" | sed '1d;$d') >/dev/null \
+    && diff <(sed -n '/cat > \/etc\/cron.d\/cipi-pending/,/^EOF/p' "${ROOT}/setup.sh" | sed '1d;$d') <(sed -n '/cat > "\$PENDING_CRON"/,/^EOF/p' "${LIB}/pending.sh" | sed '1d;$d') >/dev/null \
+    && pass "setup.sh writes the same two cron files the libs write" || fail "cron files of setup.sh and the libs differ"
+grep -q '( set -e; _autoupdate_one "\$c" ) 8>&-' "${LIB}/autoupdate.sh" && grep -q '_autoupdate_db_busy' "${LIB}/autoupdate.sh" \
+    && pass "each component runs in its own subshell, under errexit like the manual command, without the run's lock; a database waits while a dump or a deploy runs" || fail "autoupdate run structure"
+grep -q '"valkey";' "${ROOT}/setup.sh" && grep -q '"nginx";' "${ROOT}/setup.sh" && pass "the four stay out of unattended-upgrades (it would restart them at any hour): Cipi patches them itself" || fail "unattended-upgrades blacklist changed"
+grep -q 'readonly COMPOSER_MIN="2.10.3"' "${ROOT}/setup.sh" && is14 "Composer floor" "$(pe composer_security_floor)" "2.10.3"
+is14 "Node floors" "$(pe 'for m in 20 22 24 26; do echo "$m:$(node_security_floor $m)"; done | paste -sd" " -')" "20: 22:22.23.4 24:24.22.1 26:26.12.1"
+cat > "$P14/bin/apt-cache" <<'EOF'
+#!/bin/bash
+cat <<'OUT'
+nginx:
+  Installed: 1.29.3-1~noble
+  Candidate: 1.29.5-1~noble
+  Version table:
+nginx-common:
+  Installed: (none)
+  Candidate: 1.29.5-1~noble
+mariadb-server:
+  Installed: 1:11.4.5
+  Candidate: 1:11.4.5
+OUT
+EOF
+chmod +x "$P14/bin/apt-cache"
+is14 "packages waiting: installed ≠ candidate, not-installed ones ignored" "$(pe '_pending_apt_waiting nginx nginx-common mariadb-server')" "nginx 1.29.3-1~noble→1.29.5-1~noble"
+cat > "$P14/bin/uname" <<'EOF'
+#!/bin/bash
+echo "6.8.0-110-generic"
+EOF
+chmod +x "$P14/bin/uname"
+is14 "reboot: nothing to say without the flag (and without a newer kernel in /boot)" "$(pe 'reboot_needed || echo no')" "no"
+: > "$P14/reboot-required"
+out=$(pe 'reboot_needed'); [[ "$out" == "$(date -r "$P14/reboot-required" '+%Y-%m-%d')|6.8.0-110-generic|"* ]] && pass "reboot: Ubuntu's flag, with its date and the running kernel" || fail "reboot_needed: ${out}"
+out=$(pe 'PENDING_ITEMS=(); _pending_reboot; printf "%s\n" "${PENDING_ITEMS[@]}"')
+grep -q '^critical'$'\t''reboot'$'\t''Reboot required since' <<< "$out" && grep -q 'cipi reboot now' <<< "$out" && pass "pending: a waiting reboot is a critical item with what to run" || fail "pending reboot item: ${out}"
+out=$(pe '_reboot_auto on --at=25:00' || true); grep -q 'ERR --at=HH:MM' <<< "$out" && [[ ! -e "$P14/cron-reboot" ]] && pass "reboot auto: a time that is not one is refused" || fail "bad --at accepted: ${out}"
+if [[ -d /etc/cron.d ]]; then
+    pe '_reboot_auto on --at=04:05' >/dev/null
+    grep -qx '5 4 \* \* \* root /usr/local/bin/cipi reboot --if-required >> /var/log/cipi/reboot.log 2>&1' "$P14/cron-reboot" && pass "reboot auto on: one cron file, the given time, only --if-required" || fail "auto reboot cron: $(cat "$P14/cron-reboot" 2>&1)"
+    pe '_reboot_auto off' >/dev/null; [[ ! -e "$P14/cron-reboot" ]] && pass "reboot auto off: the file goes" || fail "auto reboot cron left"
+fi
+grep -q 'Unattended-Upgrade::Automatic-Reboot "false";' "${ROOT}/setup.sh" && ! grep -q 'reboot_cron\|cipi-auto-reboot' "${ROOT}/setup.sh" && pass "automatic reboot stays opt-in: a new server does not restart itself" || fail "auto reboot enabled by setup.sh"
+grep -q 'pgrep -x .apt-get|apt|dpkg|unattended-upgr.' "${LIB}/pending.sh" && grep -q "dep (deploy|rollback) " "${LIB}/pending.sh" && grep -q 'shutdown -r +2' "${LIB}/pending.sh" \
+    && pass "the automatic reboot waits for package installations, dumps, deploys and other cipi commands, and warns two minutes ahead" || fail "automatic reboot guards"
+# mail: once per list, again after 7 days
+pe 'pending_collect(){ PENDING_ITEMS=("warning"$'"'"'\t'"'"'"x"$'"'"'\t'"'"'"Something waits"$'"'"'\t'"'"'"do it"); }; : > "'"$P14"'/calls"; _pending_cron >/dev/null; _pending_cron >/dev/null; grep -c "notify pending_report" "'"$P14"'/calls"' > "$P14/n1" 2>&1
+is14 "pending --cron: the same list is mailed once, not every day" "$(cat "$P14/n1")" "1"
+pe 'pending_collect(){ PENDING_ITEMS=("warning"$'"'"'\t'"'"'"x"$'"'"'\t'"'"'"Something waits"$'"'"'\t'"'"'"do it"); }; printf "%s\n%s\n" "$(head -1 "'"$P14"'/pending.state")" "$(( $(date +%s) - 8*86400 ))" > "'"$P14"'/pending.state"; : > "'"$P14"'/calls"; _pending_cron >/dev/null; grep -c "notify pending_report" "'"$P14"'/calls"' > "$P14/n2" 2>&1
+is14 "…and again after a week, while it lasts" "$(cat "$P14/n2")" "1"
+pe 'pending_collect(){ PENDING_ITEMS=(); }; _pending_cron >/dev/null; [[ ! -e "'"$P14"'/pending.state" ]] && echo cleared' > "$P14/n3" 2>&1
+is14 "…an empty list clears the memory: the same problem coming back is news" "$(cat "$P14/n3")" "cleared"
+is14 "pending --json with nothing waiting" "$(pe 'PENDING_ITEMS=(); _pending_json | jq -c .')" '{"count":0,"items":[]}'
+mkdir -p "$P14/reg"; : > "$P14/reg/redis.reg"
+grep -q "pecl_extensions" "${LIB}/pending.sh" && grep -q 'dpkg-query -S /usr/lib/php/2\*/\*.so' "${LIB}/pending.sh" \
+    && ! cat "${ROOT}/setup.sh" "${LIB}"/*.sh | grep -vE '^[[:space:]]*#' | grep -qE '\bpecl install\b|php-pear|phpize' \
+    && pass "PECL: Cipi installs no extension with it, and names the ones a server has (PECL's registry, .so files no package owns)" || fail "PECL detection missing, or Cipi itself uses pecl"
+for c in pending reboot autoupdate valkey; do grep -q "^        ${c}[|)]" "${ROOT}/cipi" || fail "cipi does not dispatch: ${c}"; done
+grep -q 'pending_status_section' "${ROOT}/cipi" && pass "cipi status shows what is waiting, when something is" || fail "cipi status does not show pending work"
+for t in node_upgrade composer_upgrade pending_report reboot valkey_isolate; do grep -q "^${t}|" "${LIB}/notifications.sh" || fail "notification trigger missing: ${t}"; done
+
+# ── 15. Valkey per app ──────────────────────────────────────
+echo ""
+echo "--- Valkey per app"
+vk() { VALKEY_CONF_DIR="$TMP/vkc" VALKEY_DATA_DIR="$TMP/vkd" CIPI_LIB="$LIB" bash -c "
+    set -euo pipefail
+    source '${LIB}/valkey.sh'
+    _valkey_server_bin(){ echo /usr/bin/valkey-server; }
+    $1" 2>&1; }
+u=$(vk _valkey_unit_text)
+grep -qx 'User=%i' <<< "$u" && grep -qx 'ExecStart=/usr/bin/valkey-server '"$TMP"'/vkc/%i.conf --daemonize no --supervised no' <<< "$u" && grep -qx 'ProtectHome=true' <<< "$u" \
+    && grep -qx 'NoNewPrivileges=true' <<< "$u" && grep -qx 'Restart=always' <<< "$u" && grep -qx 'StartLimitIntervalSec=0' <<< "$u" \
+    && pass "the unit: one instance per app, as the app's user, without a view of /home, restarted for ever" || fail "unit text: ${u}"
+c=$(vk '_valkey_conf_text shop 6400 SecretPass0123456789 64mb allkeys-lru')
+grep -qx 'bind 127.0.0.1' <<< "$c" && grep -qx 'port 6400' <<< "$c" && grep -qx 'requirepass SecretPass0123456789' <<< "$c" && grep -qx 'protected-mode yes' <<< "$c" \
+    && grep -qx "dir $TMP/vkd/shop" <<< "$c" && grep -qx 'maxmemory 64mb' <<< "$c" && grep -qx 'maxmemory-policy allkeys-lru' <<< "$c" \
+    && pass "the configuration: localhost only, its own port, password and data directory" || fail "conf text: ${c}"
+is14 "maxmemory and policy are validated" "$(vk 'for v in 64mb 1gb 0mb "64mb; x" 64; do _valkey_valid_maxmemory "$v" && printf 1 || printf 0; done; for p in allkeys-lru noeviction bogus; do _valkey_valid_policy "$p" && printf 1 || printf 0; done')" "11000110"
+printf '%s\n' 'REDIS_HOST=127.0.0.1' 'REDIS_PASSWORD="a b"' "REDIS_PORT='6400'" > "$TMP/vk.env"
+is14 ".env values, with or without quotes" "$(vk 't=$(cat "'"$TMP"'/vk.env"); echo "$(_valkey_env_get "$t" REDIS_HOST)|$(_valkey_env_get "$t" REDIS_PASSWORD)|$(_valkey_env_get "$t" REDIS_PORT)|$(_valkey_env_get "$t" REDIS_URL)"')" "127.0.0.1|a b|6400|"
+is14 "a prefix is matched literally" "$(vk "_valkey_glob_escape 'a[b]*?_'")" 'a\[b\]\*\?_'
+grep -q 'REDISCLI_AUTH="\$pass"' "${LIB}/valkey.sh" && ! grep -qE 'valkey-cli[^|]* -a |redis-cli[^|]* -a |--pass ' "${LIB}/valkey.sh" \
+    && grep -q 'COPY REPLACE AUTH " . hx(\$pw)' "${LIB}/valkey.sh" \
+    && pass "no password on a command line: the environment for the client, standard input (hex-quoted) for the copy" || fail "a Valkey password may reach a command line"
+grep -q 'REDIS_HOST|REDIS_PORT|REDIS_PASSWORD|REDIS_USERNAME|REDIS_URL) continue' "${LIB}/app.sh" && pass "cipi app clone: the clone does not inherit the source's Valkey" || fail "clone copies REDIS_* from the source"
+grep -q 'CIPI_KEEP_REDIS_PASSWORD="\$local_redis_pass"' "${LIB}/sync.sh" && grep -q 'DB_PORT DB_CONNECTION REDIS_HOST REDIS_PORT REDIS_PASSWORD' "${LIB}/sync.sh" && grep -q 'valkey_sync_adopt "\$app"' "${LIB}/sync.sh" && grep -q 'valkey_sync_keep "\$app"' "${LIB}/sync.sh" \
+    && pass "cipi sync: an existing app keeps this server's Valkey settings; an imported one gets an instance here" || fail "sync does not handle Valkey"
+grep -q 'valkey_instance_create "\$app_user"' "${LIB}/app.sh" && grep -q 'ARG_valkey:-own' "${LIB}/app.sh" && grep -q 'valkey_instance_remove "\$app"' "${LIB}/app.sh" \
+    && pass "a new Laravel app gets its instance (--valkey=shared for the old behaviour); it goes with the app" || fail "app create/delete do not manage the instance"
+grep -q 'valkey_instances_restart_all' "${LIB}/stack-upgrade.sh" && grep -q 'cipi-valkey@' "${LIB}/service.sh" \
+    && pass "a Valkey package upgrade restarts the apps' instances; cipi service and the monitor see them" || fail "upgrade or service list ignore the per-app instances"
+grep -q '_valkey_artisan "\$app" down' "${LIB}/valkey.sh" && [[ "$(grep -n '_valkey_copy "\$VALKEY_SHARED_PORT"' "${LIB}/valkey.sh" | cut -d: -f1)" -lt "$(grep -n '_valkey_env_switch "\$app" "\$port" "\$pass"; then' "${LIB}/valkey.sh" | head -1 | cut -d: -f1)" ]] \
+    && pass "isolate: maintenance mode, copy, then the .env — a refused copy leaves the app where it was" || fail "isolate order"
+
+# ── 16. the panel's trees ───────────────────────────────────
+echo ""
+echo "--- the panel's trees: composer, artisan and .env as www-data"
+E16="$TMP/panel.env"; printf 'APP_URL=http://old\nLOG_CHANNEL=daily\n' > "$E16"
+out=$(bash -c "set -euo pipefail; $(fn common.sh _panel_env_set_do); _panel_env_set_do '$E16' APP_URL 'https://a|b&c\\d' LOG_STACK 'single,stderr' 'BAD KEY' x; cat '$E16'")
+[[ "$out" == $'APP_URL=https://a|b&c\\d\nLOG_CHANNEL=daily\nLOG_STACK=single,stderr' ]] && pass ".env edit: replace, append, the value as data, odd key names skipped" || fail "_panel_env_set_do: ${out}"
+ln -s "$E16" "$TMP/panel.link"; bash -c "$(fn common.sh _panel_env_set_do); _panel_env_set_do '$TMP/panel.link' APP_URL x" 2>/dev/null \
+    && fail "a .env that is a symlink was edited" || pass "a .env that is a symlink is refused"
+api_live=$(grep -vE '^[[:space:]]*#' "${LIB}/api.sh" | sed -n '/^_api_update_package() {/,/^}/p'); gui_live=$(grep -vE '^[[:space:]]*#' "${LIB}/gui.sh")
+! grep -qE '\(cd "\$\{CIPI_API_ROOT\}" && composer ' <<< "$api_live" && grep -q 'panel_composer "${CIPI_API_ROOT}" require cipi/api' <<< "$api_live" \
+    && ! grep -qE '&& composer (config|require|reinstall|update)' <<< "$gui_live" \
+    && pass "no composer run by root in the live trees: panel_composer everywhere" || fail "root still runs composer in a panel tree"
+grep -q 'chown -h -R www-data:www-data "${CIPI_API_ROOT}"' "${LIB}/api.sh" && ! grep -qE '^[^#]*chown www-data:www-data "\$\{?(envf|CIPI_API_ROOT|CIPI_GUI_ROOT|root|dest)' "${LIB}/api.sh" "${LIB}/gui.sh" "${LIB}/common.sh" \
+    && pass "no chown by name inside a panel tree: -h -R on the tree, the rest as www-data" || fail "a chown in a panel tree still follows links"
+for f in _api_ensure_log_stack_env _api_ensure_session_driver_env _api_set_app_url; do fn api.sh "$f" | grep -q 'panel_env_set' || fail "api.sh ${f} does not use panel_env_set"; done
+for f in _gui_ensure_log_stack_env _gui_ensure_session_driver_env _gui_set_app_url; do fn gui.sh "$f" | grep -q 'panel_env_set' || fail "gui.sh ${f} does not use panel_env_set"; done
+fn common.sh _panel_tree_is_www | grep -q 'CIPI_API_ROOT:-/opt/cipi/api' && ! fn common.sh _panel_tree_is_www | grep -q 'stat ' \
+    && pass "a panel tree is known by where it is, not by its owner of the moment (self-update chowns /opt/cipi to root before it updates the panel)" || fail "_panel_tree_is_www goes by owner"
+fnc gui.sh _gui_reset_primary_admin | grep -q 'mktemp /run/cipi-gui-reset' && ! fnc gui.sh _gui_reset_primary_admin | grep -q 'storage/app' \
+    && pass "gui reset-user: the new password travels in a file of root's making, outside the tree" || fail "reset payload still written in the tree"
+
+# ── 17. sshd: the server's keys for app users ───────────────
+echo ""
+echo "--- sshd section"
+diff <(sed -n '/^# >>> cipi ssh apps/,/^# <<< cipi ssh apps/p' "${ROOT}/setup.sh") <(SSH_APPS_GROUP=cipi-nossh bash -c "$(fn ssh.sh _ssh_apps_section); _ssh_apps_section") >/dev/null \
+    && pass "setup.sh and lib/ssh.sh write the same section" || fail "the sshd section of setup.sh and ssh.sh differ"
+sec=$(SSH_APPS_GROUP=cipi-nossh bash -c "$(fn ssh.sh _ssh_apps_section); _ssh_apps_section")
+[[ "$(grep -c '^Match ' <<< "$sec")" == "3" ]] && [[ "$(grep -n 'AuthorizedKeysFile none' <<< "$sec" | cut -d: -f1)" -lt "$(grep -n '^Match Group cipi-nossh Address 127' <<< "$sec" | cut -d: -f1)" ]] \
+    && [[ "$(grep -c 'AuthorizedKeysCommand /usr/local/bin/cipi-ssh-keys %u' <<< "$sec")" == "2" && "$(grep -c 'AuthorizedKeysCommandUser cipi' <<< "$sec")" == "2" ]] && ! grep -q 'DenyUsers' <<< "$sec" \
+    && pass "disabled from outside: public key only, the app's own keys off, the server's keys on; enabled: password, own keys and the server's" || fail "section: ${sec}"
+S17="$TMP/sshd"; printf '%s\n' 'Port 22' 'AllowGroups cipi-ssh cipi-apps' '' 'Match Group cipi-apps' '    PasswordAuthentication yes' '' '# cipi ssh apps — no SSH/SFTP from outside for members of cipi-nossh.' '# Logins from the server itself stay allowed: deploys run over ssh localhost.' 'Match Group cipi-nossh Address *,!127.0.0.1,!::1' '    DenyUsers *' > "$S17"
+out=$(SSH_APPS_GROUP=cipi-nossh bash -c "$(fn ssh.sh _ssh_apps_strip); _ssh_apps_strip '$S17'")
+[[ "$out" == $'Port 22\nAllowGroups cipi-ssh cipi-apps' ]] && pass "the two blocks older versions wrote are taken out whole, the rest stays" || fail "strip of the legacy blocks: ${out}"
+printf '%s\n' 'Port 22' 'Match Group cipi-apps' '    PasswordAuthentication yes' '    X11Forwarding no' 'Match User backup' '    ForceCommand /bin/true' > "$S17"
+out=$(SSH_APPS_GROUP=cipi-nossh bash -c "$(fn ssh.sh _ssh_apps_strip); _ssh_apps_strip '$S17'")
+grep -q 'X11Forwarding no' <<< "$out" && grep -q 'Match User backup' <<< "$out" && grep -q 'ForceCommand /bin/true' <<< "$out" && pass "a block someone added to, and other people's blocks, are kept" || fail "strip removed a customised block: ${out}"
+k="${LIB}/cipi-ssh-keys.sh"; [[ "$(head -1 "$k")" == '#!/bin/sh' ]] && grep -qx 'f=/home/cipi/.ssh/authorized_keys' "$k" && [[ "$(grep -vcE '^#|^$' "$k")" == "3" ]] \
+    && pass "cipi-ssh-keys prints the cipi user's keys and does nothing else" || fail "cipi-ssh-keys is not the three lines it should be"
+printf 'ssh-ed25519 AAAAkey admin\n' > "$TMP/ak"; out=$(sed "s|/home/cipi/.ssh/authorized_keys|$TMP/ak|" "$k" | sh -s someapp)
+[[ "$out" == "ssh-ed25519 AAAAkey admin" ]] && [[ -z "$(sed "s|/home/cipi/.ssh/authorized_keys|$TMP/none|" "$k" | sh -s x)" ]] && pass "…read at every login: no copy of the keys per app to keep in step" || fail "cipi-ssh-keys output: ${out}"
+grep -q 'cipi-ssh-keys.sh" /usr/local/bin/cipi-ssh-keys && chown root:root' "${LIB}/self-update.sh" && grep -q 'chmod 755 /usr/local/bin/cipi-ssh-keys' "${ROOT}/setup.sh" && grep -q '_ssh_apps_ensure_block' "${LIB}/migrations/5.8.6.sh" \
+    && pass "the helper is installed root:root 0755 (sshd refuses anything else) by setup, self-update and the migration" || fail "cipi-ssh-keys install"
+
+# ── 18. API tokens: full access; deploy lock; auth create ───
+echo ""
+echo "--- api token --full-access, deploy lock, auth create"
+T18="$TMP/tok"; mkdir -p "$T18/api"; : > "$T18/api/artisan"; echo '{}' > "$T18/api.json"
+tk() { bash -c "
+    set -uo pipefail
+    RED=''; GREEN=''; YELLOW=''; CYAN=''; DIM=''; NC=''; BOLD=''
+    info(){ :; }; step(){ :; }; error(){ echo \"ERR \$*\"; }; ensure_cipi_api_permissions(){ :; }; read_input(){ echo 'PROMPT'; exit 9; }
+    sudo(){ echo \"\$*\" > '$T18/call'; echo 'Token: 1|abc'; }
+    _api_ability_lines(){ printf 'apps-view|Read apps\ndeploy-manage|Deploy\n'; }
+    CIPI_API_CONFIG='$T18/api.json'; CIPI_API_ROOT='$T18/api'
+    $(fn common.sh parse_args); $(fn api.sh api_token_create)
+    api_token_create $1" 2>&1 < /dev/null; }
+: > "$T18/call"; tk '--name=ci --full-access' >/dev/null; grep -q -- '--name=ci --abilities=\* --expires-at=$' "$T18/call" && pass "--full-access: the wildcard ability, no questions asked" || fail "full access call: $(cat "$T18/call")"
+: > "$T18/call"; tk '--name=ci --abilities=apps-view,deploy-manage --expires=2027-01-31' >/dev/null; grep -q -- '--abilities=apps-view,deploy-manage --expires-at=2027-01-31' "$T18/call" && pass "--abilities and --expires without the checklist" || fail "abilities call: $(cat "$T18/call")"
+: > "$T18/call"; out=$(tk '--name=ci --abilities=apps-view,nope'); grep -q 'ERR Unknown ability: nope' <<< "$out" && [[ ! -s "$T18/call" ]] && pass "an ability the API does not have is refused" || fail "unknown ability: ${out}"
+: > "$T18/call"; out=$(tk "--name=ci --abilities='apps-view;id'"); grep -q 'ERR Invalid --abilities' <<< "$out" && [[ ! -s "$T18/call" ]] && pass "…and so is a list that is not one" || fail "bad abilities: ${out}"
+fn api.sh _api_token_select_abilities | grep -q 'f | full | full-access)' && pass "the checklist offers full access too (f)" || fail "checklist has no full access"
+for t in laravel laravel-octane; do grep -qx "after('deploy:failed', 'deploy:unlock');" "${LIB}/deployer/${t}.php" || fail "${t}.php does not release the lock on failure"; done
+D18="$TMP/dep"; mkdir -p "$D18"; printf "<?php\nnamespace Deployer;\nrequire 'recipe/laravel.php';\nafter('deploy:symlink', 'workers:restart');\n" > "$D18/deploy.php"
+du() { bash -c "set -euo pipefail
+    app_get(){ echo \"\${CUSTOM:-false}\"; }; app_read(){ cat \"\$2\"; }; app_append(){ cat >> \"\$2\"; }
+    $(fn common.sh deployer_unlock_ensure_hook | sed "s|/home/\${app}/.deployer/deploy.php|$D18/deploy.php|")
+    deployer_unlock_ensure_hook demo"; }
+du; du; [[ "$(grep -c "^after('deploy:failed', 'deploy:unlock');$" "$D18/deploy.php")" == "1" ]] && pass "an existing Laravel deploy.php gets the line, once" || fail "unlock hook: $(cat "$D18/deploy.php")"
+printf "<?php\nnamespace Deployer;\n// classic\n" > "$D18/deploy.php"; du; ! grep -q 'deploy:unlock' "$D18/deploy.php" && pass "a custom app's recipe (no lock) is left alone" || fail "unlock hook added to a custom recipe"
+ac=$(sed -n '/^auth_create() {/,/^auth_edit() {/p' "${LIB}/app.sh")
+grep -q 'if \[\[ -t 0 && -t 1 && "${ARG_no_edit:-}" != "true" \]\]; then' <<< "$ac" && grep -q '^        auth_edit "\$app"$' <<< "$ac" \
+    && pass "cipi auth create opens the editor on a terminal (not for the panel, not with --no-edit)" || fail "auth create does not open the editor"
 
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="

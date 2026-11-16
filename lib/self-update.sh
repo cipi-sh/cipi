@@ -132,6 +132,9 @@ selfupdate_command() {
         systemctl restart cipi-crowdsec-rescue 2>/dev/null || true
     fi
     [[ -f "${tmp}/lib/cipi-read-app-logs.sh" ]] && cp "${tmp}/lib/cipi-read-app-logs.sh" /usr/local/bin/cipi-read-app-logs && chmod 755 /usr/local/bin/cipi-read-app-logs
+    # sshd runs it (AuthorizedKeysCommand) as the cipi user, and refuses a
+    # command that is not root's or that anyone else can write.
+    [[ -f "${tmp}/lib/cipi-ssh-keys.sh" ]] && cp "${tmp}/lib/cipi-ssh-keys.sh" /usr/local/bin/cipi-ssh-keys && chown root:root /usr/local/bin/cipi-ssh-keys && chmod 755 /usr/local/bin/cipi-ssh-keys
     [[ -d "${tmp}/cipi-api" ]] && rm -rf /opt/cipi/cipi-api && cp -a "${tmp}/cipi-api" /opt/cipi/cipi-api
     chown -R root:root /usr/local/bin/cipi /opt/cipi
 

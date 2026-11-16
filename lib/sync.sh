@@ -711,6 +711,13 @@ BASH
     fi
     # The post-deploy runner reads the environment label from .env (5.8.0).
     app_env_set_environment "$app" "$(app_env_label "$app")" || true
+    # Its own Valkey on this server (5.8.6): the REDIS_* lines it arrived
+    # with name the server it left.
+    if [[ -f "${CIPI_LIB}/valkey.sh" && "$(app_get "$app" custom)" != "true" ]]; then
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/valkey.sh"
+        valkey_sync_adopt "$app" || true
+    fi
 
     # 11. PHP-FPM (skipped for Octane apps)
     local sync_octane sync_octane_port
@@ -802,6 +809,7 @@ CRON
             sed -i "/set('bin\/php'/a set('bin/composer', '/usr/bin/php${php_ver} /usr/local/bin/composer');" "${home}/.deployer/deploy.php"
         fi
         deployer_audit_ensure_hook "$app" || true
+        deployer_unlock_ensure_hook "$app" || true
         chown -R "${app}:${app}" "${home}/.deployer"
         success "Deployer (restored)"
     else
@@ -860,7 +868,13 @@ _sync_update_app() {
         # part of a sed script: root pasted them into one, where a "|e" in a
         # DB_PASSWORD line of the app's .env ran a command as root.
         local local_db_pass local_db_user local_db_name local_db_host local_db_port local_db_conn env_cur=""
+        local local_redis_host local_redis_port local_redis_pass
         env_cur=$(app_read "$app" "${home}/shared/.env") || env_cur=""
+        # Valkey is this server's too (5.8.6): the app's own instance, or
+        # the shared one with this server's password — never the source's.
+        local_redis_host=$(grep -m1 '^REDIS_HOST=' <<< "$env_cur" | cut -d= -f2- || true)
+        local_redis_port=$(grep -m1 '^REDIS_PORT=' <<< "$env_cur" | cut -d= -f2- || true)
+        local_redis_pass=$(grep -m1 '^REDIS_PASSWORD=' <<< "$env_cur" | cut -d= -f2- || true)
         # `|| true`: a key this .env does not have (an SQLite app has no
         # DB_HOST) is an empty value here, not the end of the command — under
         # pipefail the failed grep stopped `cipi sync` right here, in silence.
@@ -874,15 +888,17 @@ _sync_update_app() {
         CIPI_KEEP_DB_PASSWORD="$local_db_pass" CIPI_KEEP_DB_USERNAME="$local_db_user" \
         CIPI_KEEP_DB_DATABASE="$local_db_name" CIPI_KEEP_DB_HOST="$local_db_host" \
         CIPI_KEEP_DB_PORT="$local_db_port" CIPI_KEEP_DB_CONNECTION="$local_db_conn" \
+        CIPI_KEEP_REDIS_HOST="$local_redis_host" CIPI_KEEP_REDIS_PORT="$local_redis_port" \
+        CIPI_KEEP_REDIS_PASSWORD="$local_redis_pass" \
         awk 'BEGIN {
-                 n = split("DB_PASSWORD DB_USERNAME DB_DATABASE DB_HOST DB_PORT DB_CONNECTION", k, " ")
+                 n = split("DB_PASSWORD DB_USERNAME DB_DATABASE DB_HOST DB_PORT DB_CONNECTION REDIS_HOST REDIS_PORT REDIS_PASSWORD", k, " ")
                  for (i = 1; i <= n; i++) if (ENVIRON["CIPI_KEEP_" k[i]] != "") keep[k[i]] = ENVIRON["CIPI_KEEP_" k[i]]
              }
              { i = index($0, "="); key = (i > 1 ? substr($0, 1, i - 1) : "")
                if (key in keep) print key "=" keep[key]; else print }' "${ad}/env" \
             | app_write "$app" "${home}/shared/.env" 640
         laravel_app_env_single_log "$app" || true
-        success ".env (synced, local DB credentials preserved)"
+        success ".env (synced, local DB and Valkey credentials preserved)"
     fi
 
     # 2. auth.json
@@ -946,6 +962,12 @@ _sync_update_app() {
     # 6. Update apps.json (aliases, branch, repository, etc.)
     local app_json; app_json=$(jq --arg a "$app" '.[$a]' "${dir}/config/apps.json")
     app_save "$app" "$app_json"
+    # valkey_port came with the entry: what counts is the instance here.
+    if [[ -f "${CIPI_LIB}/valkey.sh" ]]; then
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/valkey.sh"
+        valkey_sync_keep "$app" || true
+    fi
     _sync_yml_auto_sudoers "$app"
     # The webhook of cipi/agent reads the deploy branch from .env (5.7.2).
     if [[ "$(app_get "$app" runtime)" != "node" ]]; then

@@ -51,10 +51,14 @@ done
 echo "-- defaults"
 grep -q '^LOG_CHANNEL=single$' "${LIB}/app.sh" && ! grep -q '^LOG_CHANNEL=daily' "${LIB}/app.sh" \
     && pass "new Laravel apps get LOG_CHANNEL=single" || fail "app.sh still writes LOG_CHANNEL=daily"
-for f in "${ROOT}/setup.sh" "${LIB}/migrations/5.5.0.sh"; do
+for f in "${LIB}/migrations/5.5.0.sh"; do
     grep -q '^/home/\*/shared/storage/logs/\*\[!0-9\]\.log$' "$f" && ! grep -q '^/home/\*/shared/storage/logs/\*\.log$' "$f" \
         && pass "${f#"${ROOT}/"}: logrotate skips logs ending in a date" || fail "${f#"${ROOT}/"}: logrotate still takes *.log"
 done
+# 5.8.6: the apps' own logs have a rule per app (app_logrotate_rule in
+# common.sh, rotated as the app user); setup.sh no longer names /home/*.
+grep -q '^/home/\${app}/shared/storage/logs/\*\[!0-9\]\.log$' "${LIB}/common.sh" && ! grep -q '^/home/\*/' "${ROOT}/setup.sh" \
+    && pass "the per-app rule skips logs ending in a date; setup.sh has no /home/* rule" || fail "per-app logrotate rule: pattern missing, or setup.sh still names /home/*"
 mkdir -p "${TMP}/glob"
 touch "${TMP}/glob/laravel.log" "${TMP}/glob/worker.log" "${TMP}/glob/laravel-2026-01-31.log" "${TMP}/glob/laravel-2026-01-31.log.1"
 got=$(cd "${TMP}/glob" && echo *[!0-9].log)
@@ -784,10 +788,15 @@ if [[ "\$1" == "-t" ]]; then
     echo "sshd -t \$(grep -c '^Match Group cipi-nossh ' "\$3")" >> "${H}/calls"
     [[ ! -e "${H}/reject" ]]; exit
 fi
-# -T -C user=U,host=H,addr=A
+# -T -C user=U,host=H,addr=A — what sshd answers with Cipi's section (5.8.6):
+# a member of cipi-nossh from outside gets the server's keys and nothing else.
 spec="\$3"; u="\${spec#user=}"; u="\${u%%,*}"; a="\${spec##*addr=}"
-if grep -q '^Match Group cipi-nossh ' "${H}/sshd_config" && grep -qx "\$u" "${H}/members" && [[ "\$a" != 127.0.0.1 ]]; then
-    echo "denyusers *"
+if grep -q '^Match Group cipi-nossh ' "${H}/sshd_config"; then
+    echo "authorizedkeyscommand /usr/local/bin/cipi-ssh-keys %u"
+    if grep -qx "\$u" "${H}/members" && [[ "\$a" != 127.0.0.1 ]]; then
+        echo "authenticationmethods publickey"
+        echo "authorizedkeysfile none"
+    fi
 fi
 EOF
 cat > "${H}/bin/systemctl" <<EOF
@@ -820,10 +829,14 @@ jq -e '.new_apps == "enabled" and (.apps | map(.app)) == ["blog","front","shop"]
 out=$(sa disable shop); rc=$?
 [[ $rc -eq 0 ]] && grep -q "OK: SSH/SFTP access from outside disabled for 'shop'" <<< "$out" && grep -qx shop "${H}/members" \
     && pass "disable <app>: the app user joins cipi-nossh" || fail "disable shop wrong (rc=${rc}): ${out}"
-[[ "$(head -6 "${H}/sshd_config")" == "$SSHD_ORIG" && "$(grep -c '^Match Group cipi-nossh Address \*,!127.0.0.1,!::1$' "${H}/sshd_config")" == "1" ]] \
-    && [[ "$(tail -1 "${H}/sshd_config")" == "    DenyUsers *" ]] \
-    && pass "sshd_config: the existing content is kept and the rule is appended once" || fail "sshd_config wrong: $(cat "${H}/sshd_config")"
-[[ "$(grep -n 'sshd -t 1' "${H}/calls" | cut -d: -f1)" -lt "$(grep -n 'systemctl reload ssh' "${H}/calls" | cut -d: -f1)" ]] \
+# 5.8.6: the "Match Group cipi-apps" block setup.sh wrote is folded into the
+# managed section (the server's keys are accepted for app users too); what
+# is not Cipi's stays where it was.
+[[ "$(head -3 "${H}/sshd_config")" == "$(head -3 <<< "$SSHD_ORIG")" && "$(grep -c '^Match Group cipi-nossh Address \*,!127.0.0.1,!::1$' "${H}/sshd_config")" == "1" ]] \
+    && [[ "$(tail -1 "${H}/sshd_config")" == "# <<< cipi ssh apps" && "$(grep -c '^# >>> cipi ssh apps' "${H}/sshd_config")" == "1" ]] \
+    && [[ "$(grep -c '^Match Group cipi-apps$' "${H}/sshd_config")" == "1" ]] && ! grep -q 'DenyUsers' "${H}/sshd_config" \
+    && pass "sshd_config: what is not Cipi's is kept, Cipi's old block is folded into the section, written once" || fail "sshd_config wrong: $(cat "${H}/sshd_config")"
+[[ "$(grep -n 'sshd -t 2' "${H}/calls" | cut -d: -f1)" -lt "$(grep -n 'systemctl reload ssh' "${H}/calls" | cut -d: -f1)" ]] \
     && ! grep -q 'restart' "${H}/calls" \
     && pass "the new sshd_config is validated by sshd before it goes live; sshd is reloaded, not restarted" || fail "validation/reload order wrong: $(cat "${H}/calls")"
 [[ -z "$(ls "${H}" | grep '^sshd_config\.')" ]] && pass "no working copy is left next to sshd_config" || fail "leftover: $(ls "${H}")"
@@ -838,7 +851,7 @@ out=$(sa disable shop)
 grep -q "INFO: SSH/SFTP access of 'shop' is already disabled" <<< "$out" && ! grep -q 'notify' "${H}/calls" \
     && pass "disabling twice: nothing to do, no second notification" || fail "second disable wrong: ${out}"
 out=$(sa disable blog)
-[[ "$(grep -c '^Match Group cipi-nossh ' "${H}/sshd_config")" == "1" ]] && ! grep -q 'sshd -t\|systemctl' "${H}/calls" && grep -qx blog "${H}/members" \
+[[ "$(grep -c '^Match Group cipi-nossh ' "${H}/sshd_config")" == "2" ]] && ! grep -q 'sshd -t\|systemctl' "${H}/calls" && grep -qx blog "${H}/members" \
     && pass "a second user: only a group change, sshd_config is not rewritten or reloaded" || fail "second user rewrote sshd_config: $(cat "${H}/calls")"
 out=$(sa enable shop); rc=$?
 [[ $rc -eq 0 ]] && ! grep -qx shop "${H}/members" && grep -qx blog "${H}/members" && pass "enable <app>: only that user is back" || fail "enable shop wrong (rc=${rc}): ${out}"

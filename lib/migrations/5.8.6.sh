@@ -39,8 +39,36 @@
 #     migration says so. Open SSH sessions of app users keep the old
 #     membership until they log out.
 #
+#  7. logrotate: Laravel's logs and the PHP-FPM error log are the app's own
+#     files in the app's own home, and one rule on /home/*/… had root copy,
+#     truncate and compress them there. Each app gets a rule of its own,
+#     /etc/logrotate.d/cipi-home-<app>, with `su <app> <group>`: logrotate
+#     does that work as the app user. The two /home/* lines leave the shared
+#     rule first (a log named twice makes logrotate drop a whole file); a
+#     shared rule someone has rearranged is left as it is, and said.
+#  8. sshd: the server's SSH keys (the cipi user's — cipi ssh list) are
+#     accepted for every app user, through /usr/local/bin/cipi-ssh-keys. An
+#     app with SSH access disabled accepted nothing from outside; it now
+#     accepts those keys and nothing else. An app with access enabled keeps
+#     its password and its own keys, next to them. Cipi's two older blocks
+#     in sshd_config become one managed section; the new file is validated
+#     by sshd before it replaces the live one, and sshd is reloaded, not
+#     restarted.
+#  9. Nightly patch updates (cipi autoupdate, 04:20) of nginx, MariaDB,
+#     PostgreSQL, Valkey, Node.js and Composer — on for all of them unless
+#     switched off — and the daily look at what is waiting (cipi pending,
+#     07:30): a reboot, a patch, a warning. Composer below 2.10.3 is updated
+#     now.
+#
+# 10. Appends `after('deploy:failed', 'deploy:unlock');` to the deploy.php of
+#     Laravel apps that do not have it: a failed deploy left its lock behind
+#     and every later one stopped at "Deploy locked".
+#
 # cipi-app-notify, the other half of this release, needs no migration:
 # self-update copies the new helper to /usr/local/bin before this runs.
+# The panel's trees (composer and artisan as www-data) and Valkey per app
+# need none either: the first is how the update itself now runs, the second
+# starts with the next `cipi app create` or `cipi valkey isolate`.
 #
 # Every step tolerates failure and says so: a migration that aborts pins the
 # server on the old release and retries every night.
@@ -259,6 +287,77 @@ if (( n_removed > 0 )) && command -v supervisorctl &>/dev/null; then
         done
     fi
     echo "  Open SSH/SFTP sessions of app users keep www-data until they log out"
+fi
+
+# ── 7. logrotate: each app's own logs, as the app user ───────
+if [[ -d /etc/logrotate.d ]] && declare -f app_logrotate_all >/dev/null; then
+    lr_apps=""
+    if [[ -f "${CIPI_CONFIG}/apps.json" ]]; then
+        lr_apps=$(vault_read apps.json 2>/dev/null | jq -r 'keys[]' 2>/dev/null || true)
+    fi
+    # shellcheck disable=SC2086
+    if app_logrotate_all $lr_apps; then
+        if ! lr_err=$(logrotate_cipi_check); then
+            echo "  WARNING: logrotate reports a problem with Cipi's rules:"
+            printf '%s\n' "$lr_err" | sed 's/^/    /'
+        fi
+    fi
+fi
+
+# ── 8. sshd: the server's keys for every app user ────────────
+if [[ -f /etc/ssh/sshd_config && -f "${CIPI_LIB}/ssh.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${CIPI_LIB}/ssh.sh"
+    if declare -f _ssh_apps_ensure_block >/dev/null && _ssh_apps_ensure_block; then
+        echo "  sshd: the server's SSH keys (cipi ssh list) now open a shell as any app user; an app with SSH access disabled accepts nothing else from outside"
+    else
+        echo "  WARNING: sshd_config not updated — app users are as they were; retry with: cipi ssh apps sync"
+    fi
+fi
+
+# ── 9. Nightly patch updates, daily pending check ────────────
+declare -f cipi_notify >/dev/null || cipi_notify() { :; }
+if [[ -f "${CIPI_LIB}/autoupdate.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${CIPI_LIB}/autoupdate.sh"
+    if autoupdate_cron_sync 2>/dev/null && [[ -f "$AUTOUPDATE_CRON" ]]; then
+        echo "  cron: nginx, MariaDB, PostgreSQL, Valkey, Node.js and Composer are patched every night at 04:20 (cipi autoupdate — off: cipi autoupdate off [name])"
+    else
+        echo "  WARNING: could not write ${AUTOUPDATE_CRON} — run: cipi autoupdate on"
+    fi
+    if [[ -x /usr/local/bin/composer ]]; then
+        cv=$(_autoupdate_composer_version || true)
+        if [[ -n "$cv" ]] && ! version_at_least "$cv" "$(composer_security_floor)"; then
+            echo "  Composer ${cv} is below $(composer_security_floor) (security releases) — updating..."
+            ( _autoupdate_composer ) || echo "  WARNING: Composer not updated — run: cipi autoupdate run composer"
+        fi
+    fi
+fi
+if [[ -f "${CIPI_LIB}/pending.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${CIPI_LIB}/pending.sh"
+    if pending_cron_write 2>/dev/null && [[ -f "$PENDING_CRON" ]]; then
+        echo "  cron: what is waiting — a reboot, a patch, a warning — is checked every morning and mailed when it changes (cipi pending)"
+    else
+        echo "  WARNING: could not write ${PENDING_CRON}"
+    fi
+    if r=$(reboot_needed); then
+        echo "  NOTE: this server is waiting for a reboot (running kernel $(uname -r)) — cipi reboot"
+    fi
+fi
+
+# ── 10. A failed deploy releases its own lock ────────────────
+if declare -f deployer_unlock_ensure_hook >/dev/null && [[ -f "${CIPI_CONFIG}/apps.json" ]]; then
+    n_unlock=0
+    while IFS= read -r u; do
+        [[ "$u" =~ ^[a-z][a-z0-9]{2,31}$ ]] || continue
+        id "$u" &>/dev/null || continue
+        [[ -f "/home/${u}/.deployer/deploy.php" ]] || continue
+        before_sum=$(app_read "$u" "/home/${u}/.deployer/deploy.php" 2>/dev/null | md5sum || true)
+        deployer_unlock_ensure_hook "$u" || { echo "  WARNING: ${u}: deploy.php not updated — a failed deploy still needs: cipi deploy ${u} --unlock"; continue; }
+        [[ "$(app_read "$u" "/home/${u}/.deployer/deploy.php" 2>/dev/null | md5sum || true)" != "$before_sum" ]] && n_unlock=$((n_unlock + 1))
+    done < <(vault_read apps.json 2>/dev/null | jq -r 'keys[]' 2>/dev/null || true)
+    (( n_unlock > 0 )) && echo "  deploy.php: ${n_unlock} Laravel app(s) now release the deploy lock when a deploy fails"
 fi
 
 (( n_kept > 0 )) && echo "  WARNING: ${n_kept} app user(s) still in www-data — see above"

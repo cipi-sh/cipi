@@ -51,8 +51,10 @@ EOF
     export GIT_TERMINAL_PROMPT=0
     export COMPOSER_PROCESS_TIMEOUT="${COMPOSER_PROCESS_TIMEOUT:-300}"
     export COMPOSER_ALLOW_SUPERUSER=1
-    (cd "$dir" && composer config --json github-protocols '["https"]' 2>/dev/null) || true
-    (cd "$dir" && composer config preferred-install dist 2>/dev/null) || true
+    if declare -f panel_composer >/dev/null 2>&1; then
+        panel_composer "$dir" config --json github-protocols '["https"]' 2>/dev/null || true
+        panel_composer "$dir" config preferred-install dist 2>/dev/null || true
+    fi
 }
 
 # Stop queue (and force-kill if stop hangs) before composer/migrate so panel
@@ -75,8 +77,8 @@ _api_composer_vcs_repo() {
     local dir="$1"
     [[ -d "$dir" ]] || return 0
     _api_composer_prepare_github "$dir"
-    (cd "$dir" && composer config repositories.cipi-api \
-        "{\"type\":\"vcs\",\"url\":\"${CIPI_API_REPO}\"}" 2>/dev/null) || true
+    panel_composer "$dir" config repositories.cipi-api \
+        "{\"type\":\"vcs\",\"url\":\"${CIPI_API_REPO}\"}" 2>/dev/null || true
 }
 
 # ability|description — sourced from the API package (token-abilities.txt / artisan)
@@ -87,10 +89,19 @@ _api_ability_lines() {
         "${CIPI_API_ROOT}/vendor/cipi/api/token-abilities.txt" \
         "/opt/cipi/cipi-api/token-abilities.txt"; do
         if [[ -f "$f" ]]; then
-            cat "$f"
+            # A file in the panel's tree is read as the panel's user: these
+            # lines end up as arguments of a command www-data runs.
+            if [[ "$f" == "${CIPI_API_ROOT}/"* ]]; then
+                out=$(panel_env_read "$f") || out=""
+                [[ -n "$out" ]] || continue
+                printf '%s\n' "$out"
+            else
+                cat "$f"
+            fi
             return
         fi
     done
+    out=""
     if [[ -d "${CIPI_API_ROOT}" && -f "${CIPI_API_ROOT}/artisan" ]]; then
         out=$(cd "${CIPI_API_ROOT}" && _api_timeout 15 sudo -u www-data php artisan cipi:token-abilities 2>/dev/null) || true
     fi
@@ -126,15 +137,21 @@ _api_sync_token_abilities_file() {
         "${CIPI_API_ROOT}/vendor/cipi/api/token-abilities.txt" \
         "/opt/cipi/cipi-api/token-abilities.txt"; do
         if [[ -f "$src" ]]; then
+            # Written by the tree's owner: root's cp and chown followed
+            # whatever this name was.
+            if _panel_tree_is_www "${CIPI_API_ROOT}"; then
+                app_as www-data cp -f -- "$src" "$dest" 2>/dev/null < /dev/null && return 0
+                continue
+            fi
             cp "$src" "$dest"
-            chown www-data:www-data "$dest" 2>/dev/null || true
+            chown -h www-data:www-data "$dest" 2>/dev/null || true
             return 0
         fi
     done
-    if [[ -d "${CIPI_API_ROOT}" && -f "${CIPI_API_ROOT}/artisan" ]]; then
-        (cd "${CIPI_API_ROOT}" && _api_timeout 15 sudo -u www-data php artisan cipi:token-abilities > "$dest" 2>/dev/null) \
-            && chown www-data:www-data "$dest" 2>/dev/null \
-            && return 0
+    if [[ -d "${CIPI_API_ROOT}" && -f "${CIPI_API_ROOT}/artisan" ]] && _panel_tree_is_www "${CIPI_API_ROOT}"; then
+        # The redirection too is www-data's: it is inside the command.
+        app_sh www-data 'cd "$1" && exec timeout 15 php artisan cipi:token-abilities > "$2"' \
+            "${CIPI_API_ROOT}" "$dest" 2>/dev/null < /dev/null && return 0
     fi
     return 1
 }
@@ -180,18 +197,9 @@ SQL
 _api_ensure_log_stack_env() {
     local envf="${CIPI_API_ROOT}/.env"
     [[ -f "$envf" ]] || return 0
-    if grep -q '^LOG_STACK=' "$envf" 2>/dev/null; then
-        sed -i 's|^LOG_STACK=.*|LOG_STACK=single,stderr|' "$envf"
-    else
-        echo 'LOG_STACK=single,stderr' >> "$envf"
-    fi
-    if grep -q '^LOG_CHANNEL=' "$envf" 2>/dev/null; then
-        sed -i 's|^LOG_CHANNEL=.*|LOG_CHANNEL=stack|' "$envf"
-    else
-        echo 'LOG_CHANNEL=stack' >> "$envf"
-    fi
-    chown www-data:www-data "$envf" 2>/dev/null || true
-    chmod 640 "$envf" 2>/dev/null || true
+    # As the tree's owner (panel_env_set in common.sh): root's sed, `>>` and
+    # chown on this name went wherever www-data had made it lead.
+    panel_env_set "$envf" LOG_STACK "single,stderr" LOG_CHANNEL stack || true
 }
 
 # PsySH (artisan tinker) writes under www-data's home; ensure the dir exists to avoid slow/failed first runs.
@@ -272,7 +280,7 @@ _api_token_select_abilities() {
 
     while true; do
         echo "" >&2
-        echo -e "${BOLD}Token abilities${NC}  ${DIM}· toggle number(s) · ${BOLD}a${DIM}=all · ${BOLD}n${DIM}=none · ${BOLD}Enter${DIM}=confirm${NC}" >&2
+        echo -e "${BOLD}Token abilities${NC}  ${DIM}· toggle number(s) · ${BOLD}a${DIM}=all · ${BOLD}n${DIM}=none · ${BOLD}f${DIM}=full access · ${BOLD}Enter${DIM}=confirm${NC}" >&2
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
         for ((i = 0; i < n; i++)); do
             local mark
@@ -294,6 +302,13 @@ _api_token_select_abilities() {
         choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         [[ -z "$choice" ]] && break
         case "$choice" in
+            f | full | full-access)
+                # Not "all of the above": the wildcard, which also covers
+                # what later versions of the API add.
+                echo -e "  ${GREEN}✓${NC} Full access — every ability, including the ones later versions add" >&2
+                echo "*"
+                return 0
+                ;;
             a | all)
                 for ((i = 0; i < n; i++)); do
                     sel[i]=1
@@ -388,10 +403,8 @@ api_setup() {
 
     # Update APP_URL and CIPI_APPS_JSON in Laravel .env
     if [[ -f "${CIPI_API_ROOT}/.env" ]]; then
-        sed -i "s|^APP_URL=.*|APP_URL=https://${domain}|" "${CIPI_API_ROOT}/.env"
-        grep -q '^CIPI_APPS_JSON=' "${CIPI_API_ROOT}/.env" 2>/dev/null \
-            && sed -i "s|^CIPI_APPS_JSON=.*|CIPI_APPS_JSON=${CIPI_CONFIG}/apps-public.json|" "${CIPI_API_ROOT}/.env" \
-            || echo "CIPI_APPS_JSON=${CIPI_CONFIG}/apps-public.json" >> "${CIPI_API_ROOT}/.env"
+        panel_env_set "${CIPI_API_ROOT}/.env" APP_URL "https://${domain}" \
+            CIPI_APPS_JSON "${CIPI_CONFIG}/apps-public.json" || true
     fi
     _api_ensure_log_stack_env
     _api_ensure_session_driver_env
@@ -561,27 +574,34 @@ _api_update_package() {
     _api_stop_queue_for_update
     _api_composer_prepare_github "${CIPI_API_ROOT}"
 
+    # The tree is www-data's, and so is everything Composer runs from it: its
+    # plugins, the scripts in composer.json. Composer runs there as www-data
+    # (panel_composer in common.sh) — as root it ran whatever the panel's
+    # user had put in that tree. What root left in it over the years goes
+    # back to www-data first: -h -R changes a link, never what it points at.
+    chown -h -R www-data:www-data "${CIPI_API_ROOT}" 2>/dev/null || true
+
     # Stale VCS entry from 5.0.8+ soft-updates overrides Packagist and hangs.
-    (cd "${CIPI_API_ROOT}" && composer config --unset repositories.cipi-api 2>/dev/null) || true
+    panel_composer "${CIPI_API_ROOT}" config --unset repositories.cipi-api 2>/dev/null || true
 
     if [[ -d "$pkg_dir" ]]; then
         step "Composer path repo → ${pkg_dir}"
-        (cd "${CIPI_API_ROOT}" && composer config repositories.cipi-api path "$pkg_dir" 2>/dev/null) || true
+        panel_composer "${CIPI_API_ROOT}" config repositories.cipi-api path "$pkg_dir" 2>/dev/null || true
         step "Composer require cipi/api:@dev (timeout ${CIPI_COMPOSER_TIMEOUT:-600}s)..."
-        if ! (cd "${CIPI_API_ROOT}" && composer require cipi/api:@dev --no-interaction --prefer-dist --no-ansi); then
-            composer_rc=$?
+        panel_composer "${CIPI_API_ROOT}" require cipi/api:@dev --no-interaction --prefer-dist --no-ansi || composer_rc=$?
+        if [[ "$composer_rc" -ne 0 ]]; then
             warn "Composer require cipi/api:@dev failed (exit ${composer_rc})"
         fi
     else
         step "Composer require cipi/api from Packagist (timeout ${CIPI_COMPOSER_TIMEOUT:-600}s)..."
-        if ! (cd "${CIPI_API_ROOT}" && composer require cipi/api --no-interaction --prefer-dist --no-ansi); then
-            composer_rc=$?
+        panel_composer "${CIPI_API_ROOT}" require cipi/api --no-interaction --prefer-dist --no-ansi || composer_rc=$?
+        if [[ "$composer_rc" -ne 0 ]]; then
             warn "Composer require cipi/api failed (exit ${composer_rc})"
         fi
     fi
 
     step "Reclaiming API permissions & running migrations..."
-    chown -R www-data:www-data "${CIPI_API_ROOT}" 2>/dev/null || true
+    chown -h -R www-data:www-data "${CIPI_API_ROOT}" 2>/dev/null || true
     (cd "${CIPI_API_ROOT}" && _api_timeout 120 sudo -u www-data php artisan vendor:publish --tag=cipi-assets --force) || true
     (cd "${CIPI_API_ROOT}" && _api_timeout 180 sudo -u www-data php artisan migrate --force) || true
     _api_sync_token_abilities_file 2>/dev/null || true
@@ -806,13 +826,7 @@ LR
 _api_ensure_session_driver_env() {
     local envf="${CIPI_API_ROOT}/.env"
     [[ -f "$envf" ]] || return 0
-    if grep -q '^SESSION_DRIVER=' "$envf" 2>/dev/null; then
-        sed -i 's|^SESSION_DRIVER=.*|SESSION_DRIVER=array|' "$envf"
-    else
-        echo 'SESSION_DRIVER=array' >> "$envf"
-    fi
-    chown www-data:www-data "$envf" 2>/dev/null || true
-    chmod 640 "$envf" 2>/dev/null || true
+    panel_env_set "$envf" SESSION_DRIVER array || true
 }
 
 _api_create_fpm_pool() {
@@ -996,8 +1010,11 @@ api_upgrade() {
         exit 1
     }
     chmod 700 "$backup_dir"
-    [[ -f "${CIPI_API_ROOT}/.env" ]] && cp "${CIPI_API_ROOT}/.env" "${backup_dir}/.env"
-    [[ -f "${CIPI_API_ROOT}/database/database.sqlite" ]] && cp "${CIPI_API_ROOT}/database/database.sqlite" "${backup_dir}/database.sqlite"
+    # Read as www-data: what root copies from these two names ends up in the
+    # new tree, owned by www-data — whatever file they had been made to
+    # point at.
+    panel_backup_file "${CIPI_API_ROOT}/.env" "${backup_dir}/.env"
+    panel_backup_file "${CIPI_API_ROOT}/database/database.sqlite" "${backup_dir}/database.sqlite"
     success "Backup → $backup_dir"
 
     # 2. Build new Laravel project
@@ -1187,7 +1204,7 @@ _api_show_versions() {
     [[ -z "$laravel_ver" ]] && laravel_ver="unknown"
 
     cipi_api_ver=$(_api_lock_package_version "cipi/api")
-    [[ -z "$cipi_api_ver" ]] && cipi_api_ver=$(_api_timeout 12 bash -c "cd \"${CIPI_API_ROOT}\" && composer show cipi/api 2>/dev/null" | sed -n 's/^[[:space:]]*versions[[:space:]]*:[[:space:]]*//p' | head -1)
+    [[ -z "$cipi_api_ver" ]] && cipi_api_ver=$(panel_composer "${CIPI_API_ROOT}" show cipi/api 2>/dev/null < /dev/null | sed -n 's/^[[:space:]]*versions[[:space:]]*:[[:space:]]*//p' | head -1)
     cipi_api_ver="${cipi_api_ver#v}"
     [[ -z "$cipi_api_ver" ]] && cipi_api_ver="dev"
     echo -e "  Laravel:    ${CYAN}${laravel_ver}${NC}"
@@ -1242,9 +1259,7 @@ api_ssl() {
 _api_set_app_url() {
     local envf="${CIPI_API_ROOT}/.env"
     [[ -f "$envf" ]] || return 0
-    sed -i "s|^APP_URL=.*|APP_URL=https://${1}|" "$envf"
-    chown www-data:www-data "$envf" 2>/dev/null || true
-    chmod 640 "$envf" 2>/dev/null || true
+    panel_env_set "$envf" APP_URL "https://${1}" || true
 }
 
 # Same app, tokens, database and IP whitelist on a new domain. The old
@@ -1441,29 +1456,56 @@ api_token_create() {
     [[ ! -f "${CIPI_API_CONFIG}" ]] && { error "API not configured. Run: cipi api <domain>"; exit 1; }
     [[ ! -f "${CIPI_API_ROOT}/artisan" ]] && { error "Laravel API app not found."; exit 1; }
 
+    # cipi api token create [--name=<slug>] [--full-access | --abilities=a,b,…] [--expires=YYYY-MM-DD]
+    # Without flags it asks, as it always did. --full-access is the role that
+    # may do everything: the wildcard ability `*`, which also covers the
+    # abilities later versions of the API add.
+    parse_args "$@"
+    local flags=false
+    [[ -n "${ARG_name:-}${ARG_abilities:-}${ARG_expires:-}${ARG_full_access:-}" ]] && flags=true
+
     echo ""; info "Create API token"; echo ""
 
     # Name (slug)
-    local name=""
-    while true; do
-        read_input "Token name (slug: a-z, 0-9, hyphens)" "" name
-        if [[ "$name" =~ ^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$ ]]; then
-            break
-        fi
-        error "Invalid slug. Use lowercase letters, numbers, hyphens only."
-    done
+    local name="${ARG_name:-}"
+    if [[ -n "$name" ]]; then
+        [[ "$name" =~ ^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$ ]] \
+            || { error "Invalid --name. Use lowercase letters, numbers, hyphens only."; exit 1; }
+    else
+        while true; do
+            read_input "Token name (slug: a-z, 0-9, hyphens)" "" name
+            if [[ "$name" =~ ^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$ ]]; then
+                break
+            fi
+            error "Invalid slug. Use lowercase letters, numbers, hyphens only."
+        done
+    fi
 
-    # Abilities (terminal checklist; non-TTY / pipes → all abilities)
-    local abilities_str
-    if [[ -t 0 ]]; then
+    # Abilities: --full-access, --abilities=, the terminal checklist, or —
+    # with no terminal and no flag — every ability by name, as before.
+    local abilities_str a known
+    if [[ "${ARG_full_access:-}" == "true" || "${ARG_abilities:-}" == "*" || "${ARG_abilities:-}" == "full-access" ]]; then
+        abilities_str="*"
+    elif [[ -n "${ARG_abilities:-}" ]]; then
+        [[ "${ARG_abilities}" =~ ^[a-z][a-z0-9-]*(,[a-z][a-z0-9-]*)*$ ]] \
+            || { error "Invalid --abilities. A comma-separated list such as apps-view,deploy-manage — or --full-access"; exit 1; }
+        known=$(_api_ability_lines | cut -d'|' -f1)
+        for a in ${ARG_abilities//,/ }; do
+            grep -qxF -- "$a" <<< "$known" || { error "Unknown ability: ${a}. The list: cipi api token create (no flags), or --full-access"; exit 1; }
+        done
+        abilities_str="${ARG_abilities}"
+    elif [[ -t 0 ]]; then
         abilities_str=$(_api_token_select_abilities) || exit 1
     else
         abilities_str=$(_api_token_abilities_default)
     fi
 
     # Expiry date (YYYY-MM-DD, empty = no expiry)
-    local expiry=""
-    read_input "Expiry date (YYYY-MM-DD, empty = never)" "" expiry
+    local expiry="${ARG_expires:-}"
+    [[ "$expiry" == "true" || "$expiry" == "never" ]] && expiry=""
+    if [[ "$flags" != true ]]; then
+        read_input "Expiry date (YYYY-MM-DD, empty = never)" "" expiry
+    fi
     if [[ -n "$expiry" ]]; then
         if ! date -d "$expiry" &>/dev/null; then
             error "Invalid date format. Use YYYY-MM-DD"; exit 1
@@ -2008,8 +2050,8 @@ _api_token_command() {
     local sub="${1:-}"; shift || true
     case "$sub" in
         list)   api_token_list ;;
-        create) api_token_create ;;
+        create) api_token_create "$@" ;;
         revoke) api_token_revoke "$@" ;;
-        *)      error "Usage: cipi api token list|create|revoke <name>"; exit 1 ;;
+        *)      error "Usage: cipi api token list | create [--name= --full-access|--abilities= --expires=] | revoke <name>"; exit 1 ;;
     esac
 }

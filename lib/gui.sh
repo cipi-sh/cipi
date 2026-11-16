@@ -50,8 +50,10 @@ EOF
     export GIT_TERMINAL_PROMPT=0
     export COMPOSER_PROCESS_TIMEOUT="${COMPOSER_PROCESS_TIMEOUT:-300}"
     export COMPOSER_ALLOW_SUPERUSER=1
-    (cd "$dir" && composer config --json github-protocols '["https"]' 2>/dev/null) || true
-    (cd "$dir" && composer config preferred-install dist 2>/dev/null) || true
+    if declare -f panel_composer >/dev/null 2>&1; then
+        panel_composer "$dir" config --json github-protocols '["https"]' 2>/dev/null || true
+        panel_composer "$dir" config preferred-install dist 2>/dev/null || true
+    fi
 }
 
 # cipi/gui is not on Packagist. A Composer VCS repo on GitHub hangs the same way
@@ -110,13 +112,13 @@ _gui_composer_path_repo() {
     [[ -d "$dir" && -d "$pkg" ]] || return 1
     _gui_composer_prepare_github "$dir"
     # Drop stale VCS entry that hangs soft updates.
-    (cd "$dir" && composer config --unset repositories.cipi-gui 2>/dev/null) || true
+    (panel_composer "$dir" config --unset repositories.cipi-gui 2>/dev/null) || true
     # symlink=false: copy into vendor/ so FPM open_basedir (/opt/cipi/gui) can load it.
     # A plain `path` repo defaults to symlink → /opt/cipi/cipi-gui → HTTP 500.
-    (cd "$dir" && composer config --json repositories.cipi-gui \
+    (panel_composer "$dir" config --json repositories.cipi-gui \
         "{\"type\":\"path\",\"url\":\"${pkg}\",\"options\":{\"symlink\":false}}" 2>/dev/null) || true
-    (cd "$dir" && composer config minimum-stability dev 2>/dev/null) || true
-    (cd "$dir" && composer config prefer-stable true 2>/dev/null) || true
+    (panel_composer "$dir" config minimum-stability dev 2>/dev/null) || true
+    (panel_composer "$dir" config prefer-stable true 2>/dev/null) || true
 }
 
 # The version a copy of the package carries (src/Support/Theme.php), or "".
@@ -132,8 +134,8 @@ _gui_pkg_version() {
 # and every panel stayed where it was. `reinstall` copies regardless.
 _gui_reinstall_package() {
     local dir="${1:-${CIPI_GUI_ROOT}}"
-    (cd "$dir" && composer reinstall cipi/gui --no-interaction --prefer-dist --no-ansi) \
-        || (cd "$dir" && composer update cipi/gui --no-interaction --prefer-dist --no-ansi)
+    (panel_composer "$dir" reinstall cipi/gui --no-interaction --prefer-dist --no-ansi) \
+        || (panel_composer "$dir" update cipi/gui --no-interaction --prefer-dist --no-ansi)
 }
 
 # If vendor/cipi/gui is still a symlink outside the app root, force a real copy.
@@ -143,8 +145,8 @@ _gui_ensure_vendor_copy() {
     [[ -d "$dir" ]] || return 0
     if [[ -L "$vendor" ]] || [[ -d /opt/cipi/cipi-gui && ! -d "$vendor" ]]; then
         _gui_composer_path_repo "$dir" /opt/cipi/cipi-gui || return 1
-        (cd "$dir" && composer reinstall cipi/gui --no-interaction --prefer-dist --no-ansi 2>/dev/null) \
-            || (cd "$dir" && composer update cipi/gui --no-interaction --prefer-dist --no-ansi) \
+        (panel_composer "$dir" reinstall cipi/gui --no-interaction --prefer-dist --no-ansi 2>/dev/null) \
+            || (panel_composer "$dir" update cipi/gui --no-interaction --prefer-dist --no-ansi) \
             || return 1
     fi
     return 0
@@ -163,7 +165,7 @@ _gui_require_package() {
     [[ -d "$dir" ]] || return 1
     _gui_sync_path_package || return 1
     _gui_composer_path_repo "$dir" /opt/cipi/cipi-gui || return 1
-    (cd "$dir" && composer require cipi/gui:@dev --no-interaction --prefer-dist --no-ansi) \
+    (panel_composer "$dir" require cipi/gui:@dev --no-interaction --prefer-dist --no-ansi) \
         || return 1
     _gui_ensure_vendor_copy "$dir" || return 1
     return 0
@@ -199,47 +201,50 @@ _gui_clear_host_routes() {
 _gui_ensure_log_stack_env() {
     local envf="${CIPI_GUI_ROOT}/.env"
     [[ ! -f "$envf" ]] && return
-    grep -q '^LOG_CHANNEL=' "$envf" \
-        && sed -i 's|^LOG_CHANNEL=.*|LOG_CHANNEL=stack|' "$envf" \
-        || echo 'LOG_CHANNEL=stack' >> "$envf"
-    grep -q '^LOG_STACK=' "$envf" \
-        && sed -i 's|^LOG_STACK=.*|LOG_STACK=single,stderr|' "$envf" \
-        || echo 'LOG_STACK=single,stderr' >> "$envf"
+    # As the tree's owner (panel_env_set in common.sh): root's sed and `>>`
+    # on this name went wherever www-data had made it lead.
+    panel_env_set "$envf" LOG_CHANNEL stack LOG_STACK "single,stderr" || true
 }
 
 _gui_ensure_session_driver_env() {
     local envf="${CIPI_GUI_ROOT}/.env"
     [[ ! -f "$envf" ]] && return
-    grep -q '^SESSION_DRIVER=' "$envf" \
-        && sed -i 's|^SESSION_DRIVER=.*|SESSION_DRIVER=file|' "$envf" \
-        || echo 'SESSION_DRIVER=file' >> "$envf"
+    panel_env_set "$envf" SESSION_DRIVER file || true
 }
 
 _gui_apply_sqlite_pragmas() {
-    local envf="${CIPI_GUI_ROOT}/.env" db=""
+    local envf="${CIPI_GUI_ROOT}/.env" db="" envtext
     [[ ! -f "$envf" ]] && return
-    grep -q '^DB_CONNECTION=sqlite' "$envf" 2>/dev/null || return
+    # The .env names the database, and the .env is www-data's: sqlite3 opens
+    # that path as www-data — as root it opened, and wrote next to, any file
+    # the panel's user pointed it at.
+    envtext=$(panel_env_read "$envf") || envtext=""
+    grep -q '^DB_CONNECTION=sqlite' <<< "$envtext" || return 0
     local raw
-    raw=$(grep '^DB_DATABASE=' "$envf" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]"\r')
+    raw=$(grep '^DB_DATABASE=' <<< "$envtext" | head -1 | cut -d= -f2- | tr -d '[:space:]"\r' || true)
     [[ -z "$raw" || "$raw" == "null" ]] && raw="database/database.sqlite"
     [[ "$raw" =~ ^/ ]] && db="$raw" || db="${CIPI_GUI_ROOT}/${raw}"
-    [[ -f "$db" ]] && command -v sqlite3 >/dev/null 2>&1 \
-        && sqlite3 "$db" "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;" >/dev/null 2>&1 || true
+    command -v sqlite3 >/dev/null 2>&1 || return 0
+    app_as www-data sqlite3 "$db" "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;" >/dev/null 2>&1 < /dev/null || true
 }
 
 ensure_cipi_gui_permissions() {
-    [[ ! -d "${CIPI_GUI_ROOT}" ]] && return
-    mkdir -p "${CIPI_GUI_ROOT}/storage/logs" "${CIPI_GUI_ROOT}/database" "${CIPI_GUI_ROOT}/bootstrap/cache" 2>/dev/null || true
-    chown -R www-data:www-data "${CIPI_GUI_ROOT}/storage" "${CIPI_GUI_ROOT}/database" "${CIPI_GUI_ROOT}/bootstrap/cache" 2>/dev/null || true
-    chmod -R ug+rwx "${CIPI_GUI_ROOT}/storage" "${CIPI_GUI_ROOT}/bootstrap/cache" 2>/dev/null || true
-    # self-update does chown -R root:root /opt/cipi — .env must stay www-data-readable
-    # or PHP-FPM returns HTTP 500 (same class as ensure_cipi_api_permissions).
-    if [[ -f "${CIPI_GUI_ROOT}/.env" ]]; then
-        chown www-data:www-data "${CIPI_GUI_ROOT}/.env" 2>/dev/null || true
-        chmod 640 "${CIPI_GUI_ROOT}/.env" 2>/dev/null || true
-    fi
-    [[ -f "${CIPI_GUI_ROOT}/database/database.sqlite" ]] \
-        && chown www-data:www-data "${CIPI_GUI_ROOT}/database/database.sqlite" 2>/dev/null || true
+    [[ ! -d "${CIPI_GUI_ROOT}" || -L "${CIPI_GUI_ROOT}" ]] && return
+    # self-update does chown -R root:root /opt/cipi, and the panel returns
+    # HTTP 500 until its tree is www-data's again (same class as
+    # ensure_cipi_api_permissions). The tree is www-data's as a whole, and a
+    # name inside it is whatever www-data made it: root changes owners
+    # without following links (-h) and leaves mkdir and chmod to www-data —
+    # a chown or a chmod -R of root's on storage, .env or database.sqlite
+    # went to whatever those names pointed at.
+    chown -h -R www-data:www-data "${CIPI_GUI_ROOT}" 2>/dev/null || true
+    panel_sh 'r="$1"
+              mkdir -p "$r/storage/logs" "$r/database" "$r/bootstrap/cache"
+              for d in storage bootstrap/cache; do
+                  [[ -d "$r/$d" && ! -L "$r/$d" ]] && chmod -R ug+rwx "$r/$d"
+              done
+              [[ -f "$r/.env" && ! -L "$r/.env" ]] && chmod 640 "$r/.env"
+              exit 0' "${CIPI_GUI_ROOT}" 2>/dev/null < /dev/null || true
 }
 
 # ── Admin credentials (first install + reset) ────────────────────
@@ -432,8 +437,8 @@ _gui_update_package() {
     }
 
     step "Composer require cipi/gui:@dev (timeout ${CIPI_COMPOSER_TIMEOUT:-600}s)..."
-    if ! (cd "${CIPI_GUI_ROOT}" && composer require cipi/gui:@dev --no-interaction --prefer-dist --no-ansi); then
-        composer_rc=$?
+    panel_composer "${CIPI_GUI_ROOT}" require cipi/gui:@dev --no-interaction --prefer-dist --no-ansi || composer_rc=$?
+    if [[ "$composer_rc" -ne 0 ]]; then
         warn "Composer require cipi/gui:@dev failed (exit ${composer_rc})"
     fi
     _gui_ensure_vendor_copy "${CIPI_GUI_ROOT}" || true
@@ -620,7 +625,7 @@ gui_setup() {
     ensure_cipi_gui_permissions
 
     if [[ -f "${CIPI_GUI_ROOT}/.env" ]]; then
-        sed -i "s|^APP_URL=.*|APP_URL=https://${domain}|" "${CIPI_GUI_ROOT}/.env"
+        panel_env_set "${CIPI_GUI_ROOT}/.env" APP_URL "https://${domain}" || true
     fi
     _gui_ensure_log_stack_env
     _gui_ensure_session_driver_env
@@ -736,9 +741,7 @@ _gui_require_off_tunnel() {
 _gui_set_app_url() {
     local envf="${CIPI_GUI_ROOT}/.env"
     [[ -f "$envf" ]] || return 0
-    sed -i "s|^APP_URL=.*|APP_URL=https://${1}|" "$envf"
-    chown www-data:www-data "$envf" 2>/dev/null || true
-    chmod 640 "$envf" 2>/dev/null || true
+    panel_env_set "$envf" APP_URL "https://${1}" || true
 }
 
 # Same panel, admins, 2FA and saved connections on a new domain. The old
@@ -860,8 +863,11 @@ gui_upgrade() {
         exit 1
     }
     chmod 700 "$backup_dir"
-    [[ -f "${CIPI_GUI_ROOT}/.env" ]] && cp "${CIPI_GUI_ROOT}/.env" "${backup_dir}/.env"
-    [[ -f "${CIPI_GUI_ROOT}/database/database.sqlite" ]] && cp "${CIPI_GUI_ROOT}/database/database.sqlite" "${backup_dir}/database.sqlite"
+    # Read as www-data: what root copies from these two names ends up in the
+    # new tree, owned by www-data — whatever file they had been made to
+    # point at.
+    panel_backup_file "${CIPI_GUI_ROOT}/.env" "${backup_dir}/.env"
+    panel_backup_file "${CIPI_GUI_ROOT}/database/database.sqlite" "${backup_dir}/database.sqlite"
 
     build_dir=$(_gui_new_build_dir) || exit 1
     composer create-project laravel/laravel "$build_dir" --no-interaction --prefer-dist || {
@@ -1006,15 +1012,17 @@ gui_remove() {
 # Reset primary admin (email/name/password + clear 2FA). Works with any cipi/gui version.
 _gui_reset_primary_admin() {
     local email="${1:-}" password="$2" name="${3:-}"
-    local workdir="${CIPI_GUI_ROOT}/storage/app"
-    local payload="${workdir}/cipi-reset-$$.json"
+    local payload
     local runner="${CIPI_LIB}/gui-reset-admin.php"
     local rc=0
 
     [[ -f "$runner" ]] || { error "Missing ${runner}"; return 1; }
 
-    mkdir -p "$workdir"
     ensure_cipi_gui_permissions
+    # The new password travels in a file of root's making, outside the
+    # panel's tree: storage/app is www-data's, and a name root wrote there
+    # and then chowned could have been a link to anything.
+    payload=$(mktemp /run/cipi-gui-reset.XXXXXXXX 2>/dev/null || mktemp) || { error "mktemp failed"; return 1; }
 
     jq -n \
         --arg email "$email" \
@@ -1025,7 +1033,7 @@ _gui_reset_primary_admin() {
             password: $password,
             name: (if ($name | length) > 0 then $name else null end)
         }' > "$payload"
-    chown www-data:www-data "$payload"
+    chown -h www-data:www-data "$payload"
     chmod 600 "$payload"
 
     if ! (cd "${CIPI_GUI_ROOT}" && sudo -u www-data php "$runner" "$payload" "${CIPI_GUI_ROOT}"); then
@@ -1078,9 +1086,9 @@ GUI_SSO_KEYS="CIPI_GUI_SSO_ISSUER CIPI_GUI_SSO_CLIENT_ID CIPI_GUI_SSO_CLIENT_SEC
 # KEY=value in the panel .env: replaced when present, appended otherwise.
 # The value is double-quoted, so a secret with # or spaces survives Laravel's
 # parser; a " inside it is escaped.
-_gui_env_set() {
-    local envf="${CIPI_GUI_ROOT}/.env" key="$1" val="${2//\"/\\\"}" tmp
-    [[ -f "$envf" ]] || return 1
+_gui_env_set_do() {   # <file> <KEY> <value>
+    local envf="$1" key="$2" val="${3//\"/\\\"}" tmp
+    [[ -f "$envf" && ! -L "$envf" ]] || return 1
     tmp=$(mktemp) || return 1
     if grep -q "^${key}=" "$envf"; then
         awk -v k="$key" -v v="$val" 'index($0, k"=") == 1 { print k "=\"" v "\""; next } { print }' "$envf" > "$tmp"
@@ -1088,22 +1096,45 @@ _gui_env_set() {
         cat "$envf" > "$tmp"
         printf '%s="%s"\n' "$key" "$val" >> "$tmp"
     fi
-    cat "$tmp" > "$envf" && rm -f "$tmp"
+    cat "$tmp" > "$envf" && rm -f "$tmp" && chmod 640 "$envf"
 }
-
-_gui_env_unset() {
-    local envf="${CIPI_GUI_ROOT}/.env" key="$1" tmp
-    [[ -f "$envf" ]] || return 0
+_gui_env_unset_do() {   # <file> <KEY>
+    local envf="$1" key="$2" tmp
+    [[ -f "$envf" && ! -L "$envf" ]] || return 0
     tmp=$(mktemp) || return 1
     grep -v "^${key}=" "$envf" > "$tmp" || true
     cat "$tmp" > "$envf" && rm -f "$tmp"
 }
+# The panel's .env belongs to www-data: it is edited and read as www-data
+# (app_call / panel_env_read in common.sh).
+_gui_env_set() {
+    local envf="${CIPI_GUI_ROOT}/.env"
+    [[ -f "$envf" ]] || return 1
+    if _panel_tree_is_www "$envf"; then
+        _panel_tree_hand_back "$envf" || return 1
+        app_call www-data "_gui_env_set_do" _gui_env_set_do "$envf" "$1" "${2:-}" < /dev/null
+        return
+    fi
+    _gui_env_set_do "$envf" "$1" "${2:-}"
+}
+
+_gui_env_unset() {
+    local envf="${CIPI_GUI_ROOT}/.env"
+    [[ -f "$envf" ]] || return 0
+    if _panel_tree_is_www "$envf"; then
+        _panel_tree_hand_back "$envf" || return 1
+        app_call www-data "_gui_env_unset_do" _gui_env_unset_do "$envf" "$1" < /dev/null
+        return
+    fi
+    _gui_env_unset_do "$envf" "$1"
+}
 
 # The value of KEY in the panel .env, without the quotes Laravel accepts.
 _gui_env_get() {
-    local envf="${CIPI_GUI_ROOT}/.env" line
+    local envf="${CIPI_GUI_ROOT}/.env" line text
     [[ -f "$envf" ]] || return 0
-    line=$(grep "^${1}=" "$envf" | tail -1 | cut -d= -f2-) || true
+    text=$(panel_env_read "$envf") || text=""
+    line=$(grep "^${1}=" <<< "$text" | tail -1 | cut -d= -f2-) || true
     line="${line%\"}"; line="${line#\"}"
     line="${line%\'}"; line="${line#\'}"
     printf '%s' "${line//\\\"/\"}"
@@ -1113,8 +1144,6 @@ _gui_env_get() {
 # that adds users.sso_subject (cipi/gui 4.0.2) is idempotent, so it runs
 # here too for a panel updated before the column existed.
 _gui_sso_apply() {
-    chown www-data:www-data "${CIPI_GUI_ROOT}/.env" 2>/dev/null || true
-    chmod 640 "${CIPI_GUI_ROOT}/.env" 2>/dev/null || true
     (cd "${CIPI_GUI_ROOT}" && sudo -u www-data php artisan optimize:clear >/dev/null 2>&1) || true
     (cd "${CIPI_GUI_ROOT}" && sudo -u www-data php artisan migrate --force >/dev/null 2>&1) || true
 }

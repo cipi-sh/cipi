@@ -264,7 +264,7 @@ _ssl_apply_vhost() {
 _ssl_installed() {
     local app="$1" d="$2" how="$3" details="${4:-}" kind=""
     [[ "$how" == dns-01* ]] && kind=" (DNS-01)"
-    sed -i "s|^APP_URL=http://|APP_URL=https://|" "/home/${app}/shared/.env" 2>/dev/null || true
+    app_sed "$app" "/home/${app}/shared/.env" "s|^APP_URL=http://|APP_URL=https://|" 2>/dev/null || true
     # A certificate turns ws:// into wss:// for a Reverb app: without this
     # the browser blocks the socket as mixed content while nginx is already
     # serving it over TLS, and nothing shows up in the Reverb log.

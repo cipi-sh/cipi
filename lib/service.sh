@@ -37,6 +37,13 @@ _resolve_services() {
             for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
                 systemd_unit_exists "php${v}-fpm" && list+=("php${v}-fpm")
             done
+            # The apps' own Valkey instances (cipi valkey).
+            local vc
+            for vc in /etc/cipi-valkey/*.conf; do
+                [[ -f "$vc" ]] || continue
+                vc="${vc##*/}"; vc="${vc%.conf}"
+                [[ "$vc" =~ ^[a-z][a-z0-9]{2,31}$ ]] && list+=("cipi-valkey@${vc}")
+            done
             echo "${list[@]}"
             ;;
         php)
@@ -57,6 +64,10 @@ _resolve_services() {
             echo "valkey-server"
             ;;
         php*-fpm)
+            echo "$name"
+            ;;
+        cipi-valkey@*)
+            [[ "$name" =~ ^cipi-valkey@[a-z][a-z0-9]{2,31}$ ]] || { error "Unknown service: ${name}"; return 1; }
             echo "$name"
             ;;
         *)

@@ -333,8 +333,14 @@ _mon_check_http_5xx() {
     local count_lim ratio_lim
     count_lim=$(_mon_cfg_val http_5xx count 20); [[ "$count_lim" =~ ^[0-9]+$ ]] || count_lim=20
     ratio_lim=$(_mon_cfg_val http_5xx ratio 5);  [[ "$ratio_lim" =~ ^[0-9]+$ ]] || ratio_lim=5
+    # /var/log/cipi-apps/<app> since 5.9.0. An app whose vhost was left on
+    # ~/logs (the migration says so) still has a regular file there; the
+    # symlink every moved app has is not read twice.
     shopt -s nullglob
-    local logs=(/home/*/logs/nginx-access.log)
+    local logs=(/var/log/cipi-apps/*/nginx-access.log) old
+    for old in /home/*/logs/nginx-access.log; do
+        [[ -f "$old" && ! -L "$old" ]] && logs+=("$old")
+    done
     shopt -u nullglob
     if [[ ${#logs[@]} -eq 0 ]]; then
         _mon_result ok "no app access logs"
@@ -344,7 +350,11 @@ _mon_check_http_5xx() {
     local status=ok detail="" log app off_file size prev counts total five
     local worst_five=0 worst_total=0
     for log in "${logs[@]}"; do
-        app=$(basename "$(dirname "$(dirname "$log")")")
+        if [[ "$log" == /var/log/cipi-apps/* ]]; then
+            app=$(basename "$(dirname "$log")")
+        else
+            app=$(basename "$(dirname "$(dirname "$log")")")
+        fi
         off_file="${MONITOR_STATE_DIR}/5xx_$(md5sum <<<"$log" | cut -c1-12).off"
         size=$(stat -c %s "$log" 2>/dev/null || echo 0)
         [[ "$size" =~ ^[0-9]+$ ]] || size=0

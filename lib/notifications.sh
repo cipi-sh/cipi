@@ -56,6 +56,11 @@ nginx_upgrade|Services|Nginx packages upgraded
 mariadb_upgrade|Database|MariaDB packages upgraded
 pgsql_upgrade|Database|PostgreSQL packages upgraded
 valkey_upgrade|Services|Valkey packages upgraded
+node_upgrade|Node|Node.js runtimes upgraded (automatic update)
+composer_upgrade|Updates|Composer upgraded (automatic update)
+pending_report|Updates|A reboot, a patch or a warning is waiting (daily check)
+reboot|Updates|Server reboot requested or automatic
+valkey_isolate|Services|App moved to its own Valkey instance, or back
 package_install|Packages|Optional package installed
 package_remove|Packages|Optional package removed
 db_create|Database|Database created

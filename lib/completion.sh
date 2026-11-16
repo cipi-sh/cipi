@@ -55,8 +55,8 @@ _cipi_complete() {
         words=("${COMP_WORDS[@]}"); cword=$COMP_CWORD
     fi
 
-    local commands="status disk version self-update service app use node alias domains www redirect proxy auth basicauth deploy worker schedule health monitor db search ssl php package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh smtp notifications reset credentials completion help"
-    local topics="app use node domains www redirect proxy deploy worker schedule health monitor db search service ssl php package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui smtp notifications reset credentials server completion all"
+    local commands="status disk version self-update pending autoupdate reboot valkey service app use node alias domains www redirect proxy auth basicauth deploy worker schedule health monitor db search ssl php package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh smtp notifications reset credentials completion help"
+    local topics="app use node domains www redirect proxy deploy worker schedule health monitor db search service ssl php package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui smtp notifications reset credentials server updates valkey completion all"
 
     # skip a leading path/wrapper (e.g. `sudo cipi`, `/usr/local/bin/cipi`)
     local start=1 j
@@ -104,6 +104,32 @@ _cipi_complete() {
         completion)  COMPREPLY=( $(compgen -W "bash zsh --print" -- "$cur") ); return ;;
         self-update) sub="--check" ;;
         disk)        sub="db --json" ;;
+        pending)     sub="--json" ;;
+        autoupdate|autoupdates)
+            case $pos in
+                1) sub="status on off run" ;;
+                2) case "$w1" in on|off|run) sub="nginx mariadb pgsql valkey node composer" ;; esac ;;
+            esac ;;
+        reboot)
+            case $pos in
+                1) sub="status now auto" ;;
+                2) case "$w1" in
+                       now)  sub="--yes" ;;
+                       auto) sub="on off" ;;
+                   esac ;;
+                3) case "$w2" in on) sub="--at=" ;; esac ;;
+            esac ;;
+        valkey)
+            case $pos in
+                1) sub="list isolate share restart flush-shared" ;;
+                2) case "$w1" in
+                       isolate) sub="$(_cipi_apps) --all --no-copy --maxmemory= --policy= --yes" ;;
+                       share)   sub="$(_cipi_apps) --no-copy --yes" ;;
+                       restart) sub="$(_cipi_apps)" ;;
+                       list)    sub="--json" ;;
+                       flush-shared) sub="--yes" ;;
+                   esac ;;
+            esac ;;
 
         service)
             case $pos in
@@ -118,7 +144,7 @@ _cipi_complete() {
             case $pos in
                 1) sub="create list show edit convert clone reverb limits delete suspend unsuspend env logs tinker artisan run deploy-config reset-password reset-db-password fix-permissions" ;;
                 2) case "$w1" in
-                       create) sub="--custom --octane --engine= --node= --framework= --node-version= --build= --start= --output= --health-path=" ;;
+                       create) sub="--custom --octane --engine= --valkey= --node= --framework= --node-version= --build= --start= --output= --health-path=" ;;
                        reverb) sub="enable disable status" ;;
                        run)    sub="--commands" ;;
                        list)   ;;
@@ -177,8 +203,9 @@ _cipi_complete() {
             esac ;;
 
         deploy)
-            if [[ $pos -eq 1 ]]; then sub="$(_cipi_apps)"
-            else sub="--snapshot --rollback --releases --log --status --tail= --key --webhook --unlock --trust-host= --rollback-on-unhealthy --audit --days= --json"; fi ;;
+            if [[ $pos -eq 1 ]]; then sub="$(_cipi_apps) --last --history"
+            elif [[ $pos -eq 2 && "$w1" == "--history" ]]; then sub="$(_cipi_apps)"
+            else sub="--snapshot --rollback --releases --history --limit= --last --log --status --tail= --key --webhook --unlock --trust-host= --rollback-on-unhealthy --audit --days= --json"; fi ;;
 
         use)
             [[ $pos -eq 1 ]] && sub="$(_cipi_apps) --clear" ;;
@@ -204,11 +231,13 @@ _cipi_complete() {
 
         db)
             case $pos in
-                1) sub="engines install uninstall default create list delete backup restore password upgrade" ;;
+                1) sub="engines install uninstall default create list delete link unlink backup restore password upgrade" ;;
                 2) case "$w1" in
                        install|uninstall|default|upgrade) sub="mariadb pgsql" ;;
+                       create) sub="--name= --engine= --user= --app=" ;;
+                       list)   sub="--engine= --json" ;;
                    esac ;;
-                3) case "$w1" in upgrade) sub="--yes" ;; esac ;;
+                3) case "$w1" in upgrade) sub="--yes" ;; link) sub="$(_cipi_apps)" ;; esac ;;
             esac ;;
 
         node)
@@ -310,6 +339,9 @@ _cipi_complete() {
                        profile)     sub="list show add edit remove enable disable" ;;
                        destination) sub="list show add edit remove test" ;;
                        key)         sub="show rotate" ;;
+                       status)      sub="--json" ;;
+                       run)         sub="--profile= --dry-run --detach" ;;
+                       list)        sub="--profile= --json" ;;
                    esac ;;
             esac ;;
 
@@ -346,7 +378,11 @@ _cipi_complete() {
                        ip-whitelist) sub="show add remove set allow-all" ;;
                        *.*)          sub="--no-ssl --no-token --skip-dns-check" ;;
                    esac ;;
-                3) [[ "$w1" == move ]] && sub="--no-ssl --skip-dns-check" ;;
+                3) case "$w1" in
+                       move)  sub="--no-ssl --skip-dns-check" ;;
+                       token) [[ "$w2" == create ]] && sub="--full-access --name= --abilities= --expires=" ;;
+                   esac ;;
+                *) [[ "$w1" == token && "$w2" == create ]] && sub="--full-access --name= --abilities= --expires=" ;;
             esac ;;
 
         gui|panel)
@@ -379,7 +415,7 @@ _cipi_complete() {
         ssh)
             case $pos in
                 1) sub="list add remove rename apps" ;;
-                2) case "$w1" in apps) sub="enable disable --json" ;; esac ;;
+                2) case "$w1" in apps) sub="enable disable sync --json" ;; esac ;;
                 3) case "$w1" in apps) sub="$(_cipi_apps) --all" ;; esac ;;
             esac ;;
 

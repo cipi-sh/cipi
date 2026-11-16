@@ -982,30 +982,33 @@ _codecommit_remove_ssh_key() {
 _codecommit_app_pubkey() {
     local app="$1"
     local home="/home/${app}"
-    mkdir -p "${home}/.ssh"
+    # ~/.ssh is the app user's: made, written and read by that user (app_as
+    # in common.sh), here and in the functions below.
+    app_mkdir "$app" "${home}/.ssh"
     if [[ ! -f "${home}/.ssh/id_rsa.pub" ]]; then
         sudo -u "$app" ssh-keygen -t rsa -b 4096 -C "${app}@cipi-codecommit" -f "${home}/.ssh/id_rsa" -N "" -q
-        chmod 600 "${home}/.ssh/id_rsa"
-        chmod 644 "${home}/.ssh/id_rsa.pub"
-        chown "${app}:${app}" "${home}/.ssh/id_rsa" "${home}/.ssh/id_rsa.pub" 2>/dev/null || true
+        app_sh "$app" 'chmod 600 "$1/id_rsa"; chmod 644 "$1/id_rsa.pub"' "${home}/.ssh" < /dev/null
     fi
-    cat "${home}/.ssh/id_rsa.pub"
+    app_read "$app" "${home}/.ssh/id_rsa.pub"
 }
 
 _codecommit_write_ssh_config() {
     local app="$1" key_id="$2"
     [[ -z "$app" || -z "$key_id" || "$key_id" == "null" ]] && return 0
     local cfg="/home/${app}/.ssh/config"
-    mkdir -p "/home/${app}/.ssh"
-    # Drop a previous Cipi CodeCommit block, then write the SSH Key ID as User.
-    if [[ -f "$cfg" ]]; then
-        awk '
-            /^# cipi-codecommit-begin$/ {skip=1; next}
-            /^# cipi-codecommit-end$/ {skip=0; next}
-            !skip {print}
-        ' "$cfg" > "${cfg}.tmp" && mv "${cfg}.tmp" "$cfg"
-    fi
-    cat >> "$cfg" <<EOF
+    app_mkdir "$app" "/home/${app}/.ssh"
+    # Drop a previous Cipi CodeCommit block, then write the SSH Key ID as User:
+    # the file without the old block, then the new one, written whole by the
+    # app user (app_write takes all of its input before it opens the file).
+    {
+        if [[ -f "$cfg" ]]; then
+            app_read "$app" "$cfg" | awk '
+                /^# cipi-codecommit-begin$/ {skip=1; next}
+                /^# cipi-codecommit-end$/ {skip=0; next}
+                !skip {print}
+            ' || true
+        fi
+        cat <<EOF
 # cipi-codecommit-begin
 Host git-codecommit.*.amazonaws.com
   User ${key_id}
@@ -1013,8 +1016,7 @@ Host git-codecommit.*.amazonaws.com
   IdentitiesOnly yes
 # cipi-codecommit-end
 EOF
-    chown "${app}:${app}" "$cfg" 2>/dev/null || true
-    chmod 600 "$cfg"
+    } | app_write "$app" "$cfg" 600
 }
 
 # ── DISPATCH ─────────────────────────────────────────────────
@@ -1313,7 +1315,7 @@ _git_check() {
         [[ -z "$repository" ]] && { info "${target}: no git repository"; return 0; }
         branch=$(app_get "$target" branch)
         custom=$(app_get "$target" custom)
-        [[ -f "/home/${target}/.ssh/id_ed25519.pub" ]] && pub_key=$(cat "/home/${target}/.ssh/id_ed25519.pub")
+        [[ -f "/home/${target}/.ssh/id_ed25519.pub" ]] && pub_key=$(app_read "$target" "/home/${target}/.ssh/id_ed25519.pub" || true)
         [[ "$custom" == "true" && "$(app_get "$target" runtime)" != "node" ]] && skip="skip_webhook"
         echo -e "\n${BOLD}${target}${NC} ${DIM}${repository} (${branch:-main})${NC}"
         if git_verify_repo_access "$target" "$repository" "${branch:-main}" \
@@ -1435,11 +1437,7 @@ git_recreate_webhook() {
         wt=$(generate_token)
         app_set "$app" webhook_token "$wt"
         if [[ -f "/home/${app}/shared/.env" ]]; then
-            if grep -q '^CIPI_WEBHOOK_TOKEN=' "/home/${app}/shared/.env" 2>/dev/null; then
-                sed -i "s|^CIPI_WEBHOOK_TOKEN=.*|CIPI_WEBHOOK_TOKEN=${wt}|" "/home/${app}/shared/.env"
-            else
-                echo "CIPI_WEBHOOK_TOKEN=${wt}" >> "/home/${app}/shared/.env"
-            fi
+            _git_env_webhook_token "$app" "$wt"
             success "CIPI_WEBHOOK_TOKEN updated in shared/.env"
         fi
     fi
@@ -1510,38 +1508,48 @@ git_update_webhook_domain() {
 
 # Generate a new ed25519 deploy key for an app and swap it in authorized_keys
 # (Deployer SSHs to localhost with this key). Prints the new public key.
+# CIPI_WEBHOOK_TOKEN in the app's shared/.env, set as the app user.
+_git_env_webhook_token() {   # <app> <token>
+    local app="$1" wt="$2" env="/home/${1}/shared/.env" cur=""
+    cur=$(app_read "$app" "$env") || cur=""
+    if grep -q '^CIPI_WEBHOOK_TOKEN=' <<< "$cur"; then
+        app_sed "$app" "$env" "s|^CIPI_WEBHOOK_TOKEN=.*|CIPI_WEBHOOK_TOKEN=${wt}|"
+    else
+        echo "CIPI_WEBHOOK_TOKEN=${wt}" | app_append "$app" "$env"
+    fi
+}
+
 _git_rotate_local_key() {
     local app="$1"
     local home="/home/${app}"
-    local old_pub=""
-    [[ -f "${home}/.ssh/id_ed25519.pub" ]] && old_pub=$(cat "${home}/.ssh/id_ed25519.pub")
-    mkdir -p "${home}/.ssh"
-    chmod 700 "${home}/.ssh"
-    chown "${app}:${app}" "${home}/.ssh"
-    rm -f "${home}/.ssh/id_ed25519" "${home}/.ssh/id_ed25519.pub"
+    local old_pub="" blob=""
+    # ~/.ssh is the app user's: the key pair is made and authorized_keys is
+    # edited by that user (app_as in common.sh). Root ran mkdir, chmod and
+    # chown on ~/.ssh, by name — with ~/.ssh a symlink, on the directory it
+    # pointed at, which became the app's — and then touch, mv and chown on
+    # the files inside.
+    [[ -f "${home}/.ssh/id_ed25519.pub" ]] && old_pub=$(app_read "$app" "${home}/.ssh/id_ed25519.pub" || true)
+    app_mkdir "$app" "${home}/.ssh" 700
+    app_rm "$app" "${home}/.ssh/id_ed25519" "${home}/.ssh/id_ed25519.pub"
     sudo -u "$app" ssh-keygen -t ed25519 -C "${app}@cipi" -f "${home}/.ssh/id_ed25519" -N "" -q
-    chmod 600 "${home}/.ssh/id_ed25519"
-    chmod 644 "${home}/.ssh/id_ed25519.pub"
-    chown "${app}:${app}" "${home}/.ssh/id_ed25519" "${home}/.ssh/id_ed25519.pub"
-    local new_pub; new_pub=$(cat "${home}/.ssh/id_ed25519.pub")
+    app_sh "$app" 'chmod 600 "$1/id_ed25519"; chmod 644 "$1/id_ed25519.pub"' "${home}/.ssh" < /dev/null
+    local new_pub; new_pub=$(app_read "$app" "${home}/.ssh/id_ed25519.pub")
     local ak="${home}/.ssh/authorized_keys"
-    touch "$ak"
-    if [[ -n "$old_pub" ]]; then
-        local blob; blob=$(_git_key_blob "$old_pub")
+    [[ -n "$old_pub" ]] && blob=$(_git_key_blob "$old_pub")
+    # The old key's line out, the new one in: a new file renamed over the old
+    # one when there is a line to drop, an append when there is not.
+    printf '%s\n' "$new_pub" | _app_file_op "$app" "$ak" '
+        ak="$1"; blob="$2"; umask 077
+        touch "$ak" || exit 1
         if [[ -n "$blob" ]]; then
-            local tmp; tmp=$(mktemp)
-            grep -vF "$blob" "$ak" > "$tmp" || true
-            printf '%s\n' "$new_pub" >> "$tmp"
-            mv "$tmp" "$ak"
+            t=$(mktemp "${ak}.XXXXXX") || exit 1
+            grep -vF -- "$blob" "$ak" > "$t" || true
+            cat >> "$t" && mv -f "$t" "$ak" || { rm -f "$t"; exit 1; }
         else
-            printf '%s\n' "$new_pub" >> "$ak"
+            cat >> "$ak" || exit 1
         fi
-    else
-        printf '%s\n' "$new_pub" >> "$ak"
-    fi
-    chown "${app}:${app}" "$ak"
-    chmod 600 "$ak"
-    chmod 700 "${home}/.ssh"
+        chmod 600 "$ak"' "$blob"
+    app_as "$app" chmod 700 "${home}/.ssh" < /dev/null
     printf '%s\n' "$new_pub"
 }
 
@@ -1604,7 +1612,7 @@ git_refresh_app() {
         did_rotate_keys="true"
         success "SSH key generated"
     else
-        pub_key=$(cat "$pub_path")
+        pub_key=$(app_read "$app" "$pub_path")
     fi
 
     local webhook_url="https://$(domain_url_host "$domain")/cipi/webhook"
@@ -1618,11 +1626,7 @@ git_refresh_app() {
         wt=$(generate_token)
         app_set "$app" webhook_token "$wt"
         if [[ -f "${home}/shared/.env" ]]; then
-            if grep -q '^CIPI_WEBHOOK_TOKEN=' "${home}/shared/.env" 2>/dev/null; then
-                sed -i "s|^CIPI_WEBHOOK_TOKEN=.*|CIPI_WEBHOOK_TOKEN=${wt}|" "${home}/shared/.env"
-            else
-                echo "CIPI_WEBHOOK_TOKEN=${wt}" >> "${home}/shared/.env"
-            fi
+            _git_env_webhook_token "$app" "$wt"
         fi
         success "Webhook secret rotated"
     fi
@@ -1635,7 +1639,7 @@ git_refresh_app() {
     step "Refreshing ${label} deploy key..."
     if [[ "$provider" == "codecommit" ]]; then
         if [[ "$rotate_keys" == "true" ]]; then
-            rm -f "${home}/.ssh/id_rsa" "${home}/.ssh/id_rsa.pub"
+            app_rm "$app" "${home}/.ssh/id_rsa" "${home}/.ssh/id_rsa.pub" || true
         fi
         pub_key=$(_codecommit_app_pubkey "$app") || {
             error "${app}: could not generate CodeCommit RSA key"

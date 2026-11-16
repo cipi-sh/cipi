@@ -67,7 +67,7 @@ _help_topics_list() {
     cat <<'EOF'
 app  use  node  domains  www  redirect  proxy  deploy  worker  schedule  health  monitor  db  search  service  ssl
 php  package  auth  basicauth  ssh  firewall  ban  crowdsec  zt  scan  compliance  backup  sync
-git  ini  yml  nginx  api  gui  smtp  notifications  reset  credentials  server  completion
+git  ini  yml  nginx  api  gui  smtp  notifications  reset  credentials  server  updates  valkey  completion
 EOF
 }
 
@@ -90,6 +90,9 @@ show_help() {
     _help_cmd "cipi disk"                "Disk usage: server and per app  ${DIM}db · [--json]${NC}"
     _help_cmd "cipi version"             "Cipi version"
     _help_cmd "cipi self-update"         "Update Cipi  ${DIM}[--check]${NC}"
+    _help_cmd "cipi pending"             "What is waiting: a reboot, a patch, a warning  ${DIM}[--json]${NC}"
+    _help_cmd "cipi autoupdate ..."      "Nightly patches: nginx, databases, Valkey, Node, Composer  ${DIM}on|off|run${NC}"
+    _help_cmd "cipi reboot ..."          "Is a reboot needed; restart now or automatically  ${DIM}now|auto on|off${NC}"
     _help_cmd "cipi completion bash|zsh" "Shell tab-completion"
     _help_cmd "cipi service ..."           "nginx, mariadb, php-fpm, ..."
     echo ""
@@ -114,6 +117,7 @@ show_help() {
     _help_cmd "cipi scan ..."              "Nightly malware scan (opt-in)  ${DIM}enable|disable|<app>${NC}"
     _help_cmd "cipi compliance ..."        "ISO 27001 / SOC 2 evidence  ${DIM}check|report${NC}"
     _help_cmd "cipi auth / basicauth ..."  "Composer auth.json & HTTP basic auth"
+    _help_cmd "cipi valkey ..."            "One Valkey instance per app  ${DIM}list|isolate|share${NC}"
     _help_cmd "cipi reset ..."             "Reset root / DB / Valkey passwords"
     _help_cmd "cipi credentials ..."       "The server passwords again, or as CSV for a password manager  ${DIM}[export]${NC}"
     echo ""
@@ -149,6 +153,40 @@ show_help_topic() {
             _help_cmd "cipi app limits <app> --disk=<GB>|none" "Soft disk limit for an app: alerts, blocks nothing"
             _help_cmd "cipi version"                   "Cipi version"
             _help_cmd "cipi self-update [--check]"     "Update Cipi"
+            _help_cmd "cipi pending [--json]"          "What is waiting for you  ${DIM}(cipi help updates)${NC}"
+            echo ""
+            ;;
+
+        updates|update|autoupdate|pending|reboot|patch|patches)
+            _help_topic_header "Updates, pending work, reboot"
+            echo ""
+            _help_cmd "cipi pending [--json]"          "A reboot, a patch or a warning that is waiting for you"
+            _help_cmd "cipi autoupdate"                "What is patched every night, and how the last run went"
+            _help_cmd "cipi autoupdate on|off [name]"  "All components, or one"
+            _help_cmd "cipi autoupdate run [name]"     "Patch now (what the nightly job runs)"
+            _help_cmd "cipi reboot"                    "Is a reboot required, and since when"
+            _help_cmd "cipi reboot now [--yes]"        "Restart the server in one minute"
+            _help_cmd "cipi reboot auto on [--at=HH:MM]" "Restart at night, only when one is required  ${DIM}(default 04:45)${NC}"
+            _help_cmd "cipi reboot auto off"           "Back to a reboot by hand"
+            _help_note "names: nginx mariadb pgsql valkey node composer — patch releases only, 04:20 every night."
+            _help_note "A database is left for the next night while a dump or a deploy is running."
+            _help_note "PHP has its own job (cipi php upgrade, 03:30); Ubuntu's security updates are unattended-upgrades."
+            _help_note "pending is checked every morning and mailed when the list changes (trigger pending_report)."
+            _help_note "It also names PHP extensions installed with PECL: Cipi installs extensions from apt only."
+            echo ""
+            ;;
+
+        valkey|redis|cache)
+            _help_topic_header "Valkey per app"
+            echo ""
+            _help_cmd "cipi valkey list [--json]"      "Which app uses which instance"
+            _help_cmd "cipi valkey isolate <app>"      "Give the app its own instance: own port, own password, own data"
+            _help_cmd "cipi valkey isolate --all"      "Every app that still uses the shared one"
+            _help_cmd "cipi valkey share <app>"        "Back to the shared instance"
+            _help_cmd "cipi valkey restart <app>"      "Restart one app's instance"
+            _help_note "New apps get their own instance. An existing app keeps the shared one until you isolate it:"
+            _help_note "its keys are copied, .env is switched (REDIS_HOST/PORT/PASSWORD) and its workers restarted."
+            _help_note "Options: --no-copy (start empty)  --maxmemory=256mb  --yes"
             echo ""
             ;;
 
@@ -178,15 +216,15 @@ show_help_topic() {
             _help_cmd "cipi service stop <service>"         "Stop a service"
             _help_cmd "cipi service upgrade [name]"         "Patch nginx / MariaDB / PostgreSQL / Valkey  ${DIM}[--yes]${NC}"
             _help_note "services: nginx mariadb postgresql supervisor fail2ban crowdsec cloudflared php<ver>-fpm"
-            _help_note "upgrade is patch-level only and asks first (these are not unattended)."
-            _help_note "No name lists installed versions. PHP: cipi php upgrade (weekly cron)."
+            _help_note "upgrade is patch-level only and asks first. The same runs every night"
+            _help_note "without asking: cipi autoupdate. No name lists installed versions."
             echo ""
             ;;
 
         app|apps)
             _help_topic_header "Apps"
             _help_h "Lifecycle"
-            _help_cmd "cipi app create [--custom]"     "Create app  ${DIM}[--env=production|staging|…] [--engine=] [--octane] [--node-build=CMD]${NC}"
+            _help_cmd "cipi app create [--custom]"     "Create app  ${DIM}[--env=production|staging|…] [--engine=] [--octane] [--valkey=own|shared] [--node-build=CMD]${NC}"
             _help_note "Without flags a menu asks the type (Laravel, custom, Node spa/static/ssr), FPM or Octane,"
             _help_note "the database engine, then the details and an optional asset build (npm ci && npm run build)."
             _help_note "Laravel Octane: --octane or --octane=frankenphp (no FPM; Nginx → Octane)"
@@ -294,7 +332,7 @@ show_help_topic() {
         auth)
             _help_topic_header "Composer auth.json"
             echo ""
-            _help_cmd "cipi auth create <app>"         "Create auth.json in shared  ${DIM}[--force]${NC}"
+            _help_cmd "cipi auth create <app>"         "Create auth.json in shared, then open it in the editor  ${DIM}[--force] [--no-edit]${NC}"
             _help_cmd "cipi auth edit <app>"           "Edit auth.json  ${DIM}[--file=PATH]${NC}"
             _help_cmd "cipi auth show <app>"           "Show auth.json content  ${DIM}[--json]${NC}"
             _help_cmd "cipi auth delete <app>"         "Delete auth.json  ${DIM}[--force]${NC}"
@@ -331,6 +369,8 @@ show_help_topic() {
             _help_cmd "cipi deploy <app> --snapshot"   "Deploy with DB dump first"
             _help_cmd "cipi deploy <app> --rollback"   "Rollback"
             _help_cmd "cipi deploy <app> --releases"   "List releases (number, date, commit)"
+            _help_cmd "cipi deploy <app> --history"    "Past deploys: result, release, duration  ${DIM}[--limit=30] [--json]${NC}"
+            _help_cmd "cipi deploy --last"             "Every app's last deploy  ${DIM}[--json]${NC}"
             _help_cmd "cipi deploy <app> --log[=N]"    "Timestamped deploy log"
             _help_cmd "cipi deploy <app> --status"     "Is a deploy running now? ${DIM}[--json] [--tail=N]${NC}"
             _help_cmd "cipi deploy <app> --key"        "Show SSH deploy key"
@@ -339,6 +379,9 @@ show_help_topic() {
             _help_cmd "cipi deploy <app> --trust-host=<host[:port]>" "Trust a custom Git server"
             _help_cmd "cipi deploy <app> --rollback-on-unhealthy" "Undo the release if it fails its healthcheck"
             _help_cmd "cipi deploy <app> --audit"      "Audit ledger  ${DIM}[--days=90] [--json]${NC}"
+            echo ""
+            _help_note "--history reads the rotated deploy logs too (deploy.log is rotated every"
+            _help_note "night), so a webhook deploy of last week still has its duration."
             echo ""
             _help_note "Both deploy paths (CLI and Git webhook) email on success and on failure,"
             _help_note "with different subjects, naming the release, the commit and its author,"
@@ -358,6 +401,11 @@ show_help_topic() {
             _help_cmd "cipi worker remove <app> <queue>" "Remove worker"
             _help_cmd "cipi worker restart <app>"      "Restart workers"
             _help_cmd "cipi worker horizon …"          "Horizon  ${DIM}enable|disable|status <app>${NC}"
+            echo ""
+            _help_note "A deploy that finds laravel/horizon installed, QUEUE_CONNECTION=redis in the"
+            _help_note ".env and no queue worker of its own turns Horizon on by itself. With workers"
+            _help_note "already there, or another queue connection, it says what to do and changes"
+            _help_note "nothing: the .env is never edited. cipi worker horizon disable keeps it off."
             echo ""
             ;;
 
@@ -426,9 +474,14 @@ show_help_topic() {
             _help_cmd "cipi db default <engine>"       "Set default engine"
             _help_cmd "cipi db upgrade [engine]"       "Patch MariaDB / PostgreSQL  ${DIM}[--yes]${NC}"
             _help_note "Omitting the engine upgrades every installed one. Brief downtime."
-            _help_cmd "cipi db create"                 "Create database  ${DIM}[--engine=]${NC}"
+            _help_cmd "cipi db create"                 "Create database  ${DIM}[--name=] [--engine=] [--app=<app>]${NC}"
             _help_note "Without --engine and with both engines installed, a menu asks MariaDB or PostgreSQL."
-            _help_cmd "cipi db list"                   "List databases  ${DIM}[--engine=]${NC}"
+            _help_note "--app=<app> shows the database as that app's (a WordPress on a custom app, a second"
+            _help_note "database of a Laravel app): in cipi db list, cipi app show and the panel."
+            _help_cmd "cipi db list"                   "List databases and the app each belongs to  ${DIM}[--engine=] [--json]${NC}"
+            _help_cmd "cipi db link <name> <app>"      "Show an existing database as an app's  ${DIM}[--engine=]${NC}"
+            _help_cmd "cipi db unlink <name>"          "Remove that link  ${DIM}[--engine=]${NC}"
+            _help_note "A link is a label: the database keeps its user and password, and stays when the app is deleted."
             _help_cmd "cipi db delete <name>"          "Delete database  ${DIM}[--engine=]${NC}"
             _help_cmd "cipi db backup <name>"          "Backup database  ${DIM}[--engine=]${NC}"
             _help_cmd "cipi db restore <name> <file>"  "Restore database  ${DIM}[--engine=]${NC}"
@@ -524,8 +577,11 @@ show_help_topic() {
             _help_cmd "cipi api upgrade"               "Full rebuild (fresh Laravel + package)"
             _help_cmd "cipi api status"                "Show API versions and status"
             _help_cmd "cipi api token list|create|revoke" "API token management"
+            _help_cmd "cipi api token create --full-access" "A token that may do everything  ${DIM}[--name= --expires=YYYY-MM-DD]${NC}"
+            _help_cmd "cipi api token create --abilities=a,b" "A token with a list of abilities, without the checklist"
             _help_cmd "cipi api ip-whitelist"          "API client IP allowlist  ${DIM}show|add|remove|set|allow-all${NC}"
             _help_cmd "cipi api fix-permissions"       "Fix panel API ownership (SQLite/logs)"
+            _help_note "full access is the wildcard ability: every endpoint and the MCP server, and the abilities later versions add"
             _help_note "ip-whitelist default * (all IPs); add GUI server + operator IPs before locking down"
             _help_note "The API needs a domain of its own (e.g. api.example.com), not an app's, pointed at this server first"
             _help_note "move flags: --no-ssl --skip-dns-check   remove flags: --force (alias: uninstall)"
@@ -605,6 +661,9 @@ show_help_topic() {
             _help_cmd "cipi ssh apps"                  "App users: SSH/SFTP access from outside  ${DIM}[--json]${NC}"
             _help_cmd "cipi ssh apps enable|disable <app>" "One app user (deploys keep working)"
             _help_cmd "cipi ssh apps enable|disable --all" "Every app user, and apps created later"
+            _help_cmd "cipi ssh apps sync"             "Rewrite Cipi's section of sshd_config"
+            _help_note "The server's keys (cipi ssh list) also log in as any app user, enabled or not."
+            _help_note "enabled: password and the app's own keys work too. disabled: the server's keys only."
             echo ""
             ;;
 
@@ -753,7 +812,7 @@ show_help_topic() {
             _help_topic_header "Backup"
             echo ""
             _help_cmd "cipi backup configure"            "The default bucket ('s3' in profiles; S3 / S3-compatible) and the local directory"
-            _help_cmd "cipi backup status"               "Destinations, profiles, last run, overdue"
+            _help_cmd "cipi backup status"               "Destinations, profiles, last run, overdue  ${DIM}[--json]${NC}"
             echo ""
             _help_note "More buckets — another provider, region or account — are named destinations:"
             _help_cmd "cipi backup destination list"               "local, s3 and every named S3 destination"
@@ -782,6 +841,7 @@ show_help_topic() {
             _help_note "  --encrypt | --no-encrypt      client-side AES-256"
             echo ""
             _help_cmd "cipi backup run [--profile=NAME] [--dry-run]" "Run now (--dry-run shows what it would take)"
+            _help_cmd "cipi backup run --detach [--profile=NAME]"   "Start it and return: output in backup.log, result in status"
             _help_cmd "cipi backup list [--profile=NAME]"           "Runs held on each destination"
             _help_cmd "cipi backup verify [--profile=NAME] [--deep]" "Check the newest run opens"
             _help_cmd "cipi backup prune [--profile=NAME] [--dry-run]" "Apply retention now (incl. pre-5.1 and removed-profile archives)"
@@ -933,6 +993,7 @@ show_help_all() {
 
     CIPI_HELP_INLINE=1
     show_help_topic server
+    show_help_topic updates
     show_help_topic service
     show_help_topic app
     show_help_topic domains
@@ -969,6 +1030,7 @@ show_help_all() {
     show_help_topic nginx
     show_help_topic smtp
     show_help_topic notifications
+    show_help_topic valkey
     show_help_topic reset
     show_help_topic completion
     unset CIPI_HELP_INLINE
@@ -1028,6 +1090,14 @@ show_status() {
     local count=0
     [[ -f "${CIPI_CONFIG}/apps.json" ]] && count=$(vault_read apps.json | jq 'length' 2>/dev/null || echo 0)
     echo -e "\n${BOLD}Apps:${NC} ${CYAN}${count}${NC}\n"
+
+    # A reboot, a patch or a warning that is waiting: printed only when
+    # there is one. Never the reason `cipi status` fails.
+    if [[ -f "${CIPI_LIB}/pending.sh" ]]; then
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/pending.sh"
+        ( pending_status_section ) 2>/dev/null || true
+    fi
 }
 
 main() {
@@ -1049,6 +1119,10 @@ main() {
         completion)           source "${CIPI_LIB}/completion.sh"; completion_command "$@" ;;
         use)        _maybe_cmd_help use "$@";        require_root; source "${CIPI_LIB}/use.sh";         use_command "$@" ;;
         status)     require_root; show_status ;;
+        pending)    _maybe_cmd_help updates "$@";    require_root; source "${CIPI_LIB}/pending.sh";     pending_command "$@" ;;
+        reboot)     _maybe_cmd_help updates "$@";    require_root; source "${CIPI_LIB}/pending.sh";     reboot_command "$@" ;;
+        autoupdate|autoupdates) _maybe_cmd_help updates "$@"; require_root; source "${CIPI_LIB}/autoupdate.sh"; autoupdate_command "$@" ;;
+        valkey)     _maybe_cmd_help valkey "$@";     require_root; source "${CIPI_LIB}/valkey.sh";      valkey_command "$@" ;;
         disk)       _maybe_cmd_help server "$@";     require_root; source "${CIPI_LIB}/disk.sh";        disk_command "$@" ;;
         app)        _maybe_cmd_help app "$@";        require_root; source "${CIPI_LIB}/app.sh";         app_command "$@" ;;
         alias)      _maybe_cmd_help domains "$@";    require_root; source "${CIPI_LIB}/app.sh";         alias_command "$@" ;;

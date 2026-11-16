@@ -93,9 +93,13 @@ _disk_sql_sizes() {
 # app was pointed at another one. A name ends up in a path, so anything that is
 # not a plain identifier (a SQLite file, for one) is ignored.
 _disk_app_dbnames() {
-    local app="$1" name
+    local app="$1" name=""
     echo "$app"
-    name=$(grep -m1 '^DB_DATABASE=' "/home/${app}/shared/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'[:space:]" || true)
+    # A plain file in a plain directory, or nothing: a name out of somebody
+    # else's .env would count that database as this app's.
+    if [[ ! -L "/home/${app}/shared" && ! -L "/home/${app}/shared/.env" ]]; then
+        name=$(grep -m1 '^DB_DATABASE=' "/home/${app}/shared/.env" 2>/dev/null | cut -d= -f2- | tr -d "\"'[:space:]" || true)
+    fi
     if [[ "$name" =~ ^[A-Za-z0-9_]+$ && "$name" != "$app" ]]; then
         echo "$name"
     fi

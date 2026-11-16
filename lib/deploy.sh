@@ -33,7 +33,11 @@ _deploy_assert_php_compat() {
 # `set -u` a missing one would kill the whole process with an opaque
 # "$1: unbound variable" instead of failing where the mistake is.
 deploy_app_home() { echo "/home/${1:-}"; }
-deploy_log_file() { echo "$(deploy_app_home "${1:-}")/logs/deploy.log"; }
+# The deploy log lives in root's /var/log/cipi-apps/<app> since 5.9.0
+# (~/logs/deploy.log is a symlink to it): `cipi deploy` appends to it as root
+# and used to chown it afterwards — in ~/logs, on whatever a symlink called
+# deploy.log pointed at. See app_log_dir in common.sh.
+deploy_log_file() { echo "/var/log/cipi-apps/${1:-}/deploy.log"; }
 
 # Release directory the `current` symlink points at ("54"), empty before the
 # first successful deploy or for custom apps (no releases/).
@@ -60,6 +64,10 @@ deploy_log_tee() {
 deploy_log_open() {
     local app="$1" trigger="$2" branch="$3" from="$4" lf
     lf=$(deploy_log_file "$app")
+    if declare -f app_log_dir_ensure >/dev/null 2>&1; then
+        app_log_dir_ensure "$app" || true
+        app_log_links "$app" deploy.log || true
+    fi
     mkdir -p "$(dirname "$lf")" 2>/dev/null || true
     touch "$lf" 2>/dev/null || true
     printf '[%(%Y-%m-%d %H:%M:%S)T] ===== deploy start  app=%s trigger=%s branch=%s from-release=%s =====\n' \
@@ -79,11 +87,26 @@ deploy_log_close() {
 
 deploy_command() {
     local app="${1:-}"; shift||true
-    [[ -z "$app" ]] && { error "Usage: cipi deploy <app> [--rollback|--releases|--log|--status|--key|--webhook|--snapshot|--snapshot-required|--rollback-on-unhealthy]"; exit 1; }
+    [[ -z "$app" ]] && { error "Usage: cipi deploy <app> [--rollback|--releases|--history|--last|--log|--status|--key|--webhook|--snapshot|--snapshot-required|--rollback-on-unhealthy]  ·  cipi deploy --last"; exit 1; }
+    # The two forms that only read, with the flag first: every app's last
+    # run, and one app's history. A Cipi older than 5.9.0 takes the flag for
+    # an app name and answers "not found"; `cipi deploy <app> --history` on
+    # it would deploy. A panel that cannot be sure of the version uses these.
+    case "$app" in
+        --last)
+            parse_args "$@"; _deploy_last ""; return ;;
+        --history)
+            app="${1:-}"; shift||true
+            [[ -n "$app" && "$app" != --* ]] || { error "Usage: cipi deploy --history <app> [--limit=N] [--json]"; exit 1; }
+            app_exists "$app" || { error "App '$app' not found"; exit 1; }
+            parse_args "$@"; _deploy_history "$app"; return ;;
+    esac
     app_exists "$app" || { error "App '$app' not found"; exit 1; }
     parse_args "$@"
 
     if   [[ "${ARG_rollback:-}" == "true" ]];        then _deploy_rollback "$app"
+    elif [[ "${ARG_history:-}" == "true" ]];         then _deploy_history "$app"
+    elif [[ "${ARG_last:-}" == "true" ]];            then _deploy_last "$app"
     elif [[ -n "${ARG_log:-}" ]];                    then _deploy_log_show "$app" "${ARG_log}"
     elif [[ "${ARG_releases:-}" == "true" ]];        then _deploy_releases "$app"
     elif [[ "${ARG_key:-}" == "true" ]];             then _deploy_key "$app"
@@ -158,7 +181,11 @@ _deploy_predeploy_snapshot() {
     step "Pre-deploy DB snapshot → ${dump}..."
     if db_dump_database "$eng" "$app" "$dump"; then
         success "Snapshot saved: ${dump}"
-        echo "$dump" > "/tmp/cipi-predeploy-${app}.path" 2>/dev/null || true
+        # Kept in memory for _deploy_run. It went through
+        # /tmp/cipi-predeploy-<app>.path: a name any local user could create
+        # first, and whatever path it then held was the one a failed deploy
+        # told the admin to restore.
+        CIPI_PREDEPLOY_SNAPSHOT="$dump"
         return 0
     fi
 
@@ -201,9 +228,9 @@ _deploy_run() {
     # Legacy per-file ACLs on laravel-*.log break deploy:writable chmod — strip before Deployer runs.
     ensure_app_logs_permissions "$app" || true
 
+    CIPI_PREDEPLOY_SNAPSHOT=""
     _deploy_predeploy_snapshot "$app" || exit 1
-    local snapshot_path=""
-    [[ -f "/tmp/cipi-predeploy-${app}.path" ]] && snapshot_path=$(cat "/tmp/cipi-predeploy-${app}.path" 2>/dev/null || true)
+    local snapshot_path="${CIPI_PREDEPLOY_SNAPSHOT:-}"
 
     local lf; lf=$(deploy_log_file "$app")
     local branch_disp; branch_disp=$(app_get "$app" branch)
@@ -247,6 +274,7 @@ _deploy_run() {
         # so it can state whether the app actually answers — reporting "deploy
         # succeeded" while the site returns 500 would be worse than silence.
         _deploy_apply_yml "$app"
+        _deploy_horizon_detect "$app" || true
         local post_line post_rc=0
         post_line=$(_deploy_run_post_deploy "$app") || post_rc=$?
         local health_line; health_line=$(_deploy_health_check "$app")
@@ -283,6 +311,65 @@ _deploy_run() {
     fi
 }
 
+# ── Horizon, noticed ─────────────────────────────────────────
+#
+# An app that requires laravel/horizon and puts its queues on Redis needs the
+# Horizon process, and Cipi started it only when someone ran `cipi worker
+# horizon enable`: until then the jobs piled up and nothing said why.
+#
+# After a successful deploy, what the app says about itself is read — the
+# package in the release, QUEUE_CONNECTION in its .env — and:
+#   - Horizon is switched on by itself in the one case where nothing can be
+#     lost: the package is there, the queues are on Redis, and no queue:work
+#     worker is configured (so nothing is processing those jobs today);
+#   - in every other case it is a line of advice, said once: an app with
+#     queue:work workers keeps them (Horizon would replace them), and the
+#     .env is the app's — QUEUE_CONNECTION is suggested, never written.
+# Never for an app where `cipi worker horizon disable` was run (horizon_auto),
+# nor where cipi.yml or `cipi worker horizon enable` already decided.
+# Prints "enable", "workers", "env:<value>" or nothing: what there is to do.
+deploy_horizon_state() {
+    local app="$1" home="/home/$1" conf="/etc/supervisor/conf.d/$1.conf" envtext qc
+    [[ "$(app_get "$app" custom)" == "true" ]] && return 0
+    [[ "$(app_get "$app" horizon)" == "true" ]] && return 0
+    [[ "$(app_get "$app" horizon_auto)" == "off" ]] && return 0
+    id "$app" &>/dev/null || return 0
+    app_as "$app" test -f "${home}/current/vendor/laravel/horizon/composer.json" < /dev/null 2>/dev/null || return 0
+    if grep -qsE '^\[program:.*-worker-' "$conf" 2>/dev/null; then
+        echo "workers"; return 0
+    fi
+    envtext=$(app_read "$app" "${home}/shared/.env") || envtext=""
+    qc=$(grep -m1 '^QUEUE_CONNECTION=' <<< "$envtext" | cut -d= -f2- | tr -d "\"' \r" || true)
+    if [[ "$qc" == "redis" ]]; then echo "enable"; else echo "env:${qc:-unset}"; fi
+    return 0
+}
+
+_deploy_horizon_detect() {
+    local app="$1" state
+    state=$(deploy_horizon_state "$app") || return 0
+    [[ -n "$state" ]] || return 0
+    if [[ "$state" == "enable" ]]; then
+        step "laravel/horizon is installed, the queues are on Redis and no worker is configured — enabling Horizon..."
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/worker.sh"
+        # In a subshell: _horizon_enable exits on an incomplete app.
+        ( _horizon_enable "$app" ) || warn "Horizon not enabled — run: cipi worker horizon enable ${app}"
+        return 0
+    fi
+    # Advice is given once per situation, not at every deploy.
+    [[ "$(app_get "$app" horizon_hint)" == "$state" ]] && return 0
+    app_set "$app" horizon_hint "$state"
+    if [[ "$state" == "workers" ]]; then
+        info "laravel/horizon is installed and '${app}' runs queue:work workers. To hand its queues to Horizon instead: cipi worker horizon enable ${app}"
+    else
+        info "laravel/horizon is installed, but QUEUE_CONNECTION is '${state#env:}': Horizon works on Redis queues."
+        echo -e "  Set it in the app's .env, then enable Horizon:"
+        echo -e "    ${CYAN}cipi app env ${app} --set=QUEUE_CONNECTION=redis${NC}"
+        echo -e "    ${CYAN}cipi worker horizon enable ${app}${NC}"
+    fi
+    return 0
+}
+
 # ── Release detail for notifications ─────────────────────────
 #
 # "Deploy succeeded" on its own tells you nothing you can act on. What was
@@ -298,7 +385,11 @@ _deploy_commit_info() {
     [[ -n "$release" ]] || return 0
     [[ -d "${dir}/.git" ]] || dir="${home}/current"
     [[ -d "${dir}/.git" ]] || return 0
-    git -C "$dir" log -1 --format='%h|%s|%an|%ad' --date=format:'%Y-%m-%d %H:%M' 2>/dev/null || true
+    # git, as the app user: a repository carries its own configuration, and
+    # root does not run git on one an app user controls (app_as in common.sh).
+    # As root git refused these trees anyway ("dubious ownership") and the
+    # line came back empty.
+    app_as "$app" git --no-pager -C "$dir" log -1 --format='%h|%s|%an|%ad' --date=format:'%Y-%m-%d %H:%M' 2>/dev/null < /dev/null || true
 }
 
 # Multi-line body shared by the success and failure notifications.
@@ -628,7 +719,7 @@ _deploy_live_pids() {
             *"/cipi deploy ${app}"|*"/cipi deploy ${app} "*)
                 rest=" ${args#*/cipi deploy ${app}} "
                 case "$rest" in
-                    *" --status"*|*" --log"*|*" --releases"*|*" --key"*|*" --webhook"*|*" --unlock"*|*" --trust-host"*|*" --audit"*) ;;
+                    *" --status"*|*" --log"*|*" --releases"*|*" --key"*|*" --webhook"*|*" --unlock"*|*" --trust-host"*|*" --audit"*|*" --history"*|*" --last"*) ;;
                     *) printf '%s\tcli\n' "$pid" ;;
                 esac ;;
         esac
@@ -780,6 +871,170 @@ _deploy_status() {
     return 0
 }
 
+# ── History: the banners, across the rotated files ───────────
+#
+# deploy.log is rotated every night (copytruncate, cipi-app-logs in
+# /etc/logrotate.d): the runs of the days before are in deploy.log.1 and
+# deploy.log.N.gz. Whatever reads deploy.log alone — the panel did, through
+# the app-logs endpoint — has the duration of a deploy until the first night
+# and never again. A deploy somebody starts is watched while it runs; one a
+# push starts is looked at the day after, so it was the webhook deploys that
+# "did not save their time".
+#
+# The files of one deploy log, newest first. The directory is root's and the
+# app user cannot add a name to it: the glob is a list of files logrotate made.
+_deploy_log_files() {   # <app>
+    local lf f
+    lf=$(deploy_log_file "$1")
+    [[ -f "$lf" && ! -L "$lf" ]] && printf '%s\n' "$lf"
+    # shellcheck disable=SC2012
+    while IFS= read -r f; do
+        [[ -n "$f" && -f "$f" && ! -L "$f" ]] && printf '%s\n' "$f"
+    done < <(ls -1t -- "${lf}".* "${lf}"-* 2>/dev/null || true)
+    return 0
+}
+
+# A banner's local time as ISO 8601 with the offset in force that day; empty
+# for a time `date` cannot read (the app user can write to its own log).
+_deploy_ts_iso() {
+    [[ -n "${1:-}" ]] || { echo ""; return 0; }
+    date -d "$1" '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || echo ""
+}
+
+# Up to <limit> finished runs of an app, newest first, one per line:
+#   finished, kind, result, release, duration, exit, started, trigger, branch, from
+# separated by US (0x1f) — not whitespace, so `read` keeps an empty field, and
+# not a character a banner's fields can hold. Files are read newest first and
+# only as far back as it takes.
+_deploy_history_rows() {   # <app> <limit>
+    local app="$1" limit="${2:-30}" f chunk all="" ends=0 n
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        chunk=$(gzip -cdf -- "$f" 2>/dev/null | grep -a '\] ===== deploy ' || true)
+        [[ -n "$chunk" ]] || continue
+        all="${chunk}"$'\n'"${all}"
+        n=$(grep -cE '\] ===== deploy (ROLLBACK )?(OK|FAILED) ' <<< "$chunk" || true)
+        ends=$(( ends + ${n:-0} ))
+        (( ends >= limit )) && break
+    done < <(_deploy_log_files "$app")
+    [[ -n "$all" ]] || return 0
+
+    local re_start='^\[([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})\] ===== deploy start +app=[^ ]+ trigger=([^[:space:][:cntrl:]]+) branch=([^[:space:][:cntrl:]]+) from-release=([^[:space:][:cntrl:]]+) =====$'
+    local re_end='^\[([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})\] ===== deploy (ROLLBACK )?(OK|FAILED) +app=[^ ]+ release=([^[:space:][:cntrl:]]+) duration=([0-9]+)s exit=(-?[0-9]+) =====$'
+    local line s_ts="" s_tr="" s_br="" s_from="" kind result rows="" u=$'\x1f'
+    while IFS= read -r line; do
+        if [[ "$line" =~ $re_start ]]; then
+            s_ts="${BASH_REMATCH[1]}"; s_tr="${BASH_REMATCH[2]}"; s_br="${BASH_REMATCH[3]}"; s_from="${BASH_REMATCH[4]}"
+        elif [[ "$line" =~ $re_end ]]; then
+            kind="deploy"; [[ -n "${BASH_REMATCH[2]}" ]] && kind="rollback"
+            result="ok"; [[ "${BASH_REMATCH[3]}" == "FAILED" ]] && result="failed"
+            rows+="${BASH_REMATCH[1]}${u}${kind}${u}${result}${u}${BASH_REMATCH[4]}${u}${BASH_REMATCH[5]}${u}${BASH_REMATCH[6]}${u}${s_ts}${u}${s_tr}${u}${s_br}${u}${s_from}"$'\n'
+            # The start belongs to this end only.
+            s_ts=""; s_tr=""; s_br=""; s_from=""
+        fi
+    done <<< "$all"
+    [[ -n "$rows" ]] || return 0
+    printf '%s' "$rows" | tail -n "$limit" | tac
+    return 0
+}
+
+# Rows of _deploy_history_rows as a JSON array (same keys as "last" in
+# `cipi deploy <app> --status --json`).
+_deploy_history_json() {   # stdin: rows
+    local fin kind result rel dur ex st tr br from out="[]" items=()
+    while IFS=$'\x1f' read -r fin kind result rel dur ex st tr br from; do
+        [[ -n "$fin" ]] || continue
+        items+=("$(jq -cn \
+            --arg result "$result" --arg kind "$kind" --arg rel "$rel" --arg dur "$dur" --arg ex "$ex" \
+            --arg tr "$tr" --arg br "$br" --arg from "$from" \
+            --arg st "$(_deploy_ts_iso "$st")" --arg fin "$(_deploy_ts_iso "$fin")" '
+            def nz: if . == "" then null else . end;
+            {result: $result, kind: $kind, release: ($rel | nz), duration: ($dur | tonumber), exit: ($ex | tonumber),
+             trigger: ($tr | nz), branch: ($br | nz), from_release: ($from | nz),
+             started_at: ($st | nz), finished_at: ($fin | nz)}')")
+    done
+    if [[ ${#items[@]} -gt 0 ]]; then out=$(printf '%s\n' "${items[@]}" | jq -cs .); fi
+    printf '%s\n' "$out"
+}
+
+# cipi deploy <app> --history [--limit=N] [--json]
+# cipi deploy --history <app> …   the same, flag first: a Cipi that does not
+#                                 know the flag answers "App '--history' not
+#                                 found" to this form, and deploys on the other.
+_deploy_history() {
+    local app="$1" limit="${ARG_limit:-30}" rows
+    [[ "$limit" =~ ^[0-9]{1,3}$ && "$limit" -ge 1 ]] || { error "--limit must be a number (1-500)"; exit 1; }
+    [[ "$limit" -le 500 ]] || limit=500
+    rows=$(_deploy_history_rows "$app" "$limit")
+    if [[ "${ARG_json:-}" == "true" ]]; then
+        jq -n --arg app "$app" --arg log "$(deploy_log_file "$app")" \
+            --argjson runs "$(_deploy_history_json <<< "$rows")" \
+            '{app: $app, count: ($runs | length), runs: $runs, log: $log}'
+        return 0
+    fi
+    echo -e "\n${BOLD}Deploy history — ${app}${NC} ${DIM}(newest first, rotated logs included)${NC}"
+    if [[ -z "$rows" ]]; then
+        echo -e "  ${DIM}No deploy recorded yet${NC}\n"; return 0
+    fi
+    tbl_start
+    tbl_head "FINISHED" "RESULT" "RELEASE" "TOOK" "TRIGGER" "BRANCH"
+    local fin kind result rel dur ex st tr br from verdict
+    while IFS=$'\x1f' read -r fin kind result rel dur ex st tr br from; do
+        [[ -n "$fin" ]] || continue
+        verdict="${GREEN}OK${NC}"; [[ "$result" == "failed" ]] && verdict="${RED}FAILED${NC} ${DIM}(exit ${ex})${NC}"
+        [[ "$kind" == "rollback" ]] && verdict="rollback ${verdict}"
+        tbl_row "$fin" "$verdict" "$rel" "$(_deploy_fmt_secs "$dur")" "$tr" "$br"
+    done <<< "$rows"
+    tbl_print
+    echo ""
+    return 0
+}
+
+# cipi deploy --last [--json] — the last finished run of every app (the app
+# list of the panel shows when each one was last deployed, and how it went).
+# cipi deploy <app> --last [--json] — of one.
+_deploy_last() {
+    local only="${1:-}" names app row
+    if [[ -n "$only" ]]; then
+        names="$only"
+    else
+        names=$(vault_read apps.json 2>/dev/null | jq -r 'keys[]' 2>/dev/null || true)
+    fi
+    if [[ "${ARG_json:-}" == "true" ]]; then
+        local obj="{}" one
+        while IFS= read -r app; do
+            [[ -n "$app" ]] || continue
+            row=$(_deploy_history_rows "$app" 1)
+            one=$(_deploy_history_json <<< "$row" | jq -c '.[0] // null')
+            obj=$(jq -c --arg a "$app" --argjson v "$one" '.[$a] = $v' <<< "$obj")
+        done <<< "$names"
+        jq -n --argjson apps "$obj" '{apps: $apps}'
+        return 0
+    fi
+    echo -e "\n${BOLD}Last deploy${NC}"
+    if [[ -z "$names" ]]; then
+        echo -e "  ${DIM}No apps${NC}\n"; return 0
+    fi
+    tbl_start
+    tbl_head "APP" "FINISHED" "RESULT" "RELEASE" "TOOK" "TRIGGER"
+    local fin kind result rel dur ex st tr br from verdict
+    while IFS= read -r app; do
+        [[ -n "$app" ]] || continue
+        row=$(_deploy_history_rows "$app" 1)
+        if [[ -z "$row" ]]; then
+            tbl_row "${CYAN}${app}${NC}" "${DIM}never${NC}" "" "" "" ""
+            continue
+        fi
+        IFS=$'\x1f' read -r fin kind result rel dur ex st tr br from <<< "$row"
+        verdict="${GREEN}OK${NC}"; [[ "$result" == "failed" ]] && verdict="${RED}FAILED${NC}"
+        [[ "$kind" == "rollback" ]] && verdict="rollback ${verdict}"
+        tbl_row "${CYAN}${app}${NC}" "$fin" "$verdict" "$rel" "$(_deploy_fmt_secs "$dur")" "$tr"
+    done <<< "$names"
+    tbl_print
+    echo ""
+    return 0
+}
+
 _deploy_unlock() {
     local app="$1"
     local home="/home/${app}"
@@ -788,7 +1043,7 @@ _deploy_unlock() {
         info "No deploy lock found for '${app}'"
         return 0
     fi
-    rm -f "$lockfile"
+    app_rm "$app" "$lockfile" || true
     success "Deploy unlocked — run: cipi deploy ${app}"
     log_action "DEPLOY UNLOCK: $app"
 }
@@ -864,13 +1119,18 @@ _deploy_fmt_secs() {
 
 # How long the deploy of release $2 took, from the end banner the deploy log
 # carries for it ("===== deploy OK  app=x release=N duration=54s exit=0").
-# The log is cumulative: the last banner of that release wins. Empty when
-# the log has none (a release deployed before 5.6.0, or a log rotated away).
+# The last banner of that release wins. The log is rotated every night, so the
+# rotated files are read too (newest first, until one has it). Empty when
+# none has it: a release deployed before 5.6.0, or older than the logs kept.
 _deploy_release_took() {
-    local app="$1" rel="$2" lf secs
+    local app="$1" rel="$2" lf f secs=""
     lf=$(deploy_log_file "$app")
-    [[ -f "$lf" ]] || return 0
-    secs=$(grep -oE "deploy OK  app=${app} release=${rel} duration=[0-9]+s" "$lf" 2>/dev/null | tail -1 | grep -oE '[0-9]+s$' || true)
+    # shellcheck disable=SC2012
+    while IFS= read -r f; do
+        [[ -n "$f" && -f "$f" && ! -L "$f" ]] || continue
+        secs=$(gzip -cdf -- "$f" 2>/dev/null | grep -aoE "deploy OK  app=${app} release=${rel} duration=[0-9]+s" | tail -1 | grep -oE '[0-9]+s$' || true)
+        [[ -n "$secs" ]] && break
+    done < <(printf '%s\n' "$lf"; ls -1t -- "${lf}".* "${lf}"-* 2>/dev/null || true)
     [[ -n "$secs" ]] && _deploy_fmt_secs "${secs%s}"
     return 0
 }
@@ -890,8 +1150,11 @@ _deploy_releases() {
         when=$(stat -c '%y' "${home}/releases/${r}" 2>/dev/null | cut -d. -f1)
         sha=""; subject=""
         if [[ -d "${home}/releases/${r}/.git" ]]; then
-            sha=$(git -C "${home}/releases/${r}" log -1 --format=%h 2>/dev/null || true)
-            subject=$(git -C "${home}/releases/${r}" log -1 --format=%s 2>/dev/null | cut -c1-46 || true)
+            # As the app user, one call for both (see _deploy_commit_info).
+            local gl=""
+            gl=$(app_as "$app" git --no-pager -C "${home}/releases/${r}" log -1 --format='%h|%s' 2>/dev/null < /dev/null || true)
+            sha="${gl%%|*}"
+            [[ "$gl" == *"|"* ]] && subject=$(printf '%s' "${gl#*|}" | cut -c1-46)
         fi
         took=$(_deploy_release_took "$app" "$r")
         mark=""; [[ "$r" == "$current" ]] && mark=" ${GREEN}← current${NC}"
@@ -908,7 +1171,7 @@ _deploy_key() {
     local kf="/home/${app}/.ssh/id_ed25519.pub"
     [[ ! -f "$kf" ]] && { error "Key not found"; exit 1; }
     echo -e "\n${BOLD}Deploy Key for '${app}'${NC}"
-    echo -e "${CYAN}$(cat "$kf")${NC}\n"
+    echo -e "${CYAN}$(app_read "$app" "$kf" || true)${NC}\n"
 
     local git_prov; git_prov=$(app_get "$app" git_provider)
     local git_dkid; git_dkid=$(app_get "$app" git_deploy_key_id)
@@ -963,16 +1226,15 @@ _deploy_trust_host() {
         exit 1
     fi
 
+    # ~/.ssh is the app user's: known_hosts and config are edited by that
+    # user (app_as in common.sh), not by root following the names it finds.
     # Remove any existing entry for this host to avoid duplicates
     if [[ -f "$known_hosts" ]]; then
-        local tmp; tmp=$(mktemp)
-        ssh-keygen -R "$host" -f "$known_hosts" &>/dev/null || true
-        [[ "$port" != "22" ]] && ssh-keygen -R "[${host}]:${port}" -f "$known_hosts" &>/dev/null || true
+        app_as "$app" ssh-keygen -R "$host" -f "$known_hosts" &>/dev/null < /dev/null || true
+        [[ "$port" != "22" ]] && app_as "$app" ssh-keygen -R "[${host}]:${port}" -f "$known_hosts" &>/dev/null < /dev/null || true
     fi
 
-    echo "$scan_out" >> "$known_hosts"
-    chown "${app}:${app}" "$known_hosts"
-    chmod 600 "$known_hosts"
+    echo "$scan_out" | _app_file_op "$app" "$known_hosts" 'umask 077; cat >> "$1" && chmod 600 "$1"'
 
     success "Fingerprint of ${host}:${port} trusted for '${app}'"
     echo ""
@@ -984,22 +1246,23 @@ _deploy_trust_host() {
     local kf="${home}/.ssh/id_ed25519.pub"
     if [[ -f "$kf" ]]; then
         echo -e "${BOLD}Deploy Key${NC} (add this to your Git server):"
-        echo -e "  ${CYAN}$(cat "$kf")${NC}"
+        echo -e "  ${CYAN}$(app_read "$app" "$kf" || true)${NC}"
         echo ""
     fi
 
     # If non-standard port, write/update SSH config entry
     if [[ "$port" != "22" ]]; then
         local ssh_cfg="${home}/.ssh/config"
-        # Remove existing Host block for this host if any
-        if [[ -f "$ssh_cfg" ]]; then
-            local tmp; tmp=$(mktemp)
-            awk -v h="$host" '
-                /^Host / { in_block = ($2 == h) }
-                !in_block { print }
-            ' "$ssh_cfg" > "$tmp" && mv "$tmp" "$ssh_cfg"
-        fi
-        cat >> "$ssh_cfg" <<SSHCFG
+        # The file without this host's block, if it had one, then the block:
+        # read and written whole (app_write takes all of it before it writes).
+        {
+            if [[ -f "$ssh_cfg" ]]; then
+                app_read "$app" "$ssh_cfg" | awk -v h="$host" '
+                    /^Host / { in_block = ($2 == h) }
+                    !in_block { print }
+                ' || true
+            fi
+            cat <<SSHCFG
 
 Host ${host}
     HostName ${host}
@@ -1007,8 +1270,7 @@ Host ${host}
     IdentityFile ${home}/.ssh/id_ed25519
     StrictHostKeyChecking accept-new
 SSHCFG
-        chown "${app}:${app}" "$ssh_cfg"
-        chmod 600 "$ssh_cfg"
+        } | app_write "$app" "$ssh_cfg" 600
         success "SSH config updated (port ${port} → ${host})"
     fi
 

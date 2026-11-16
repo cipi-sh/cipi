@@ -66,6 +66,15 @@ _node_arch() {
     esac
 }
 
+# cipi-node-switch, as root's own action. Called through sudo the switch
+# accepts the app itself and nothing else (and no --stop / --status): right
+# for the rule an app user has, wrong for cipi — which is root and was only
+# *started* with sudo, by the cipi admin or by the panel, and passes their
+# SUDO_USER on. `sudo cipi node restart <app>`, `cipi node upgrade
+# --restart`, the status lines of `cipi node status` and the --stop of
+# `cipi app delete` were all refused ("cipi cannot manage <app>") — 5.9.0.
+_node_switch() { env -u SUDO_USER /usr/local/bin/cipi-node-switch "$@"; }
+
 # Even (LTS) majors only.
 _node_valid_major() { [[ "$1" =~ ^[2-9][0-9]$ ]] && (( $1 % 2 == 0 )); }
 
@@ -269,7 +278,7 @@ _node_upgrade_cmd() {
             [[ "$(app_get "$app" node_mode)" == "ssr" ]] || continue
             if [[ "${ARG_restart:-}" == "true" ]]; then
                 step "Restarting ${app} on the new binary (blue/green)..."
-                /usr/local/bin/cipi-node-switch "$app" current || warn "${app}: restart failed — still on the previous process"
+                _node_switch "$app" current || warn "${app}: restart failed — still on the previous process"
             else
                 info "${app} picks up $(node_full_version "$m") on its next deploy or: cipi node restart ${app}"
             fi
@@ -463,12 +472,13 @@ _node_webhook_install_receiver() {
 
 # ~/.cipi/webhook.json — the secret and branch, readable by the app user only.
 _node_webhook_config() {
-    local app="$1" dir="/home/${1}/.cipi"
-    mkdir -p "$dir"
-    vault_read apps.json | jq -c --arg a "$app" '.[$a] | {token: (.webhook_token // ""), branch: (.branch // "main")}' \
-        > "${dir}/webhook.json"
-    chown -R "${app}:${app}" "$dir"
-    chmod 700 "$dir"; chmod 600 "${dir}/webhook.json"
+    local app="$1" dir="/home/${1}/.cipi" json
+    # The directory and the file are made by the app user (app_as in
+    # common.sh): root ran mkdir, a redirect, chown -R and two chmod on names
+    # in the app's home.
+    json=$(vault_read apps.json | jq -c --arg a "$app" '.[$a] | {token: (.webhook_token // ""), branch: (.branch // "main")}')
+    app_mkdir "$app" "$dir" 700
+    printf '%s\n' "$json" | app_write "$app" "${dir}/webhook.json" 600
 }
 
 # ── nginx ─────────────────────────────────────────────────────
@@ -479,6 +489,9 @@ _node_nginx_vhost() {
     local mode output
     mode=$(app_get "$app" node_mode)
     output=$(app_get "$app" node_output)
+    # Logs in root's directory, made before nginx tests the vhost (see app_log_dir).
+    app_log_dir_ensure "$app" || warn "Could not create $(app_log_dir "$app") — nginx will refuse the vhost of '${app}' until it exists"
+    app_log_links_default "$app"
     local webhook="    location = /cipi/webhook {
         limit_except POST { deny all; }
         client_max_body_size 2m;
@@ -502,8 +515,8 @@ ${www_block}server {
     listen [::]:80;
     server_name ${names};
     root /var/www/html;
-    access_log /home/${app}/logs/nginx-access.log;
-    error_log /home/${app}/logs/nginx-error.log;
+    access_log /var/log/cipi-apps/${app}/nginx-access.log;
+    error_log /var/log/cipi-apps/${app}/nginx-error.log;
     client_max_body_size 64M;
 ${webhook}${routes}    location / {
 ${auth}        proxy_pass http://cipi_node_${app};
@@ -535,8 +548,8 @@ ${www_block}server {
     server_name ${names};
     root /home/${app}/current/${output};
     index index.html;
-    access_log /home/${app}/logs/nginx-access.log;
-    error_log /home/${app}/logs/nginx-error.log;
+    access_log /var/log/cipi-apps/${app}/nginx-access.log;
+    error_log /var/log/cipi-apps/${app}/nginx-error.log;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -568,18 +581,27 @@ EOF
 # (create, app edit, cipi.yml at deploy time). The build command itself lives in
 # node-build.sh; start command and ports stay in the root-only state file.
 _node_recipe_config_write() {
-    local app="$1" f="/home/${1}/.deployer/node.json"
-    mkdir -p "/home/${app}/.deployer"
+    local app="$1" f="/home/${1}/.deployer/node.json" json=""
+    # Made, written and removed as the app user (app_as in common.sh). Root
+    # wrote node.json.tmp, renamed it and chowned the result: with the .tmp a
+    # symlink, the file it pointed at was overwritten and then handed to the
+    # app — and `cipi yml node-sync`, which an app user with `cipi yml auto
+    # on` runs through sudo, ends here (5.9.0).
+    app_mkdir "$app" "/home/${app}/.deployer"
     # Laravel apps pinned with --node-version get {version} only; without a pin
     # the file goes away and they follow the server default.
     if [[ "$(app_get "$app" runtime)" != "node" ]]; then
-        if [[ -z "$(app_get "$app" node_version)" ]]; then rm -f "$f"; return 0; fi
+        if [[ -z "$(app_get "$app" node_version)" ]]; then app_rm "$app" "$f"; return 0; fi
     fi
-    vault_read apps.json | jq -c --arg a "$app" '.[$a] | if .runtime == "node" then {
+    json=$(vault_read apps.json | jq -c --arg a "$app" '.[$a] | if .runtime == "node" then {
         mode: (.node_mode // "spa"), version: (.node_version // "" | tostring), output: (.node_output // "")
-    } else {version: (.node_version | tostring)} end' > "${f}.tmp" && mv -f "${f}.tmp" "$f"
-    chown "${app}:${app}" "$f" 2>/dev/null || true
-    chmod 644 "$f"
+    } else {version: (.node_version | tostring)} end') || json=""
+    if [[ -n "$json" ]]; then
+        # Still replaced in one rename: a deploy may be reading it.
+        printf '%s\n' "$json" | _app_file_op "$app" "$f" \
+            'rm -f "$1.tmp"; ( umask 022; cat > "$1.tmp" ) && chmod 644 "$1.tmp" && mv -f "$1.tmp" "$1"' || true
+    fi
+    [[ -e "$f" ]]
 }
 
 # The node settings a cipi.yml `node:` section asks for, merged over what the
@@ -647,7 +669,7 @@ _node_desired_diff() {
 
 node_app_cleanup() {
     local app="$1"
-    [[ -f "${NODE_STATE_DIR}/${app}.json" ]] && /usr/local/bin/cipi-node-switch "$app" --stop >/dev/null 2>&1 || true
+    [[ -f "${NODE_STATE_DIR}/${app}.json" ]] && _node_switch "$app" --stop >/dev/null 2>&1 || true
     supervisorctl stop "${app}-node-blue" "${app}-node-green" >/dev/null 2>&1 || true
     rm -f "/etc/supervisor/conf.d/${app}-node.conf"
     rm -f "/etc/nginx/conf.d/cipi-node-${app}.conf"
@@ -677,7 +699,7 @@ _node_status_cmd() {
         printf "  %-10s ${CYAN}%s${NC}\n" "Start" "$(app_get "$app" node_start)"
         printf "  %-10s ${CYAN}%s${NC}\n" "Health" "$(app_get "$app" node_health)"
         echo ""
-        /usr/local/bin/cipi-node-switch "$app" --status 2>/dev/null | sed 's/^/  /'
+        _node_switch "$app" --status 2>/dev/null | sed 's/^/  /'
     else
         printf "  %-10s ${CYAN}%s${NC}\n" "Output" "$(app_get "$app" node_output)"
     fi
@@ -693,7 +715,7 @@ _node_restart_cmd() {
     fi
     [[ -L "/home/${app}/current" ]] || { error "'${app}' has no release yet — deploy first: cipi deploy ${app}"; exit 1; }
     _node_state_write "$app"
-    /usr/local/bin/cipi-node-switch "$app" current || exit 1
+    _node_switch "$app" current || exit 1
     log_action "NODE RESTART: ${app}"
     success "'${app}' restarted with no downtime"
 }
@@ -706,5 +728,14 @@ _node_logs_cmd() {
     [[ "$lines" =~ ^[0-9]{1,5}$ ]] || lines=100
     active=$(jq -r '.active // -1' "${NODE_STATE_DIR}/${app}.json" 2>/dev/null || echo -1)
     slot=blue; [[ "$active" == 1 ]] && slot=green
-    tail -n "$lines" "/home/${app}/logs/node-${slot}.log" 2>/dev/null || info "No log yet (/home/${app}/logs/node-${slot}.log)"
+    local lf="/var/log/cipi-apps/${app}/node-${slot}.log"
+    if [[ -f "$lf" ]]; then
+        tail -n "$lines" "$lf" 2>/dev/null || true
+    elif [[ -e "/home/${app}/logs/node-${slot}.log" ]]; then
+        # A process started before 5.9.0 and not restarted since still logs
+        # to ~/logs: that directory is the app's, so it is read as the app.
+        (cd / && sudo -u "$app" tail -n "$lines" -- "/home/${app}/logs/node-${slot}.log") 2>/dev/null || info "No log yet (${lf})"
+    else
+        info "No log yet (${lf})"
+    fi
 }

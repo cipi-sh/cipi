@@ -134,17 +134,30 @@ cipi ban unban <IP>
 
 The new value is checked with `fail2ban-client -t` and then applied with a fail2ban reload; a configuration fail2ban refuses is rolled back. It is stored in `/etc/fail2ban/jail.d/cipi-attempts.local`, so Cipi updates do not reset it.
 
-**App users can be kept out of SSH.** Every app has its own Linux user, which can log in over SSH and SFTP with a password. Where nobody needs that, turn it off, for one app or for all of them:
+**App users and SSH.** Every app has its own Linux user. The server's SSH keys — the ones you manage with `cipi ssh list|add|remove` — open a shell as any app user, so whoever administers the server never needs an app's password: `ssh shop@server`. What an app accepts *besides* those keys is a switch, per app or for all of them:
 
 ```bash
 cipi ssh apps                     # every app user: access enabled or disabled
-cipi ssh apps disable shop        # no SSH/SFTP from outside for shop
-cipi ssh apps enable shop
+cipi ssh apps disable shop        # from outside: the server's keys, nothing else
+cipi ssh apps enable shop         # also its password (SSH and SFTP) and its own keys
 cipi ssh apps disable --all       # every app user, and the apps created from now on
 cipi ssh apps enable --all        # everyone back, whatever the single settings were
+cipi ssh apps sync                # rewrite Cipi's section of sshd_config
 ```
 
-Disabled means no login from another machine. Deploys are not affected: Deployer reaches the app user over `ssh localhost`, which stays allowed. The `cipi` user is never touched by these commands. By default every app user has access.
+Disabled means no password and no `~/.ssh/authorized_keys` from another machine — only the server's keys, read by sshd at every login (remove a key with `cipi ssh remove` and it stops working for the apps in the same moment). Deploys are not affected: Deployer reaches the app user over `ssh localhost`, which stays as it was. The `cipi` user is never touched by these commands. A new server starts with access disabled for new apps.
+
+**One Valkey per app.** A new Laravel app gets a Valkey instance of its own — `cipi-valkey@<app>`, running as the app's user on its own localhost port, with its own password and data directory — so no other app on the server can read its cache, its sessions or its queues. Apps created before 5.9.0 keep the server's shared instance until you move them:
+
+```bash
+cipi valkey list                  # which app uses which instance
+cipi valkey isolate shop          # its own instance: keys copied, .env switched, workers restarted
+cipi valkey isolate --all         # every app still on the shared one
+cipi valkey share shop            # back to the shared instance
+cipi valkey flush-shared          # once nobody uses it: empty it and change its password
+```
+
+`isolate` puts the app in maintenance mode for the seconds the copy takes, so nothing is written on the side it is leaving; `--no-copy` moves it empty, without maintenance mode. An idle instance costs about 10 MB of RAM; `cipi app create --valkey=shared` keeps the old behaviour for one app.
 
 Optional, off until you turn them on — `setup.sh` / `self-update` never install them:
 
@@ -158,18 +171,34 @@ cipi scan enable        # nightly: release integrity + ClamAV on uploads
 
 Ubuntu security updates land daily via `unattended-upgrades`. PHP patch releases are applied every night at 03:30 by `cipi php upgrade`, which restarts PHP-FPM after an upgrade and reports each version's security patch level. The mitigations of the 2026-10-21 PHP advisory (`session.upload_progress.enabled`, `fatal_error_backtraces`) are in every FPM pool, in each version's `fpm/conf.d/99-cipi.ini` and in the ini Octane apps load. **Nginx, MariaDB, PostgreSQL and Valkey are left alone until you ask** — restarting a database at 04:00 is not a surprise Cipi will create:
 
+The rest of the stack — nginx (nginx.org), MariaDB, PostgreSQL, Valkey, the Node.js runtimes and Composer — is patched every night at 04:20 by `cipi autoupdate`: patch releases only (`apt --only-upgrade` of what is already installed), Cipi's configuration kept, nginx tested before it is reloaded, one component after the other and the databases last. A database is left for the next night while a dump or a deploy is running. Each upgrade is mailed like any other event.
+
 ```bash
-cipi nginx upgrade                 # nginx.org mainline, config test, reload
+cipi autoupdate                    # what is on, how the last run went
+cipi autoupdate off mariadb        # patch this one by hand
+cipi autoupdate on                 # everything back on
+cipi autoupdate run nginx          # now
+
+cipi nginx upgrade                 # the same, by hand: asks first
 cipi db upgrade                    # MariaDB, and PostgreSQL if installed
-cipi db upgrade pgsql --yes
 cipi service upgrade valkey
 ```
 
-Patch-level only (`apt --only-upgrade` of what is already installed). Cipi configs are kept. `--yes` skips the prompt.
+What no update can do by itself is restart the server: a new kernel is installed by `unattended-upgrades` and does nothing until the next boot. Cipi tells you, and leaves the decision to you:
+
+```bash
+cipi pending                       # what is waiting: a reboot, a patch, a warning
+cipi reboot                        # is one required, since when, which kernel
+cipi reboot now                    # restart in one minute
+cipi reboot auto on --at=04:45     # restart at night, only on the nights one is required
+cipi reboot auto off
+```
+
+`cipi pending` is checked every morning and mailed when the list changes (and again after a week, while it lasts); `cipi status` shows the same list when there is one. Besides a reboot it names PHP below its security release, a component whose automatic update is off or failed, Composer and Node.js below theirs, apps that still share one Valkey, and PHP extensions installed with PECL — Cipi installs extensions from apt only, nothing updates the ones built by hand, and PECL itself is deprecated by the PHP project in favour of [PIE](https://github.com/php/pie).
 
 ### ⚡ Zero-Downtime Deploys
 
-Deployer clones your repo, runs `composer install`, links storage, runs migrations, and swaps the symlink atomically. Optional **Node build** on deploy (`cipi app edit --node-build=…`). Roll back to any of the last 5 releases instantly. Opt-in **pre-deploy DB snapshot** (`cipi deploy --snapshot`). `cipi deploy <app> --releases` lists the releases with their commit and how long each deploy took. `cipi deploy <app> --status` says whether a deploy is running right now — whoever started it, a Git push included — and how the last one ended (`--json` for scripts and the panel).
+Deployer clones your repo, runs `composer install`, links storage, runs migrations, and swaps the symlink atomically. Optional **Node build** on deploy (`cipi app edit --node-build=…`). Roll back to any of the last 5 releases instantly. Opt-in **pre-deploy DB snapshot** (`cipi deploy --snapshot`). `cipi deploy <app> --releases` lists the releases with their commit and how long each deploy took. `cipi deploy <app> --status` says whether a deploy is running right now — whoever started it, a Git push included — and how the last one ended (`--json` for scripts and the panel). `cipi deploy <app> --history` lists the past deploys with their result and duration, from the rotated deploy logs too, and `cipi deploy --last` shows every app's last one.
 
 Every deploy is recorded in a root-owned, hash-chained **audit ledger** (`/var/log/cipi/deploys.jsonl`, also sent to syslog), whatever started it: `cipi deploy`, the Git webhook, cipi/agent, the panel, or `dep deploy` run by hand. Each record has the release, the commit, and who started the deploy, read by root from the process chain: origin, login user and SSH address. `cipi deploy <app> --audit` shows it.
 

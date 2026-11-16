@@ -386,6 +386,20 @@ php_security_floor() {
     esac
 }
 
+# Oldest Composer that carries every security fix Cipi knows about: 2.10.2
+# and 2.10.3 (2026-08-27) are security releases.
+composer_security_floor() { echo "2.10.3"; }
+
+# The same for each Node.js line still patched — the security releases of
+# 2026-10-21. Empty for a major that is not (or no longer) an LTS line.
+node_security_floor() {
+    case "$1" in
+        22) echo "22.23.4" ;;
+        24) echo "24.22.1" ;;
+        26) echo "26.12.1" ;;
+    esac
+}
+
 # Security state of an installed PHP branch, printed as "<state> <version>":
 #   patched     at or past php_security_floor
 #   vulnerable  older than the floor (ondrej / sury ship upstream versions,
@@ -473,12 +487,14 @@ octane_php_ini_ensure() {
 app_env_set_deploy_branch() {
     local app="${1:-}" branch="${2:-}" mode="${3:-set}" env="/home/${1:-}/shared/.env" safe
     [[ -n "$app" && -n "$branch" && -f "$env" ]] || return 0
-    if grep -q '^CIPI_DEPLOY_BRANCH=' "$env" 2>/dev/null; then
+    # Read and written as the app user (see app_as).
+    local cur; cur=$(app_read "$app" "$env") || cur=""
+    if grep -q '^CIPI_DEPLOY_BRANCH=' <<< "$cur"; then
         [[ "$mode" == "add" ]] && return 0
         safe=$(printf '%s' "$branch" | sed 's/[&|\\]/\\&/g')
-        sed -i "s|^CIPI_DEPLOY_BRANCH=.*|CIPI_DEPLOY_BRANCH=${safe}|" "$env"
+        app_sed "$app" "$env" "s|^CIPI_DEPLOY_BRANCH=.*|CIPI_DEPLOY_BRANCH=${safe}|"
     else
-        printf 'CIPI_DEPLOY_BRANCH=%s\n' "$branch" >> "$env"
+        printf 'CIPI_DEPLOY_BRANCH=%s\n' "$branch" | app_append "$app" "$env"
     fi
 }
 
@@ -506,15 +522,17 @@ app_env_set_environment() {
     local app="${1:-}" label="${2:-}" mode="${3:-set}" env="/home/${1:-}/shared/.env"
     [[ -n "$app" && -f "$env" ]] || return 0
     validate_env_label "$label" || return 1
-    if grep -q '^CIPI_ENV=' "$env" 2>/dev/null; then
+    # Read and written as the app user (see app_as).
+    local cur; cur=$(app_read "$app" "$env") || cur=""
+    if grep -q '^CIPI_ENV=' <<< "$cur"; then
         [[ "$mode" == "add" ]] && return 0
-        sed -i "s|^CIPI_ENV=.*|CIPI_ENV=${label}|" "$env"
+        app_sed "$app" "$env" "s|^CIPI_ENV=.*|CIPI_ENV=${label}|"
     else
-        printf 'CIPI_ENV=%s\n' "$label" >> "$env"
+        printf 'CIPI_ENV=%s\n' "$label" | app_append "$app" "$env"
     fi
     [[ "$mode" == "add" ]] && return 0
-    if grep -q '^APP_ENV=' "$env" 2>/dev/null; then
-        sed -i "s|^APP_ENV=.*|APP_ENV=${label}|" "$env"
+    if grep -q '^APP_ENV=' <<< "$cur"; then
+        app_sed "$app" "$env" "s|^APP_ENV=.*|APP_ENV=${label}|"
     fi
     return 0
 }
@@ -545,15 +563,39 @@ deployer_audit_ensure_hook() {
     local app="$1" custom="${2:-}" df tpl
     df="/home/${app}/.deployer/deploy.php"
     [[ -f "$df" ]] || return 1
-    grep -q 'cipi:deploy-audit' "$df" 2>/dev/null && return 0
+    # deploy.php is read and appended to as the app user (see app_as): root
+    # appended to it and then chowned it — on every `cipi deploy`, to
+    # whatever a symlink of that name pointed at.
+    local cur; cur=$(app_read "$app" "$df") || return 1
+    grep -q 'cipi:deploy-audit' <<< "$cur" && return 0
     [[ -n "$custom" ]] || custom=$(app_get "$app" custom 2>/dev/null || echo false)
     tpl="${CIPI_LIB}/deployer/audit-releases.php"
     [[ "$custom" == "true" ]] && tpl="${CIPI_LIB}/deployer/audit-custom.php"
     [[ -f "$tpl" ]] || return 1
     # A deploy.php closed with "?>" would print the hook instead of running it.
-    grep -qE '^[[:space:]]*\?>[[:space:]]*$' "$df" && return 1
-    sed "s|__CIPI_APP_USER__|${app}|g" "$tpl" >> "$df" || return 1
-    chown "${app}:${app}" "$df" 2>/dev/null || true
+    grep -qE '^[[:space:]]*\?>[[:space:]]*$' <<< "$cur" && return 1
+    sed "s|__CIPI_APP_USER__|${app}|g" "$tpl" | app_append "$app" "$df" || return 1
+    return 0
+}
+
+# A failed deploy left .dep/deploy.lock behind, and every deploy after it
+# stopped at "Deploy locked" until someone ran `cipi deploy <app> --unlock`.
+# The recipes now release the lock when a deploy fails (deploy:failed →
+# deploy:unlock); this adds the same line to a deploy.php written before
+# 5.9.0. Laravel apps only: the custom recipe has no lock, the Node one
+# always had the line. Appended as the app user, like the audit hook.
+deployer_unlock_ensure_hook() {
+    local app="$1" df cur
+    df="/home/${app}/.deployer/deploy.php"
+    [[ -f "$df" ]] || return 1
+    [[ "$(app_get "$app" custom 2>/dev/null || true)" == "true" ]] && return 0
+    cur=$(app_read "$app" "$df") || return 1
+    grep -q "deploy:unlock" <<< "$cur" && return 0
+    grep -q "recipe/laravel.php" <<< "$cur" || return 0
+    grep -qE '^[[:space:]]*\?>[[:space:]]*$' <<< "$cur" && return 1
+    printf '\n%s\n%s\n' \
+        "// Cipi: a deploy that fails releases its own lock (5.9.0)." \
+        "after('deploy:failed', 'deploy:unlock');" | app_append "$app" "$df" || return 1
     return 0
 }
 
@@ -767,7 +809,7 @@ _update_apps_public() {
             basic_auth, www_redirect, redirect, redirects, proxies, force_https, custom, docroot, engine,
             octane, octane_port, reverb, reverb_port, horizon, schedule, node_build,
             cloned_from, predeploy_snapshot, limits, ini, health_url, health_expect,
-            ssl_dns_provider, backup_profiles, search,
+            ssl_dns_provider, backup_profiles, search, databases,
             runtime, node_mode, node_version, node_framework, node_output, node_start, node_health, node_ports
         })
     ' > "${CIPI_CONFIG}/apps-public.json" 2>/dev/null || return 0
@@ -792,19 +834,33 @@ ensure_apps_json_api_access() {
     _update_apps_public
 }
 
+# /etc/sudoers.d/cipi-api — the commands www-data (panel API, GUI) may run as
+# root. Present only while a panel is installed (lib/cipi-api-sudoers.sh);
+# `cipi api`, `cipi gui` and their `remove` call this after writing or
+# deleting their config. Best-effort, never fails the caller.
+_panel_sudoers_ensure() {
+    if ! declare -f ensure_cipi_api_sudoers >/dev/null 2>&1; then
+        [[ -f "${CIPI_LIB}/cipi-api-sudoers.sh" ]] || return 0
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/cipi-api-sudoers.sh"
+    fi
+    ensure_cipi_api_sudoers || true
+}
+
 # Panel API (/opt/cipi/api): SQLite, Laravel logs, and bootstrap cache must be
 # writable by www-data (PHP-FPM, queue worker, artisan via sudo -u www-data).
 # Call after root-run composer or manual edits under /opt/cipi/api.
 ensure_cipi_api_permissions() {
     local root="${CIPI_API_ROOT:-/opt/cipi/api}"
     [[ -f "${root}/artisan" ]] || return 0
-    mkdir -p "${root}/storage/logs" "${root}/database" "${root}/bootstrap/cache" 2>/dev/null || true
-    chown -R www-data:www-data "${root}/storage" "${root}/database" "${root}/bootstrap/cache" 2>/dev/null || true
-    # .env must stay www-data-readable (queue worker, artisan, PHP-FPM); root-only breaks or confuses tooling.
-    if [[ -f "${root}/.env" ]]; then
-        chown www-data:www-data "${root}/.env" 2>/dev/null || true
-        chmod 640 "${root}/.env" 2>/dev/null || true
-    fi
+    # The whole tree is www-data's (the panel updates its own package in
+    # it); a name inside it is whatever www-data made it, so root changes
+    # owners without following links (-h) and leaves mkdir and chmod to
+    # www-data itself.
+    chown -h -R www-data:www-data "$root" 2>/dev/null || true
+    panel_sh 'mkdir -p "$1/storage/logs" "$1/database" "$1/bootstrap/cache"
+              [[ -f "$1/.env" && ! -L "$1/.env" ]] && chmod 640 "$1/.env"
+              exit 0' "$root" 2>/dev/null < /dev/null || true
 }
 
 # Wall-clock limit when GNU timeout exists (composer/git/ssh-keyscan/systemctl).
@@ -880,12 +936,136 @@ _cipi_composer_prepare_github() {
     export GIT_TERMINAL_PROMPT=0
     export COMPOSER_PROCESS_TIMEOUT="${COMPOSER_PROCESS_TIMEOUT:-300}"
     export COMPOSER_ALLOW_SUPERUSER=1
-    # Prefer the real binary here so config never goes through a nested timeout wrapper oddly.
-    local bin="${_CIPI_COMPOSER_BIN:-$(command -v composer 2>/dev/null || true)}"
-    if [[ -n "$bin" ]]; then
-        (cd "$dir" && "$bin" config --json github-protocols '["https"]' 2>/dev/null) || true
-        (cd "$dir" && "$bin" config preferred-install dist 2>/dev/null) || true
+    # As the tree's own user where that is www-data (panel_composer).
+    panel_composer "$dir" config --json github-protocols '["https"]' 2>/dev/null || true
+    panel_composer "$dir" config preferred-install dist 2>/dev/null || true
+}
+
+# ── Root and the panel's trees ───────────────────────────────
+# /opt/cipi/api and /opt/cipi/gui belong to www-data, the user every request
+# to the panel runs as. Composer takes composer.json, its plugins and its
+# scripts from the tree it runs in, and artisan boots the code it finds
+# there: run by root, either one is root running what www-data wrote. A
+# .env edited by root with sed, `>>` and chown is root writing wherever that
+# name leads. So in a tree of www-data's root asks www-data to do it — the
+# rule root follows in an app's home (app_as), and the same helpers.
+#
+# A tree that is still root's (the build directory of `cipi api` /
+# `cipi gui`, before it is moved into place) is worked on by root as before.
+[[ -z "${PANEL_COMPOSER_HOME:-}" ]] && readonly PANEL_COMPOSER_HOME="/var/lib/cipi-panel/composer"
+
+# By where it is, not by who owns it at this moment: `cipi self-update`
+# chowns all of /opt/cipi to root before it updates the panel, and what is
+# in the tree is still what www-data wrote.
+_panel_tree_is_www() {   # <dir or file>
+    [[ "${EUID:-$(id -u)}" -eq 0 ]] || return 1
+    local d="${1%/}" r
+    for r in "${CIPI_API_ROOT:-/opt/cipi/api}" "${CIPI_GUI_ROOT:-/opt/cipi/gui}"; do
+        [[ "$d" == "$r" || "$d" == "$r"/* ]] && return 0
+    done
+    return 1
+}
+# The tree back to www-data when root has it (after that chown, after an
+# older version's root-run composer): www-data is about to work in it.
+# -h -R changes a link, never what it points at, and walks by descriptor.
+_panel_tree_hand_back() {   # <dir or file in a panel tree>
+    local d="${1%/}" r
+    for r in "${CIPI_API_ROOT:-/opt/cipi/api}" "${CIPI_GUI_ROOT:-/opt/cipi/gui}"; do
+        [[ "$d" == "$r" || "$d" == "$r"/* ]] || continue
+        [[ -d "$r" && ! -L "$r" ]] || return 1
+        if [[ "$(stat -c '%U' -- "$r" 2>/dev/null || true)" != "www-data" ]]; then
+            chown -h -R www-data:www-data "$r" 2>/dev/null || true
+        fi
+        return 0
+    done
+    return 1
+}
+
+# composer in <dir>. Composer's own home (cache, keys, config) is a
+# directory of www-data's outside any web root: /var/www is not it.
+panel_composer() {   # <dir> <composer args…>
+    local dir="$1"; shift
+    # The binary, not the `composer` function _cipi_composer_guard defines;
+    # the same wall-clock limit and closed stdin as that function.
+    local bin="${_CIPI_COMPOSER_BIN:-$(type -P composer 2>/dev/null || true)}"
+    [[ -n "$bin" ]] || { echo "composer not found" >&2; return 127; }
+    local -a run=("$bin")
+    if command -v timeout >/dev/null 2>&1; then
+        run=(timeout --foreground "${CIPI_COMPOSER_TIMEOUT:-600}" "$bin")
     fi
+    if _panel_tree_is_www "$dir"; then
+        _panel_tree_hand_back "$dir" || return 1
+        # Its parent is root's and open to traverse; the home itself is
+        # www-data's alone (/var/lib/cipi may be closed to other users).
+        [[ -d "$(dirname "$PANEL_COMPOSER_HOME")" ]] || install -d -m 755 -o root -g root "$(dirname "$PANEL_COMPOSER_HOME")" 2>/dev/null || true
+        install -d -m 700 -o www-data -g www-data "$PANEL_COMPOSER_HOME" 2>/dev/null || true
+        ( cd / && sudo -u www-data -- env \
+            HOME="$PANEL_COMPOSER_HOME" COMPOSER_HOME="$PANEL_COMPOSER_HOME" \
+            COMPOSER_PROCESS_TIMEOUT="${COMPOSER_PROCESS_TIMEOUT:-300}" GIT_TERMINAL_PROMPT=0 \
+            COMPOSER_NO_INTERACTION=1 COMPOSER_DISABLE_XDEBUG=1 \
+            /bin/bash -c 'cd "$1" || exit 1; shift; exec "$@"' _ "$dir" "${run[@]}" "$@" < /dev/null )
+        return
+    fi
+    ( cd "$dir" && GIT_TERMINAL_PROMPT=0 COMPOSER_PROCESS_TIMEOUT="${COMPOSER_PROCESS_TIMEOUT:-300}" \
+        COMPOSER_DISABLE_XDEBUG=1 COMPOSER_ALLOW_SUPERUSER=1 "${run[@]}" "$@" < /dev/null )
+}
+
+# KEY=VALUE pairs into a .env: a key that is there is replaced, one that is
+# not is appended; the file ends up 640. The value is data — never part of
+# the sed script.
+_panel_env_set_do() {   # <file> <KEY> <VALUE> [<KEY> <VALUE>…]
+    local f="$1" k v esc; shift
+    [[ -f "$f" && ! -L "$f" ]] || return 1
+    while [[ $# -ge 2 ]]; do
+        k="$1"; v="$2"; shift 2
+        [[ "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        if grep -q "^${k}=" "$f" 2>/dev/null; then
+            esc=$(printf '%s' "$v" | sed 's/[\\&|]/\\&/g')
+            sed -i "s|^${k}=.*|${k}=${esc}|" "$f" || return 1
+        else
+            printf '%s=%s\n' "$k" "$v" >> "$f" || return 1
+        fi
+    done
+    chmod 640 "$f" 2>/dev/null || true
+    return 0
+}
+panel_env_set() {   # <file> <KEY> <VALUE> [<KEY> <VALUE>…]
+    local f="${1:-}"
+    [[ -n "$f" ]] || return 1
+    if _panel_tree_is_www "$f"; then
+        _panel_tree_hand_back "$f" || return 1
+        app_call www-data "_panel_env_set_do" _panel_env_set_do "$@" < /dev/null
+        return
+    fi
+    _panel_env_set_do "$@" || return 1
+    # A tree of root's that www-data will be given: the file with it.
+    if [[ "${EUID:-$(id -u)}" -eq 0 && ! -L "$f" ]]; then chown -h www-data:www-data "$f" 2>/dev/null || true; fi
+    return 0
+}
+# A .env of the panel, read as its owner.
+panel_env_read() {   # <file>
+    if _panel_tree_is_www "${1:-}"; then
+        _panel_tree_hand_back "$1" || return 1
+        app_as www-data cat -- "$1" 2>/dev/null < /dev/null
+        return
+    fi
+    cat -- "$1" 2>/dev/null
+}
+# Anything else in a panel tree, as its owner: a bash script, "$1"… its args.
+panel_sh() {   # <script> [args…]
+    app_sh www-data "$@"
+}
+# A file of a panel tree copied out of it (into a backup directory of
+# root's): read by www-data, written by root. Nothing when it is not there
+# or www-data cannot read it.
+panel_backup_file() {   # <file in the tree> <destination>
+    local src="$1" dst="$2"
+    [[ -f "$src" ]] || return 0
+    if _panel_tree_is_www "$src"; then
+        app_as www-data cat -- "$src" 2>/dev/null < /dev/null > "$dst" || { rm -f "$dst"; return 0; }
+        return 0
+    fi
+    cp "$src" "$dst"
 }
 
 app_set() {
@@ -959,9 +1139,13 @@ _sync_node_build_script() {
     local cmd home
     cmd=$(app_get "$app" node_build)
     home="/home/${app}"
-    mkdir -p "${home}/.deployer"
+    # Made, written and removed as the app user (see app_as). Root wrote the
+    # script and chowned it: with node-build.sh a symlink, the file it pointed
+    # at was overwritten and handed to the app — and an app with `cipi yml
+    # auto on` reaches this on its own, through sudo (5.9.0).
+    app_mkdir "$app" "${home}/.deployer"
     if [[ -z "$cmd" ]]; then
-        rm -f "${home}/.deployer/node-build.sh"
+        app_rm "$app" "${home}/.deployer/node-build.sh"
         return 0
     fi
     # An app with its own Node major (Node apps, Laravel apps pinned with
@@ -970,15 +1154,13 @@ _sync_node_build_script() {
     local node_ver path_line='export PATH="/usr/local/bin:$PATH"'
     node_ver=$(app_get "$app" node_version)
     [[ "$node_ver" =~ ^[0-9]{2}$ ]] && path_line="export PATH=\"/opt/cipi/node/${node_ver}/bin:/usr/local/bin:\$PATH\""
-    cat > "${home}/.deployer/node-build.sh" <<EOF
+    app_write "$app" "${home}/.deployer/node-build.sh" 750 <<EOF
 #!/bin/bash
 set -euo pipefail
 ${path_line}
 cd "\${1:-\$(pwd)}"
 ${cmd}
 EOF
-    chown "${app}:${app}" "${home}/.deployer/node-build.sh"
-    chmod 750 "${home}/.deployer/node-build.sh"
 }
 
 app_save() {
@@ -1022,6 +1204,8 @@ remove_app_linux_user() {
     groupdel "$app" 2>/dev/null || true
     # Absolute cleanup — home + SSH keys must not linger after a partial userdel
     [[ -e "/home/${app}" ]] && rm -rf "/home/${app}"
+    # The logs root wrote for it (nginx, supervisor, deploy.log — 5.9.0).
+    [[ -d "/var/log/cipi-apps/${app}" ]] && rm -rf "/var/log/cipi-apps/${app}"
     return 0
 }
 
@@ -1127,15 +1311,29 @@ read_choice() {
     done
 }
 
+# --key=value → ARG_key=value, --flag → ARG_flag=true.
+#
+# An option name is letters, digits, "-" and "_" and nothing else; anything
+# else is not an option and is ignored. The name ends up in `printf -v`, and
+# bash evaluates an array subscript in the name it is given there, command
+# substitutions included: `--x[$(cmd)]` ran cmd. Every `cipi` command parses
+# its arguments here, as root — so that was root for whoever may pass
+# arguments to a root `cipi` through sudo: an app user with the rule
+# `cipi yml node-sync <app> *` (written by `cipi yml auto <app> on`). Same
+# family as the cipi-app-notify exit code (5.9.0). Values are never
+# evaluated: they are stored with printf '%s'.
 parse_args() {
     for arg in "$@"; do
         case "$arg" in
             --*=*) local k="${arg%%=*}" v="${arg#*=}"; k="${k#--}"
+                [[ "$k" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || continue
                 # Panel API builds --key='value' via escapeshellarg(); keep the value, drop wrapping quotes.
                 if [[ "$v" == \'*\' && ${#v} -ge 2 ]]; then v="${v:1:${#v}-2}"; fi
                 if [[ "$v" == \"*\" && ${#v} -ge 2 ]]; then v="${v:1:${#v}-2}"; fi
                 printf -v "ARG_${k//-/_}" '%s' "$v" ;;
-            --*)   local k="${arg#--}"; printf -v "ARG_${k//-/_}" '%s' "true" ;;
+            --*)   local k="${arg#--}"
+                [[ "$k" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || continue
+                printf -v "ARG_${k//-/_}" '%s' "true" ;;
         esac
     done
 }
@@ -1157,12 +1355,250 @@ reload_supervisor() {
     supervisorctl update 2>&1 || warn "Supervisor update had issues (worker may start after first deploy)"
 }
 
+# ── Logs that root writes: /var/log/cipi-apps/<app> ──────────
+#
+# /home/<app>/logs belongs to the app user, and three things wrote there as
+# root: nginx (the master opens every access_log / error_log while it loads its
+# configuration), supervisord (it opens a program's stdout_logfile each time
+# it starts the program) and `cipi deploy` (it appended to deploy.log and then
+# chowned it to the app). None of them looks at what it opens: a symlink put
+# there in place of a log was followed. `cipi deploy` handed the file it
+# pointed at to the app user — /etc/passwd, say; supervisord appended a
+# worker's output to it, on `sudo cipi-worker restart`, which every app user
+# may run. Any app user to root (5.9.0).
+#
+# Those logs now live in /var/log/cipi-apps/<app>: root's directory, which the
+# app user reads (it is the directory's group) and cannot add to, rename in or
+# remove from. ~/logs stays the app's own, for what the app itself writes
+# (php-fpm-error.log, cron.log, anything of its own), and holds one symlink
+# per moved log, so every path people and tools know still reads. Root never
+# creates, renames or follows anything inside ~/logs: what has to happen
+# there is done as the app user (_app_as), and root reads an app's logs as
+# the app user too.
+app_log_dir() { echo "/var/log/cipi-apps/${1:-}"; }
+
+# Run a bash script as the app user, from / (root's working directory may be
+# one the app user cannot enter). Never fails the caller.
+_app_as() {   # <app> <script> [args…]
+    local app="$1" script="$2"; shift 2
+    (cd / && sudo -u "$app" /bin/bash -c "$script" _ "$@") 2>/dev/null < /dev/null || true
+}
+
+# ── Root and an app's home ───────────────────────────────────
+# Everything under /home/<app> is the app user's to rename, replace and link:
+# a name root opens there is whatever the app made of it a moment ago. So
+# root does not open, create, delete, chown or chmod a path inside an app's
+# home, and does not run a program on a tree it finds there (git reads the
+# repository's own configuration). It asks the app user to: the kernel then
+# checks every step with that user's rights, and a symlink to /etc/shadow is
+# a "permission denied", not a file handed over. What root still does itself
+# is on names it controls — /home/<app> itself — or without following
+# anything (`chown -h -R`, which walks by descriptor; `rm -rf`; a test with
+# [[ -f ]]).
+#
+# The exception is an app being created (cipi app create, cipi sync import):
+# nobody can be that user before the command that makes it has finished.
+#
+#   app_as <app> <command> [args…]        the command's own status and output
+#   app_sh <app> <script> [args…]         a bash script, "$1"… are its args
+#   app_call <app> "<fn> …" <fn> [args…]  shell functions defined here
+#   app_read <app> <file>                 its content (nothing when unreadable)
+#   app_write <app> <file> [mode]         stdin → the file
+#   app_append <app> <file>               stdin → its end
+#   app_sed <app> <file> <sed args…>      sed -i
+#   app_rm <app> <path>…                  rm -f
+#   app_mkdir <app> <dir> [mode]          mkdir -p
+#   app_of_path <path>                    whose home a path is in (for root)
+#
+# Root drops with sudo -u. Anyone else — the app user itself, in
+# cipi-app-post-deploy — has no more rights than that already and runs the
+# command as it is.
+app_as() {   # <app> <command> [args…]
+    local app="$1"; shift
+    if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+        ( cd / 2>/dev/null; "$@" )
+        return
+    fi
+    ( cd / && sudo -u "$app" -- "$@" )
+}
+app_sh() {   # <app> <script> [args…]
+    local app="$1" script="$2"; shift 2
+    app_as "$app" /bin/bash -c "$script" _ "$@"
+}
+# The functions travel as text (declare -f): what they call must be named too.
+app_call() {   # <app> "<function> …" <function> [args…]
+    local app="$1" fns="$2"; shift 2
+    # shellcheck disable=SC2086
+    app_as "$app" /bin/bash -c "$(declare -f app_of_path $fns)"$'\n''"$@"' _ "$@"
+}
+# The app whose home a path is in — for root only: 1 for anyone else, and for
+# a path that is in no app's home. A function that works on a path starts with
+#     local _o; if _o=$(app_of_path "$1"); then _app_own_check "$_o" "$1"; app_call "$_o" "<itself> …" <itself> "$@"; return; fi
+# and is then the same function for an admin's own file, for the app user,
+# and — run as the app user — for root on a file in an app's home.
+app_of_path() {   # <path>
+    [[ "${EUID:-$(id -u)}" -eq 0 && "${1:-}" =~ ^/home/([a-z][a-z0-9]{2,31})/ ]] || return 1
+    id "${BASH_REMATCH[1]}" &>/dev/null || return 1
+    printf '%s' "${BASH_REMATCH[1]}"
+}
+
+# What is left of a time when root wrote here: a file or a directory of
+# root's inside the home, which the app user cannot replace or enter. The one
+# thing root does about it is hand the whole top-level entry back —
+# /home/<app>/<name>, whose parent is root's, so the name is the one meant;
+# -h -R changes a link and never what it points at, and walks by descriptor.
+_app_reown() {   # <app> <path under the home>
+    local app="$1" path="$2" rel top
+    [[ "${EUID:-$(id -u)}" -eq 0 ]] || return 1
+    [[ "$app" =~ ^[a-z][a-z0-9]{2,31}$ && "$path" == "/home/${app}/"?* ]] || return 1
+    rel="${path#"/home/${app}/"}"; top="${rel%%/*}"
+    [[ -n "$top" && "$top" != "." && "$top" != ".." ]] || return 1
+    chown -h -R "${app}:${app}" "/home/${app}/${top}" 2>/dev/null
+}
+# A command of root's inside a directory of an app's home, on "." — and only
+# when that directory really is where its name says: with a symlink anywhere
+# on the way the physical path differs, and nothing runs. Once inside, the
+# directory cannot be swapped under the command.
+_app_dir_do() {   # <app> <directory, relative to the home> <command> [args…]
+    local app="$1" rel="$2"; shift 2
+    (
+        cd "/home/${app}" 2>/dev/null || exit 1
+        want="$(pwd -P)/${rel}"
+        cd "$rel" 2>/dev/null || exit 1
+        [[ "$(pwd -P)" == "$want" ]] || exit 1
+        "$@"
+    )
+}
+# Before the app user is asked to work on a path: is it, or the directory it
+# is in, somebody else's? Then _app_reown. Looked at, never opened: stat on
+# the name itself.
+_app_own_check() {   # <app> <path>
+    local app="$1" path="$2" uid o t
+    [[ "${EUID:-$(id -u)}" -eq 0 ]] || return 0
+    uid=$(id -u "$app" 2>/dev/null) || return 0
+    for t in "$path" "$(dirname -- "$path")"; do
+        o=$(stat -c '%u' -- "$t" 2>/dev/null || true)
+        if [[ -n "$o" && "$o" != "$uid" ]]; then
+            _app_reown "$app" "$path" || true
+            return 0
+        fi
+    done
+    return 0
+}
+# A file operation as the app user. The script gets the path as "$1", then
+# the arguments; stdin is the caller's.
+_app_file_op() {   # <app> <path> <script> [args…]
+    local app="$1" path="$2" script="$3"; shift 3
+    _app_own_check "$app" "$path"
+    app_sh "$app" "$script" "$path" "$@"
+}
+app_read() {   # <app> <file>
+    _app_own_check "$1" "$2"
+    app_as "$1" cat -- "$2" 2>/dev/null < /dev/null
+}
+# In place, like the `cat > file` root ran before: a file that exists keeps
+# its inode and, without a mode, its mode. A new file is 644, or private from
+# its first byte when a mode is given. All of stdin is taken before the file
+# is opened, so a pipeline may read the file it writes.
+app_write() {   # <app> <file> [mode]
+    local buf rc=0
+    # root's own file, 600: it is handed over as an open descriptor.
+    buf=$(mktemp) || return 1
+    cat > "$buf" || { rm -f "$buf"; return 1; }
+    _app_file_op "$1" "$2" '
+        f="$1"; m="$2"; umask 022
+        if [[ -n "$m" && ! -e "$f" ]]; then ( umask 077; : > "$f" ) || exit 1; fi
+        cat > "$f" || exit 1
+        if [[ -n "$m" ]]; then chmod "$m" "$f" || exit 1; fi
+        exit 0' "${3:-}" < "$buf" || rc=$?
+    rm -f "$buf"
+    return $rc
+}
+app_append() {   # <app> <file>
+    _app_file_op "$1" "$2" 'umask 022; cat >> "$1"'
+}
+app_sed() {   # <app> <file> <sed args…>
+    local app="$1" path="$2"; shift 2
+    _app_file_op "$app" "$path" 'f="$1"; shift; sed -i "$@" "$f"' "$@" < /dev/null
+}
+app_rm() {   # <app> <path>…
+    local app="$1"; shift
+    app_as "$app" rm -f -- "$@" 2>/dev/null < /dev/null
+}
+app_mkdir() {   # <app> <dir> [mode]
+    _app_file_op "$1" "$2" 'umask 022; mkdir -p "$1" || exit 1; if [[ -n "$2" ]]; then chmod "$2" "$1" || exit 1; fi; exit 0' "${3:-}" < /dev/null
+}
+
+# The directory, and deploy.log in it — the one log both root (`cipi deploy`)
+# and the app user (the webhook deploy) append to: the app user owns the file
+# and cannot replace it. The first time, it starts from the last lines of the
+# old ~/logs/deploy.log, read as the app user, so the panel still shows the
+# deploys from before the move. Idempotent; returns 1 when the directory
+# could not be made (callers then leave the old path alone).
+app_log_dir_ensure() {
+    local app="${1:-}" dir grp
+    [[ "$app" =~ ^[a-z][a-z0-9]{2,31}$ ]] || return 1
+    id "$app" &>/dev/null || return 1
+    dir="/var/log/cipi-apps/${app}"
+    grp=$(id -gn "$app" 2>/dev/null) || return 1
+    [[ -d /var/log/cipi-apps ]] || install -d -m 755 -o root -g root /var/log/cipi-apps 2>/dev/null || return 1
+    if [[ ! -d "$dir" || -L "$dir" || "$(stat -c '%U:%G:%a' "$dir" 2>/dev/null)" != "root:${grp}:750" ]]; then
+        [[ -L "$dir" ]] && rm -f "$dir"
+        install -d -m 750 -o root -g "$grp" "$dir" 2>/dev/null || return 1
+        if command -v setfacl &>/dev/null && id cipi &>/dev/null; then
+            setfacl -m u:cipi:rx "$dir" 2>/dev/null || true
+        fi
+    fi
+    if [[ ! -f "${dir}/deploy.log" || -L "${dir}/deploy.log" ]]; then
+        rm -f "${dir}/deploy.log" 2>/dev/null || true
+        ( umask 077; : > "${dir}/deploy.log" ) 2>/dev/null || return 1
+        # Quoted in the script, read as the app user: a symlink there gives
+        # the app nothing it could not read already.
+        (cd / && sudo -u "$app" /bin/bash -c '[[ -f "$1" && ! -L "$1" ]] && tail -n 20000 "$1"' _ "/home/${app}/logs/deploy.log") \
+            >> "${dir}/deploy.log" 2>/dev/null || true
+        chown "${app}:www-data" "${dir}/deploy.log" 2>/dev/null || chown "${app}:${grp}" "${dir}/deploy.log" 2>/dev/null || true
+        chmod 664 "${dir}/deploy.log" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# ~/logs/<name> → /var/log/cipi-apps/<app>/<name>, for each name given. Made
+# by the app user itself. A regular file already there — the log from before
+# the move — is kept as <name>.old; a symlink that points elsewhere is
+# replaced. Names are plain file names: anything else is skipped.
+app_log_links() {   # <app> <name>…
+    local app="${1:-}"; shift || true
+    [[ "$app" =~ ^[a-z][a-z0-9]{2,31}$ && $# -gt 0 ]] || return 0
+    id "$app" &>/dev/null || return 0
+    _app_as "$app" '
+        dir="$1"; logs="$2"; shift 2
+        [[ -d "$logs" ]] || mkdir -p "$logs" || exit 0
+        for n in "$@"; do
+            [[ "$n" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || continue
+            l="${logs}/${n}"
+            [[ -L "$l" && "$(readlink "$l")" == "${dir}/${n}" ]] && continue
+            if [[ -L "$l" ]]; then rm -f "$l"
+            elif [[ -e "$l" ]]; then mv -f "$l" "${l}.old" || continue
+            fi
+            ln -s "${dir}/${n}" "$l"
+        done' "/var/log/cipi-apps/${app}" "/home/${app}/logs" "$@"
+}
+
+# The symlinks every app has: the two nginx logs and the deploy log.
+app_log_links_default() { app_log_links "${1:-}" nginx-access.log nginx-error.log deploy.log; }
+
 # App home is 750 (app:app): user cipi cannot traverse /home/<app>/ without ACLs.
-# Nginx writes vhost logs as www-data; directory uses setgid www-data so new files stay group-readable.
 #
 # Do NOT apply setfacl -R or default ACLs on shared/storage/logs — Deployer chmod on Laravel log
 # files fails with "Operation not permitted" when per-file ACLs exist. Strip any file ACLs left
 # from older Cipi versions, then re-apply directory ACLs only.
+#
+# Everything under the home is the app user's to rename: as root, nothing here
+# dereferences a name found there. ~/logs is created by the app user when it
+# is missing and otherwise left as it is (before 5.9.0 root ran mkdir, chown
+# app:www-data and chmod 2775 on it — on whatever a symlink called "logs"
+# pointed at); chown is -h; a path that is a symlink is skipped; chmod on the
+# app's own files is done as the app user.
 ensure_app_logs_permissions() {
     local app="${1:-}"
     [[ -z "$app" || "$app" == "cipi" ]] && return 0
@@ -1170,44 +1606,245 @@ ensure_app_logs_permissions() {
     [[ -d "$home" ]] || return 0
     id "$app" &>/dev/null || return 0
 
-    if command -v setfacl &>/dev/null; then
-        if [[ -d "${home}/logs" ]]; then
-            find "${home}/logs" -type f -exec setfacl -b {} \; 2>/dev/null || true
-            setfacl -k "${home}/logs" 2>/dev/null || true
+    app_log_dir_ensure "$app" || true
+
+    if [[ ! -e "${home}/logs" && ! -L "${home}/logs" ]]; then
+        _app_as "$app" 'mkdir -p "$1"' "${home}/logs"
+    fi
+
+    # Reclaim root-owned log files left by old logrotate "create" rules — and,
+    # since 5.9.0, the logs nginx and supervisor wrote here before the move.
+    # From inside each directory, once it is known to be where its name says
+    # (_app_dir_do): `shared` or `storage` as a symlink would otherwise aim
+    # this at a `logs` directory anywhere. chown -R walks by descriptor and,
+    # with -h, never changes what a link points at.
+    local own_grp
+    own_grp=$(id -gn "$app" 2>/dev/null) || own_grp="$app"
+    _app_dir_do "$app" logs chown -h -R --from=root "${app}:${own_grp}" . 2>/dev/null || true
+    _app_dir_do "$app" shared/storage/logs chown -h -R --from=root "${app}:${app}" . 2>/dev/null || true
+
+    # The rest is the app user's own doing, on its own files: old ACLs off,
+    # Laravel's logs group-writable, the `cipi` user allowed to read.
+    local cipi_user=""
+    id cipi &>/dev/null && cipi_user="cipi"
+    _app_as "$app" '
+        h="$1"; cu="$2"
+        # Its own logs in its own group: logrotate rotates them as this user
+        # (app_logrotate_rule) and gives each copy the owner and group of the
+        # log — a group this user is not in (www-data, from before 5.9.0) is
+        # one it cannot give, and the rotation of that file would fail.
+        g=$(id -gn 2>/dev/null) || g=""
+        if [[ -n "$g" ]]; then
+            for d in "$h/logs" "$h/shared/storage/logs"; do
+                [[ -d "$d" && ! -L "$d" ]] || continue
+                find "$d" -maxdepth 1 -type f -name "*.log*" ! -group "$g" -exec chgrp "$g" {} +
+            done
         fi
-        if [[ -d "${home}/shared/storage/logs" ]]; then
-            find "${home}/shared/storage/logs" -type f -name '*.log' -exec setfacl -b {} \; 2>/dev/null || true
-            setfacl -k "${home}/shared/storage/logs" 2>/dev/null || true
+        acl=false; command -v setfacl >/dev/null 2>&1 && acl=true
+        if [[ "$acl" == true ]]; then
+            if [[ -d "$h/logs" && ! -L "$h/logs" ]]; then
+                find "$h/logs" -type f -exec setfacl -b {} \; ; setfacl -k "$h/logs"
+            fi
+            if [[ -d "$h/shared/storage/logs" && ! -L "$h/shared/storage/logs" ]]; then
+                find "$h/shared/storage/logs" -type f -name "*.log" -exec setfacl -b {} \; ; setfacl -k "$h/shared/storage/logs"
+            fi
         fi
-    fi
-
-    mkdir -p "${home}/logs"
-    chown "${app}:www-data" "${home}/logs"
-    chmod 2775 "${home}/logs"
-
-    # Reclaim root-owned log files left by old logrotate "create" rules
-    if [[ -d "${home}/logs" ]]; then
-        find "${home}/logs" -type f -user root -exec chown "${app}:www-data" {} \; 2>/dev/null || true
-    fi
-    if [[ -d "${home}/shared/storage/logs" ]]; then
-        find "${home}/shared/storage/logs" -type f -user root -exec chown "${app}:${app}" {} \; 2>/dev/null || true
-        chmod 664 "${home}/shared/storage/logs"/*.log 2>/dev/null || true
-    fi
-
-    if command -v setfacl &>/dev/null && id cipi &>/dev/null; then
+        if [[ -d "$h/shared/storage/logs" && ! -L "$h/shared/storage/logs" ]]; then
+            chmod 664 "$h/shared/storage/logs"/*.log
+        fi
+        if [[ "$acl" == true && -n "$cu" ]]; then
+            for d in logs shared shared/storage shared/storage/logs; do
+                [[ -d "$h/$d" && ! -L "$h/$d" ]] || continue
+                setfacl -m "u:$cu:rx" "$h/$d"
+            done
+            if [[ -d "$h/shared/storage/logs" && ! -L "$h/shared/storage/logs" ]]; then
+                find "$h/shared/storage/logs" -type f -name "*.log" -exec setfacl -m "u:$cu:r" {} \;
+            fi
+        fi
+        exit 0' "$home" "$cipi_user"
+    if [[ -n "$cipi_user" ]] && command -v setfacl &>/dev/null; then
         setfacl -m u:cipi:rx "${home}" 2>/dev/null || true
-        setfacl -m u:cipi:rx "${home}/logs" 2>/dev/null || true
-        if [[ -d "${home}/shared" ]]; then
-            setfacl -m u:cipi:rx "${home}/shared" 2>/dev/null || true
-        fi
-        if [[ -d "${home}/shared/storage" ]]; then
-            setfacl -m u:cipi:rx "${home}/shared/storage" 2>/dev/null || true
-        fi
-        if [[ -d "${home}/shared/storage/logs" ]]; then
-            setfacl -m u:cipi:rx "${home}/shared/storage/logs" 2>/dev/null || true
-            find "${home}/shared/storage/logs" -type f -name '*.log' -exec setfacl -m u:cipi:r {} \; 2>/dev/null || true
-        fi
     fi
+
+    app_log_links_default "$app"
+    app_logrotate_rule "$app" || true
+}
+
+# ── logrotate for what an app writes in its own home ─────────
+# Laravel's logs and the PHP-FPM error log are the app's own files, in the
+# app's own directories. One rule on /home/*/… had root rotate them: copy,
+# truncate and compress, by path, in a directory the app user can rearrange.
+# Each app has its own rule instead, with `su <app> <group>`: logrotate does
+# that work with the app user's rights, so the most an app can do to it is
+# leave its own logs unrotated. No script in the rule: logrotate runs those as
+# root even with `su`.
+#
+# The file is cipi-home-<app>, not cipi-app-<app>: "logs" is a valid app name
+# and cipi-app-logs is the shared rule.
+#
+# *[!0-9].log leaves out files that end in a date (laravel-2026-01-31.log):
+# those belong to Laravel's `daily` channel, which names and prunes them
+# itself. Rotating them too left a .log.1 per day that never expired.
+
+# True when the shared rule no longer names the apps' homes. Until then a rule
+# per app would name the same files a second time, and logrotate drops the
+# whole file in which it meets a duplicate.
+_app_logrotate_shared_clean() {
+    local f="${CIPI_LOGROTATE_D:-/etc/logrotate.d}/cipi-app-logs"
+    [[ -f "$f" ]] || return 0
+    ! grep -qE '^[^#]*/home/\*/(shared/storage/logs/|logs/php-fpm-)' "$f" 2>/dev/null
+}
+
+# Writes (or refreshes) the rule of one app. Nothing to do without logrotate,
+# for a name that is not an app user, or while the shared rule still covers
+# the homes (a server that has not run migration 5.9.0 yet). Idempotent.
+app_logrotate_rule() {
+    local app="${1:-}" d="${CIPI_LOGROTATE_D:-/etc/logrotate.d}" grp f tmp
+    [[ "$app" =~ ^[a-z][a-z0-9]{2,31}$ ]] || return 0
+    [[ -d "$d" ]] || return 0
+    id "$app" &>/dev/null || return 0
+    _app_logrotate_shared_clean || return 0
+    grp=$(id -gn "$app" 2>/dev/null) || return 0
+    [[ "$grp" =~ ^[a-z_][a-z0-9_-]*$ ]] || return 0
+    f="${d}/cipi-home-${app}"
+    tmp=$(mktemp) || return 1
+    cat > "$tmp" <<EOF
+# cipi-home-${app} — managed by Cipi, rewritten on deploy and on update.
+# The app's own logs, rotated as the app user (su): root does not copy,
+# truncate or compress anything inside /home/${app}.
+/home/${app}/shared/storage/logs/*[!0-9].log
+/home/${app}/logs/php-fpm-*.log {
+    su ${app} ${grp}
+    daily
+    missingok
+    rotate 365
+    compress
+    delaycompress
+    notifempty
+    copytruncate
+}
+EOF
+    if [[ -f "$f" && ! -L "$f" ]] && cmp -s "$tmp" "$f"; then
+        rm -f "$tmp"; return 0
+    fi
+    [[ -L "$f" ]] && rm -f "$f"
+    # root:root 0644 — logrotate ignores a rule file with any other owner or
+    # a mode that lets someone else write it.
+    if ! install -m 644 -o root -g root "$tmp" "$f" 2>/dev/null; then
+        rm -f "$tmp"; return 1
+    fi
+    rm -f "$tmp"
+    return 0
+}
+
+app_logrotate_remove() {
+    local app="${1:-}"
+    [[ "$app" =~ ^[a-z][a-z0-9]{2,31}$ ]] || return 0
+    rm -f "${CIPI_LOGROTATE_D:-/etc/logrotate.d}/cipi-home-${app}"
+}
+
+# Rules left behind by users that no longer exist: logrotate stops at the
+# `su` line of such a rule and reports an error at every run.
+app_logrotate_sweep() {
+    local d="${CIPI_LOGROTATE_D:-/etc/logrotate.d}" f u
+    [[ -d "$d" ]] || return 0
+    for f in "$d"/cipi-home-*; do
+        [[ -f "$f" || -L "$f" ]] || continue
+        u="${f##*/cipi-home-}"
+        [[ "$u" =~ ^[a-z][a-z0-9]{2,31}$ ]] || continue
+        id "$u" &>/dev/null || rm -f "$f"
+    done
+    return 0
+}
+
+# Takes the homes out of the shared rule — only the lines Cipi wrote, whole —
+# and returns 0 when it no longer names them. A rule someone has rearranged
+# is left as it is (return 1): the caller then keeps the old behaviour.
+_app_logrotate_shared_strip() {
+    local f="${CIPI_LOGROTATE_D:-/etc/logrotate.d}/cipi-app-logs" tmp
+    _app_logrotate_shared_clean && return 0
+    [[ -f "$f" && ! -L "$f" ]] || return 1
+    tmp=$(mktemp) || return 1
+    grep -vxF -e '/home/*/shared/storage/logs/*[!0-9].log' \
+              -e '/home/*/shared/storage/logs/*.log' \
+              -e '/home/*/logs/php-fpm-*.log' "$f" > "$tmp" 2>/dev/null || true
+    # Still a rule: a path left, and the block it opens.
+    if [[ -s "$tmp" ]] && grep -q '{' "$tmp" && grep -qE '^[[:space:]]*/[^[:space:]]' "$tmp" \
+        && ! grep -qE '^[^#]*/home/\*/(shared/storage/logs/|logs/php-fpm-)' "$tmp"; then
+        cat "$tmp" > "$f" 2>/dev/null || { rm -f "$tmp"; return 1; }
+        rm -f "$tmp"; return 0
+    fi
+    rm -f "$tmp"; return 1
+}
+
+# Every app, at once (migration 5.9.0, `cipi app fix-permissions`): the shared
+# rule first — the other order would name each log twice for a moment — then
+# each app's logs into its own group and its rule. Prints what it did.
+# Returns 1 when the shared rule could not be changed (nothing else is then).
+app_logrotate_all() {   # <app>…
+    local d="${CIPI_LOGROTATE_D:-/etc/logrotate.d}" app n=0 failed=""
+    [[ -d "$d" ]] || return 0
+    if ! _app_logrotate_shared_strip; then
+        echo "  WARNING: ${d}/cipi-app-logs is not the rule Cipi wrote — left as it is: the apps' own logs are still rotated by root"
+        echo "           (remove its /home/*/… lines, then: cipi app fix-permissions)"
+        return 1
+    fi
+    app_logrotate_sweep
+    for app in "$@"; do
+        [[ "$app" =~ ^[a-z][a-z0-9]{2,31}$ ]] || continue
+        id "$app" &>/dev/null || continue
+        _app_as "$app" '
+            g=$(id -gn 2>/dev/null) || exit 0
+            for d in "$1/logs" "$1/shared/storage/logs"; do
+                [[ -d "$d" && ! -L "$d" ]] || continue
+                find "$d" -maxdepth 1 -type f -name "*.log*" ! -group "$g" -exec chgrp "$g" {} +
+            done
+            exit 0' "/home/${app}"
+        if app_logrotate_rule "$app" && [[ -f "${d}/cipi-home-${app}" ]]; then
+            n=$((n + 1))
+        else
+            failed="${failed} ${app}"
+        fi
+    done
+    # The shared rule named every home, an app's or not. A home with the
+    # shape of an app (an account left by a failed delete, a site set up by
+    # hand) keeps being rotated, by its own rule; any other is named, since
+    # nothing rotates it from now on.
+    local h u other=""
+    for h in /home/*/; do
+        u="${h%/}"; u="${u##*/}"
+        [[ "$u" == "cipi" || -f "${d}/cipi-home-${u}" ]] && continue
+        compgen -G "/home/${u}/shared/storage/logs/*.log" >/dev/null \
+            || compgen -G "/home/${u}/logs/php-fpm-*.log" >/dev/null || continue
+        if [[ "$u" =~ ^[a-z][a-z0-9]{2,31}$ ]] && id "$u" &>/dev/null \
+            && app_logrotate_rule "$u" && [[ -f "${d}/cipi-home-${u}" ]]; then
+            n=$((n + 1))
+        else
+            other="${other} /home/${u}"
+        fi
+    done
+    echo "  logrotate: ${n} app(s) rotate their own logs as the app user (${d}/cipi-home-<app>)"
+    if [[ -n "$failed" ]]; then
+        echo "  WARNING: no logrotate rule written for:${failed} — their Laravel and PHP-FPM logs are not rotated; retry with: cipi app fix-permissions"
+    fi
+    if [[ -n "$other" ]]; then
+        echo "  NOTE: not an app's home, so no longer rotated by Cipi:${other} — add a logrotate rule of your own if those logs matter"
+    fi
+    return 0
+}
+
+# What logrotate itself makes of Cipi's rules: a dry run (-d changes nothing,
+# not even its state file) of the cipi-* files. Prints its "error:" lines and
+# returns 1 when there are any; silent and 0 otherwise, or without logrotate.
+logrotate_cipi_check() {
+    local d="${CIPI_LOGROTATE_D:-/etc/logrotate.d}" out
+    command -v logrotate &>/dev/null || return 0
+    compgen -G "${d}/cipi-*" >/dev/null || return 0
+    out=$(logrotate -d "${d}"/cipi-* 2>&1 || true)
+    out=$(grep -E '^error: ' <<< "$out" | sort -u | head -n 10 || true)
+    [[ -z "$out" ]] && return 0
+    printf '%s\n' "$out"
+    return 1
 }
 
 # Laravel apps log to one file, storage/logs/laravel.log, which logrotate
@@ -1374,9 +2011,15 @@ app_ssh_apply_default() {
 }
 
 # Restore the permission model `cipi app create` left behind. Do NOT chown -R
-# the whole home as app:app: nginx writes vhost logs as www-data into logs/
-# (2775 setgid), and a 700 home would lock www-data out of the docroot
-# (www-data is in the app group so 750 is enough).
+# the whole home as app:app with a plain chown: a 700 home would lock www-data
+# out of the docroot (www-data is in the app group so 750 is enough).
+#
+# Root, in a directory the app user owns: every chown is -h (the name, never
+# what a symlink of that name points at) and every chmod is done as the app
+# user, who owns what the chowns just gave back. Before 5.9.0 these were
+# plain chown and chmod as root, which follow a symlink: `x.pub ->
+# /etc/shadow` in ~/.ssh made shadow 644, `shared/storage -> /etc` gave /etc
+# to the app (chown -R alone is harmless there: it changes the link).
 ensure_app_permissions() {
     local app="${1:-}"
     [[ -z "$app" || "$app" == "cipi" ]] && return 0
@@ -1387,64 +2030,63 @@ ensure_app_permissions() {
     chown "${app}:${app}" "$home" 2>/dev/null || true
     chmod 750 "$home"
 
-    # Own everything except logs/ (nginx). -h: do not follow `current` → a release.
-    find "$home" -mindepth 1 \( -path "${home}/logs" -o -path "${home}/logs/*" \) -prune \
-        -o -exec chown -h "${app}:${app}" {} + 2>/dev/null || true
+    # Own everything, logs/ included. -h: do not follow `current` → a release,
+    # nor any other symlink. chown -R walks the tree through directory
+    # descriptors, so a directory swapped for a symlink while it runs is not
+    # followed either (find … -exec chown passed whole paths, which are
+    # resolved again at each call).
+    chown -h -R "${app}:${app}" "$home" 2>/dev/null || true
 
-    if [[ -d "${home}/.ssh" ]]; then
-        chown -R "${app}:${app}" "${home}/.ssh" 2>/dev/null || true
-        chmod 700 "${home}/.ssh"
-        local f
-        for f in authorized_keys id_ed25519 id_rsa known_hosts config; do
-            [[ -f "${home}/.ssh/${f}" ]] && chmod 600 "${home}/.ssh/${f}"
-        done
-        for f in "${home}/.ssh/"*.pub; do
-            [[ -f "$f" ]] && chmod 644 "$f"
-        done
-    fi
-
-    [[ -f "${home}/shared/.env" ]] && chmod 640 "${home}/shared/.env"
-    [[ -f "${home}/shared/auth.json" ]] && chmod 640 "${home}/shared/auth.json"
-    [[ -f "${home}/shared/cipi-databases.env" ]] && chmod 600 "${home}/shared/cipi-databases.env"
-
-    local d
-    for d in \
-        shared/storage \
-        shared/storage/app \
-        shared/storage/app/public \
-        shared/storage/framework \
-        shared/storage/framework/cache \
-        shared/storage/framework/cache/data \
-        shared/storage/framework/sessions \
-        shared/storage/framework/views \
-        shared/storage/logs
-    do
-        if [[ -d "${home}/${d}" ]]; then
-            chown "${app}:${app}" "${home}/${d}" 2>/dev/null || true
-            chmod 775 "${home}/${d}"
+    _app_as "$app" '
+        home="$1"
+        if [[ -d "${home}/.ssh" && ! -L "${home}/.ssh" ]]; then
+            chmod 700 "${home}/.ssh"
+            for f in authorized_keys id_ed25519 id_rsa known_hosts config; do
+                [[ -f "${home}/.ssh/${f}" && ! -L "${home}/.ssh/${f}" ]] && chmod 600 "${home}/.ssh/${f}"
+            done
+            for f in "${home}/.ssh/"*.pub; do
+                [[ -f "$f" && ! -L "$f" ]] && chmod 644 "$f"
+            done
         fi
-    done
-
-    if [[ -d "${home}/releases" ]]; then
-        find "${home}/releases" -type d -path '*/bootstrap/cache' -exec chmod 775 {} \; 2>/dev/null || true
-    fi
-
-    if [[ -d "${home}/.deployer" ]]; then
-        chown -R "${app}:${app}" "${home}/.deployer" 2>/dev/null || true
-        find "${home}/.deployer" -maxdepth 1 -type f -name '*.sh' -exec chmod 755 {} \; 2>/dev/null || true
-    fi
-
-    # logs/ is nginx's (www-data); group www-data + setgid is applied next.
-    if [[ -d "${home}/logs" ]]; then
-        chown -R "${app}:www-data" "${home}/logs" 2>/dev/null || true
-    fi
+        [[ -f "${home}/shared/.env" && ! -L "${home}/shared/.env" ]] && chmod 640 "${home}/shared/.env"
+        [[ -f "${home}/shared/auth.json" && ! -L "${home}/shared/auth.json" ]] && chmod 640 "${home}/shared/auth.json"
+        [[ -f "${home}/shared/cipi-databases.env" && ! -L "${home}/shared/cipi-databases.env" ]] && chmod 600 "${home}/shared/cipi-databases.env"
+        for d in \
+            shared/storage \
+            shared/storage/app \
+            shared/storage/app/public \
+            shared/storage/framework \
+            shared/storage/framework/cache \
+            shared/storage/framework/cache/data \
+            shared/storage/framework/sessions \
+            shared/storage/framework/views \
+            shared/storage/logs
+        do
+            [[ -d "${home}/${d}" && ! -L "${home}/${d}" ]] && chmod 775 "${home}/${d}"
+        done
+        if [[ -d "${home}/releases" && ! -L "${home}/releases" ]]; then
+            find "${home}/releases" -type d -path "*/bootstrap/cache" -exec chmod 775 {} \;
+        fi
+        if [[ -d "${home}/.deployer" && ! -L "${home}/.deployer" ]]; then
+            find "${home}/.deployer" -maxdepth 1 -type f -name "*.sh" -exec chmod 755 {} \;
+        fi
+        exit 0' "$home"
 
     ensure_app_logs_permissions "$app"
+}
+
+# A supervisor program logs to /var/log/cipi-apps/<app>/<name> (supervisord
+# opens the file as root: see app_log_dir). The directory must exist before
+# supervisord reads the program, and ~/logs/<name> points at the log.
+_supervisor_log_ready() {   # <app> <log file name>
+    app_log_dir_ensure "$1" || warn "Could not create $(app_log_dir "$1") — '${1}' programs will not start until it exists (cipi app fix-permissions ${1})"
+    app_log_links "$1" "$2"
 }
 
 _create_supervisor_worker() {
     local app="$1" v="$2" queue="${3:-default}" procs="${4:-}" tries="${5:-3}" timeout="${6:-3600}"
     [[ -z "$procs" ]] && procs=$(_app_limit "$app" worker_procs 1 20)
+    _supervisor_log_ready "$app" "worker-${queue}.log"
     cat >> "/etc/supervisor/conf.d/${app}.conf" <<EOF
 [program:${app}-worker-${queue}]
 process_name=%(program_name)s_%(process_num)02d
@@ -1458,7 +2100,7 @@ killasgroup=true
 user=${app}
 numprocs=${procs}
 redirect_stderr=true
-stdout_logfile=/home/${app}/logs/worker-${queue}.log
+stdout_logfile=/var/log/cipi-apps/${app}/worker-${queue}.log
 stdout_logfile_maxbytes=10MB
 stopwaitsecs=${timeout}
 EOF
@@ -1516,6 +2158,7 @@ _create_supervisor_octane() {
     local workers
     workers=$(_app_limit "$app" octane_workers 2 16)
     octane_php_ini_ensure || warn "Could not write ${OCTANE_INI_DIR} — '${app}' runs Octane without the PHP hardening"
+    _supervisor_log_ready "$app" octane.log
     cat >> "/etc/supervisor/conf.d/${app}.conf" <<EOF
 [program:${app}-octane]
 process_name=%(program_name)s
@@ -1530,7 +2173,7 @@ killasgroup=true
 user=${app}
 numprocs=1
 redirect_stderr=true
-stdout_logfile=/home/${app}/logs/octane.log
+stdout_logfile=/var/log/cipi-apps/${app}/octane.log
 stdout_logfile_maxbytes=10MB
 stopwaitsecs=3600
 EOF
@@ -1539,6 +2182,7 @@ EOF
 # Supervisor program for Laravel Reverb (WebSockets).
 _create_supervisor_reverb() {
     local app="$1" v="$2" port="$3"
+    _supervisor_log_ready "$app" reverb.log
     cat >> "/etc/supervisor/conf.d/${app}.conf" <<EOF
 [program:${app}-reverb]
 process_name=%(program_name)s
@@ -1552,7 +2196,7 @@ killasgroup=true
 user=${app}
 numprocs=1
 redirect_stderr=true
-stdout_logfile=/home/${app}/logs/reverb.log
+stdout_logfile=/var/log/cipi-apps/${app}/reverb.log
 stdout_logfile_maxbytes=10MB
 stopwaitsecs=3600
 EOF
@@ -1561,6 +2205,7 @@ EOF
 # Supervisor program for Laravel Horizon (mutually exclusive with queue:work workers).
 _create_supervisor_horizon() {
     local app="$1" v="$2"
+    _supervisor_log_ready "$app" horizon.log
     cat >> "/etc/supervisor/conf.d/${app}.conf" <<EOF
 [program:${app}-horizon]
 process_name=%(program_name)s
@@ -1574,7 +2219,7 @@ killasgroup=true
 user=${app}
 numprocs=1
 redirect_stderr=true
-stdout_logfile=/home/${app}/logs/horizon.log
+stdout_logfile=/var/log/cipi-apps/${app}/horizon.log
 stdout_logfile_maxbytes=10MB
 stopwaitsecs=3600
 EOF

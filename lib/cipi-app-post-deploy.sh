@@ -21,7 +21,11 @@ if [[ "$(id -un)" != "$APP" && "$(id -u)" -ne 0 ]]; then
 fi
 
 HOME_DIR="/home/${APP}"
-[[ -z "$LOG" ]] && LOG="${HOME_DIR}/logs/deploy.log"
+if [[ -z "$LOG" ]]; then
+    # Root's directory since 5.9.0 (see cipi-app-deploy); the old place otherwise.
+    LOG="/var/log/cipi-apps/${APP}/deploy.log"
+    [[ -f "$LOG" && ! -L "$LOG" && -w "$LOG" ]] || LOG="${HOME_DIR}/logs/deploy.log"
+fi
 mkdir -p "${HOME_DIR}/logs" 2>/dev/null || true
 touch "$LOG" 2>/dev/null || true
 

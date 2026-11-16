@@ -97,7 +97,9 @@ _php_frankenphp_report() {
             echo -e "  ${app}  ${YELLOW}no FrankenPHP binary in current/${NC} — check the PHP it runs on with: frankenphp -v"
             continue
         fi
-        out=$(runuser -u "$app" -- timeout 10 "$bin" -v 2>/dev/null || true)
+        # …and with no terminal: this is the app's own program, and with the
+        # admin's terminal as its own it could type into it (TIOCSTI).
+        out=$(runuser -u "$app" -- setsid -w timeout 10 "$bin" -v 2>/dev/null < /dev/null || true)
         full=$(grep -oE 'PHP [0-9]+\.[0-9]+\.[0-9]+' <<< "$out" | head -1 | cut -d' ' -f2 || true)
         if [[ -z "$full" ]]; then
             echo -e "  ${app}  ${YELLOW}FrankenPHP did not report its PHP version${NC} — check: ${bin} -v"
@@ -209,6 +211,8 @@ max_input_time = 300
 expose_php = Off
 $(php_fpm_ini_hardening)
 EOF
+    # Placeholder pool (same as setup.sh): no vhost uses it, socket 0600 so
+    # only www-data itself can reach a pool that runs without open_basedir.
     cat > "/etc/php/${v}/fpm/pool.d/www.conf" <<POOLEOF
 [www]
 user = www-data
@@ -216,6 +220,7 @@ group = www-data
 listen = /run/php/php${v}-fpm.sock
 listen.owner = www-data
 listen.group = www-data
+listen.mode = 0600
 pm = ondemand
 pm.max_children = 2
 pm.process_idle_timeout = 10s

@@ -44,7 +44,7 @@ extract() { sed -n "/^${2}() {/,/^}/p" "${LIB}/${1}"; }
 # ── 1. the update step ───────────────────────────────────────
 echo "--- _gui_update_package"
 body=$(extract gui.sh _gui_update_package)
-grep -q 'composer require cipi/gui:@dev' <<< "$body" && pass "still requires cipi/gui:@dev (the lock and autoload)" || fail "require missing"
+grep -q 'panel_composer "${CIPI_GUI_ROOT}" require cipi/gui:@dev' <<< "$body" && pass "still requires cipi/gui:@dev (the lock and autoload)" || fail "require missing"
 grep -q '_gui_reinstall_package "${CIPI_GUI_ROOT}"' <<< "$body" && pass "reinstalls the package copy after the require" || fail "no reinstall"
 grep -q 'synced=$(_gui_pkg_version /opt/cipi/cipi-gui)' <<< "$body" \
     && grep -q 'vendored=$(_gui_pkg_version "${CIPI_GUI_ROOT}/vendor/cipi/gui")' <<< "$body" \
@@ -54,8 +54,8 @@ grep -q 'success "cipi/gui package updated${vendored:+ (${vendored})}"' <<< "$bo
 # reinstall runs before publish/migrate so the new package's migrations run
 r=$(grep -n '_gui_reinstall_package "${CIPI_GUI_ROOT}"\|artisan migrate --force' <<< "$body" | head -2 | cut -d: -f1 | paste -sd, -)
 [[ "$r" == "$(sort -n <<< "${r//,/$'\n'}" | paste -sd, -)" && "$r" == *,* ]] && pass "reinstall comes before artisan migrate" || fail "order: ${r}"
-grep -q 'composer reinstall cipi/gui --no-interaction --prefer-dist --no-ansi' "${LIB}/gui.sh" \
-    && grep -q '|| (cd "$dir" && composer update cipi/gui --no-interaction --prefer-dist --no-ansi)' "${LIB}/gui.sh" \
+grep -q 'panel_composer "$dir" reinstall cipi/gui --no-interaction --prefer-dist --no-ansi' "${LIB}/gui.sh" \
+    && grep -q '|| (panel_composer "$dir" update cipi/gui --no-interaction --prefer-dist --no-ansi)' "${LIB}/gui.sh" \
     && pass "_gui_reinstall_package: reinstall, then update as the fallback" || fail "_gui_reinstall_package body"
 grep -q 'if ! _gui_update_package; then' "${LIB}/self-update.sh" && pass "cipi self-update runs the same step nightly" || fail "self-update does not call _gui_update_package"
 
@@ -284,9 +284,14 @@ nginx(){ return 0; }; systemctl(){ return 0; }; reload_nginx(){ echo reload_ngin
 chown(){ return 0; }; chmod(){ return 0; }; sudo(){ echo "sudo $*" >> "${CALLS}"; }
 panel_domain(){ echo "panel.example.com"; }; _gui_pkg_version(){ echo "${GUI_PKG_VERSION:-4.0.2}"; }
 EOS
-    for f in server_public_ip server_local_ips dns_resolve_ips ip_is_cloudflare panel_dns_check confirm_yes; do fn "${LIB}/common.sh" "$f"; done
+    for f in server_public_ip server_local_ips dns_resolve_ips ip_is_cloudflare panel_dns_check confirm_yes \
+             panel_env_set _panel_env_set_do panel_env_read; do fn "${LIB}/common.sh" "$f"; done
+    # 5.9.0: in the live tree the panel's .env is edited and read as www-data
+    # (exercised with real users in verify-5.9.0.sh); here the tree is a
+    # temporary directory of the test's own.
+    echo '_panel_tree_is_www(){ return 1; }'
     for f in _api_ssl_issue; do fn "${LIB}/api.sh" "$f"; done
-    for f in _gui_ssl_issue _gui_env_set _gui_env_unset _gui_env_get _gui_sso_apply _gui_sso_redirect_uri _gui_sso_default_label \
+    for f in _gui_ssl_issue _gui_env_set_do _gui_env_unset_do _gui_env_set _gui_env_unset _gui_env_get _gui_sso_apply _gui_sso_redirect_uri _gui_sso_default_label \
              _gui_sso_require_app _gui_sso_reset_links gui_sso_set gui_sso_status gui_sso_only gui_sso_disable gui_sso_command _gui_read_password; do fn "${LIB}/gui.sh" "$f"; done
     grep '^GUI_SSO_KEYS=' "${LIB}/gui.sh"
     fn "${LIB}/common.sh" validate_domain

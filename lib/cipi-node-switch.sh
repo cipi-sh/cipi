@@ -35,6 +35,12 @@ fi
 STATE="/var/lib/cipi/node/${APP}.json"
 [[ -f "$STATE" ]] || { echo "cipi-node-switch: ${APP} is not a Node app (no ${STATE})" >&2; exit 2; }
 HOME_DIR="/home/${APP}"
+# The two slots log to root's /var/log/cipi-apps/<app>, not to ~/logs: the
+# app user owns that directory, supervisord opens a program's log as root
+# each time it starts it, and a symlink there in place of node-blue.log was
+# followed — written to as root, and read back to the app by the tail below
+# (5.9.0). ~/logs/node-<slot>.log is a symlink to the log, made as the app.
+LOG_DIR="/var/log/cipi-apps/${APP}"
 SUP_CONF="/etc/supervisor/conf.d/${APP}-node.conf"
 UPSTREAM="/etc/nginx/conf.d/cipi-node-${APP}.conf"
 SLOTS=(blue green)
@@ -85,7 +91,7 @@ stopwaitsecs=30
 stopasgroup=true
 killasgroup=true
 redirect_stderr=true
-stdout_logfile=${HOME_DIR}/logs/node-${SLOTS[$i]}.log
+stdout_logfile=${LOG_DIR}/node-${SLOTS[$i]}.log
 stdout_logfile_maxbytes=10MB
 stdout_logfile_backups=3
 
@@ -126,6 +132,29 @@ TARGET=$(realpath -e "$TARGET" 2>/dev/null || true)
     || { echo "cipi-node-switch: not a release of ${APP}: ${2:-}" >&2; exit 2; }
 [[ -x "${NODE_BIN}/node" ]] || { echo "cipi-node-switch: Node ${VERSION} is not installed (cipi node install ${VERSION})" >&2; exit 1; }
 
+# The log directory: root's, read by the app through its group. cipi makes it
+# too (app_log_dir_ensure); this script runs on its own, so it makes sure.
+if [[ ! -d "$LOG_DIR" || -L "$LOG_DIR" ]]; then
+    [[ -L "$LOG_DIR" ]] && rm -f "$LOG_DIR"
+    [[ -d /var/log/cipi-apps ]] || install -d -m 755 -o root -g root /var/log/cipi-apps 2>/dev/null || true
+    install -d -m 750 -o root -g "$(id -gn "$APP" 2>/dev/null || echo root)" "$LOG_DIR" 2>/dev/null \
+        || { echo "cipi-node-switch: cannot create ${LOG_DIR}" >&2; exit 1; }
+fi
+# ~/logs/node-<slot>.log → the log. Made by the app user itself: root creates
+# and renames nothing in that directory. A file from before the move is kept
+# as <name>.old.
+(cd / && sudo -u "$APP" /bin/bash -c '
+    dir="$1"; logs="$2"
+    [[ -d "$logs" ]] || mkdir -p "$logs" || exit 0
+    for n in node-blue.log node-green.log; do
+        l="${logs}/${n}"
+        [[ -L "$l" && "$(readlink "$l")" == "${dir}/${n}" ]] && continue
+        if [[ -L "$l" ]]; then rm -f "$l"
+        elif [[ -e "$l" ]]; then mv -f "$l" "${l}.old" || continue
+        fi
+        ln -s "${dir}/${n}" "$l"
+    done' _ "$LOG_DIR" "${HOME_DIR}/logs") >/dev/null 2>&1 || true
+
 NEXT=0
 [[ "$ACTIVE" == 0 ]] && NEXT=1
 say "starting release $(basename "$TARGET") on ${SLOTS[$NEXT]} (127.0.0.1:${PORTS[$NEXT]})"
@@ -150,8 +179,8 @@ esac
 
 fail_new() {
     echo "cipi-node-switch: $1 — the previous release keeps serving" >&2
-    echo "---- last lines of ${HOME_DIR}/logs/node-${SLOTS[$NEXT]}.log ----" >&2
-    tail -n 30 "${HOME_DIR}/logs/node-${SLOTS[$NEXT]}.log" >&2 2>/dev/null || true
+    echo "---- last lines of ${LOG_DIR}/node-${SLOTS[$NEXT]}.log ----" >&2
+    tail -n 30 "${LOG_DIR}/node-${SLOTS[$NEXT]}.log" >&2 2>/dev/null || true
     supervisorctl stop "$(prog "$NEXT")" >/dev/null 2>&1 || true
     write_conf "${REL[0]}" "${REL[1]}" "${AUTO[0]}" "${AUTO[1]}"
     supervisorctl reread >/dev/null 2>&1 || true

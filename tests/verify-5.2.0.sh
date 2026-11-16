@@ -441,9 +441,11 @@ else
 fi
 
 echo "-- CrowdSec actually reads the app vhost logs"
-grep -q '/home/\*/logs/nginx-access.log' "${LIB}/crowdsec.sh" \
+# /var/log/cipi-apps/* since 5.9.0; /home/*/logs only while a vhost still logs there
+grep -q "app_logs='/var/log/cipi-apps/\*'" "${LIB}/crowdsec.sh" && grep -q "app_logs='/home/\*/logs'" "${LIB}/crowdsec.sh" \
+    && grep -q -- '- ${app_logs}/nginx-access.log' "${LIB}/crowdsec.sh" \
     && pass "acquisition covers per-app access logs" || fail "acquisition misses the per-app access logs"
-grep -q '/home/\*/logs/nginx-error.log' "${LIB}/crowdsec.sh" \
+grep -q -- '- ${app_logs}/nginx-error.log' "${LIB}/crowdsec.sh" \
     && pass "acquisition covers per-app error logs" || fail "acquisition misses the per-app error logs"
 if awk '/^_crowdsec_setup_apt_repo\(\)/,/^_crowdsec_install_packages\(\)/' "${LIB}/crowdsec.sh" | grep -q 'rm -f "\$list"'; then
     pass "a failed repo setup does not leave a broken apt source"

@@ -209,10 +209,25 @@ _scan_hash_err_clear() {
 _scan_hash_tree() {
     local root="$1" err
     [[ -d "$root" ]] || return 1
-    err=$(_scan_hash_err)
+    # Not err=$(_scan_hash_err): in a subshell the name it chose never reached
+    # SCAN_HASH_ERR, _scan_hash_errors read nothing, and a pass that lost
+    # files was installed as the baseline or compared as complete — the very
+    # thing the error file is for (and one temp file per call stayed in /tmp).
+    _scan_hash_err >/dev/null
+    err="$SCAN_HASH_ERR"
     : > "$err"
+    # The root is /home/<app>/current or htdocs: names the app user owns. The
+    # tree hashed — by root, every night — is one inside that home, or none:
+    # `current` pointed at / would have root read the whole disk, and the
+    # report then names what it found. Physical paths on both sides.
+    local home_real
+    home_real=$(cd "${root%/*}" 2>/dev/null && pwd -P) || { echo "cannot resolve ${root%/*}" >> "$err"; return 1; }
     (
         cd "$root" || exit 1
+        if [[ "$(pwd -P)" != "${home_real}/"* ]]; then
+            echo "${root} is not inside ${root%/*}" >> "$err"
+            exit 1
+        fi
         set -o pipefail
         find -P . -type f -print0 2>>"$err" \
             | sort -z \
@@ -475,6 +490,9 @@ _scan_run() {
 
     # ── 1. Integrity ──────────────────────────────────────────
     step "Checking release integrity (${#apps[@]} app(s))..."
+    # Named here: each app is compared in a subshell ($(…)), and one that
+    # picked the name itself would leave its file in /tmp.
+    _scan_hash_err >/dev/null
     local app
     for app in "${apps[@]}"; do
         local iso out

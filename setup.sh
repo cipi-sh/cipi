@@ -449,10 +449,20 @@ setup_ssh() {
 
     # Save root password in server.json (create if missing)
     mkdir -p /etc/cipi
-    [ -f /etc/cipi/server.json ] || echo '{}' > /etc/cipi/server.json
+    # A server installed from 5.9.0 on starts with SSH/SFTP from outside off
+    # for app users (`cipi ssh apps enable <app>` or `enable --all` opens it;
+    # deploys go through ssh localhost and are not affected). Only on a first
+    # install: a server.json that is already there keeps what it says, and a
+    # server installed before keeps its default, enabled.
+    local fresh_server=false
+    [ -f /etc/cipi/server.json ] || { echo '{}' > /etc/cipi/server.json; fresh_server=true; }
     local tmp
     tmp=$(mktemp)
-    jq --arg p "$ROOT_PASS" '. + {root_password: $p}' /etc/cipi/server.json > "$tmp"
+    if [ "$fresh_server" = true ]; then
+        jq --arg p "$ROOT_PASS" '. + {root_password: $p, app_ssh_default: "disabled"}' /etc/cipi/server.json > "$tmp"
+    else
+        jq --arg p "$ROOT_PASS" '. + {root_password: $p}' /etc/cipi/server.json > "$tmp"
+    fi
     mv "$tmp" /etc/cipi/server.json
     chmod 600 /etc/cipi/server.json
 
@@ -466,6 +476,9 @@ setup_ssh() {
     # SSH access groups
     groupadd -f cipi-ssh
     groupadd -f cipi-apps
+    # App users without SSH/SFTP from outside (cipi ssh apps): see the Match
+    # block below and lib/ssh.sh.
+    groupadd -f cipi-nossh
     usermod -aG cipi-ssh cipi
 
     # 2. The owner's keys (interactive login): every key accepted at the start
@@ -522,19 +535,81 @@ SUDOEOF
     # Remove legacy AllowUsers if present (replaced by AllowGroups)
     sed -i '/^AllowUsers/d' "$SSHD"
 
-    # Allow password auth for app users only (cipi stays key-only)
-    if ! grep -q 'Match Group cipi-apps' "$SSHD"; then
+    # App users. The server's SSH keys (the cipi user's, `cipi ssh add`) also
+    # open a shell as any app user: sshd asks this command for them at every
+    # login. lib/cipi-ssh-keys.sh is the same file, installed over this one
+    # with the rest of Cipi a few steps below.
+    cat > /usr/local/bin/cipi-ssh-keys <<'KEYSEOF'
+#!/bin/sh
+# Cipi — the server's SSH keys, for sshd (AuthorizedKeysCommand, run as cipi).
+f=/home/cipi/.ssh/authorized_keys
+[ -r "$f" ] || exit 0
+exec cat "$f"
+KEYSEOF
+    chown root:root /usr/local/bin/cipi-ssh-keys
+    chmod 755 /usr/local/bin/cipi-ssh-keys
+
+    # The section `cipi ssh apps` manages — the same text lib/ssh.sh writes
+    # (_ssh_apps_section), and rewrites on every update:
+    #   cipi-nossh (SSH access disabled, the default for new apps): from
+    #   outside, the server's keys and nothing else; from the server itself
+    #   as before (deploys run over ssh localhost);
+    #   cipi-apps (enabled): password, the app's own keys, the server's keys.
+    # A server that already has Cipi's older blocks is left to the migration.
+    if ! grep -qE '^# >>> cipi ssh apps|^[[:space:]]*Match Group cipi-(apps|nossh)' "$SSHD"; then
         cat >> "$SSHD" <<'MATCHEOF'
 
+# >>> cipi ssh apps — managed by Cipi, rewritten on update: put your own rules above
+# The server's SSH keys (cipi ssh list) open a shell as any app user. An app
+# with SSH access disabled (group cipi-nossh) accepts nothing else from
+# outside; one with access enabled also takes its password and its own keys.
+Match Group cipi-nossh Address *,!127.0.0.1,!::1
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    AuthenticationMethods publickey
+    AuthorizedKeysFile none
+    AuthorizedKeysCommand /usr/local/bin/cipi-ssh-keys %u
+    AuthorizedKeysCommandUser cipi
+Match Group cipi-nossh Address 127.0.0.1,::1
+    PasswordAuthentication yes
+Match Group cipi-apps
+    PasswordAuthentication yes
+    AuthorizedKeysCommand /usr/local/bin/cipi-ssh-keys %u
+    AuthorizedKeysCommandUser cipi
+# <<< cipi ssh apps
+MATCHEOF
+        # A section sshd does not accept must not stop SSH from coming back:
+        # it goes, the one rule every sshd takes stays — and the default
+        # goes back to enabled, so that what `cipi app create` says about a
+        # new app is true.
+        if ! sshd -t -f "$SSHD" >/dev/null 2>&1 && ! /usr/sbin/sshd -t -f "$SSHD" >/dev/null 2>&1; then
+            sed -i '/^# >>> cipi ssh apps/,$d' "$SSHD"
+            cat >> "$SSHD" <<'MATCHEOF'
 Match Group cipi-apps
     PasswordAuthentication yes
 MATCHEOF
+            if [ "$fresh_server" = true ]; then
+                tmp=$(mktemp)
+                if jq 'del(.app_ssh_default)' /etc/cipi/server.json > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+                    mv "$tmp" /etc/cipi/server.json
+                    chmod 600 /etc/cipi/server.json
+                else
+                    rm -f "$tmp"
+                fi
+                fresh_server=false
+            fi
+            echo -e "${YELLOW}! sshd refused Cipi's rules for app users — they keep SSH/SFTP from outside with their password (later: cipi ssh apps sync)${NC}"
+        fi
     fi
 
     # 6. Restart SSH
     systemctl restart ssh || systemctl restart sshd
 
-    echo -e "${GREEN}✓ SSH hardened (key-only for cipi, password for app users)${NC}"
+    if [ "$fresh_server" = true ]; then
+        echo -e "${GREEN}✓ SSH hardened (key-only for cipi; app users: no SSH/SFTP from outside until 'cipi ssh apps enable <app>')${NC}"
+    else
+        echo -e "${GREEN}✓ SSH hardened (key-only for cipi, password for app users)${NC}"
+    fi
 }
 
 # ── NGINX ─────────────────────────────────────────────────────
@@ -935,7 +1010,9 @@ session.upload_progress.enabled = 0
 fatal_error_backtraces = 0
 INIEOF
 
-        # Replace default www pool with a minimal placeholder so FPM can start
+        # Replace default www pool with a minimal placeholder so FPM can start.
+        # No vhost points at it; it runs as www-data without open_basedir, so
+        # its socket is 0600 — reachable by www-data alone, never by an app.
         cat > "/etc/php/${VER}/fpm/pool.d/www.conf" <<POOLEOF
 [www]
 user = www-data
@@ -943,6 +1020,7 @@ group = www-data
 listen = /run/php/php${VER}-fpm.sock
 listen.owner = www-data
 listen.group = www-data
+listen.mode = 0600
 pm = ondemand
 pm.max_children = 2
 pm.process_idle_timeout = 10s
@@ -960,7 +1038,9 @@ POOLEOF
 
 # ── COMPOSER ──────────────────────────────────────────────────
 
-readonly COMPOSER_MIN="2.10.1"
+# 2.10.3 (2026-08-27) is a security release; the same floor as
+# composer_security_floor in lib/common.sh.
+readonly COMPOSER_MIN="2.10.3"
 
 install_composer() {
     step_msg "Installing Composer..."
@@ -1137,6 +1217,10 @@ install_cipi() {
 
     cp cipi-install/lib/cipi-read-app-logs.sh /usr/local/bin/cipi-read-app-logs
     chmod 755 /usr/local/bin/cipi-read-app-logs
+    # sshd runs it as the cipi user and refuses a command anyone else can write.
+    cp cipi-install/lib/cipi-ssh-keys.sh /usr/local/bin/cipi-ssh-keys
+    chown root:root /usr/local/bin/cipi-ssh-keys
+    chmod 755 /usr/local/bin/cipi-ssh-keys
 
     # HTTP healthcheck cron helper
     cp cipi-install/lib/cipi-health-check.sh /usr/local/bin/cipi-health-check
@@ -1214,10 +1298,13 @@ EOF
     # Version
     echo "$BUILD" > /etc/cipi/version
 
-    # Sudoers for API (www-data runs cipi via sudo — restricted to API commands only)
+    # Sudoers for the panel (www-data runs cipi via sudo — restricted to API
+    # commands only). Written only when the API or the GUI is installed, so a
+    # fresh server has no www-data → root path at all; `cipi api <domain>` and
+    # `cipi gui <domain>` write it when they install (5.9.0).
     # shellcheck source=/dev/null
     source "${CIPI_LIB}/cipi-api-sudoers.sh"
-    write_cipi_api_sudoers
+    ensure_cipi_api_sudoers
 
     rm -rf /tmp/cipi-install
 
@@ -1310,26 +1397,49 @@ AUEOF
 # was issued (HTTP-01 via nginx, DNS-01 via Cloudflare for wildcards)
 10 4 * * 0 /usr/local/bin/cipi-cron-notify ssl-renew certbot renew --non-interactive --post-hook "systemctl reload nginx" >> /var/log/cipi/certbot.log 2>&1
 # Security updates — unattended-upgrades handles this daily via APT::Periodic
-# Stack patches (nginx / MariaDB / PostgreSQL / Valkey): no cron — run
-#   cipi nginx upgrade / cipi db upgrade / cipi service upgrade valkey
+# Stack patches (nginx / MariaDB / PostgreSQL / Valkey / Node.js / Composer):
+#   every night at 04:20 — /etc/cron.d/cipi-autoupdate (cipi autoupdate)
+# What is waiting (a reboot, a patch, a warning): every morning at 07:30 —
+#   /etc/cron.d/cipi-pending (cipi pending)
 # Weekly apt cache cleanup (Sunday 5 AM)
 0 5 * * 0 apt-get clean && apt-get autoclean >> /var/log/cipi/updates.log 2>&1
-# Clear RAM cache (daily 5:50 AM)
-50 5 * * * echo 3 > /proc/sys/vm/drop_caches && swapoff -a && swapon -a 2>/dev/null
+# Clear RAM cache (daily 5:50 AM). Swap is emptied only when what is in it fits
+# in the available RAM with room to spare — on a small server whose swap is in
+# real use, swapoff pushed everything back at once and the OOM killer chose.
+50 5 * * * echo 3 > /proc/sys/vm/drop_caches && awk '/^MemAvailable:/{a=$2} /^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{exit !(t>f && a>(t-f)*2)}' /proc/meminfo && swapoff -a && swapon -a 2>/dev/null
 CRONEOF
     ) | crontab -
+
+    # The two jobs above live in /etc/cron.d, the same files lib/autoupdate.sh
+    # and lib/pending.sh write (autoupdate_cron_write, pending_cron_write).
+    cat > /etc/cron.d/cipi-autoupdate <<'EOF'
+# Cipi — nightly patch updates of nginx, MariaDB, PostgreSQL, Valkey, Node.js
+# and Composer (cipi autoupdate). Per component: cipi autoupdate off <name>.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+20 4 * * * root /usr/local/bin/cipi-cron-notify autoupdate /usr/local/bin/cipi autoupdate run >> /var/log/cipi/autoupdate.log 2>&1
+EOF
+    chmod 644 /etc/cron.d/cipi-autoupdate
+    cat > /etc/cron.d/cipi-pending <<'EOF'
+# Cipi — daily look at what is waiting: a reboot, a patch, a warning
+# (cipi pending). Mails the list when it changes; off: cipi notifications.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+30 7 * * * root /usr/local/bin/cipi pending --cron >> /var/log/cipi/pending.log 2>&1
+EOF
+    chmod 644 /etc/cron.d/cipi-pending
 
     # ── GDPR-compliant log rotation ──
 
     # Application logs (Laravel, PHP-FPM, workers, deploy) — 12 months
-    # *[!0-9].log leaves out files that end in a date (laravel-2026-01-31.log):
-    # those belong to Laravel's `daily` channel, which names and prunes them
-    # itself. Rotating them too left a .log.1 per day that never expired.
+    # What root writes for an app (nginx, supervisor workers, deploy.log) is in
+    # /var/log/cipi-apps/<app>, not in ~/logs: see app_log_dir in lib/common.sh.
+    install -d -m 755 -o root -g root /var/log/cipi-apps
+    # What an app writes itself in its own home (Laravel's logs, the PHP-FPM
+    # error log) is not here: each app has its own rule, cipi-home-<app>,
+    # which logrotate runs as the app user — app_logrotate_rule in
+    # lib/common.sh, written when the app is created.
     cat > /etc/logrotate.d/cipi-app-logs <<'EOF'
-/home/*/shared/storage/logs/*[!0-9].log
-/home/*/logs/php-fpm-*.log
-/home/*/logs/worker-*.log
-/home/*/logs/deploy.log
+/var/log/cipi-apps/*/worker-*.log
+/var/log/cipi-apps/*/deploy.log
 /var/log/cipi/*.log
 /var/log/cipi-queue.log {
     daily
@@ -1344,8 +1454,8 @@ EOF
 
     # HTTP / Navigation logs (nginx access & error) — 90 days
     cat > /etc/logrotate.d/cipi-http-logs <<'EOF'
-/home/*/logs/nginx-access.log
-/home/*/logs/nginx-error.log
+/var/log/cipi-apps/*/nginx-access.log
+/var/log/cipi-apps/*/nginx-error.log
 /var/log/nginx/*.log {
     daily
     missingok
@@ -1466,7 +1576,90 @@ _confirm_credentials_saved() {
 # The optional layers, one yes/no each, instead of a page of commands under
 # the credentials. Each runs the normal command with stdin on the terminal:
 # this script's own stdin is the pipe from wget.
+# Optional: the token of the Git provider. With one, `cipi app create` adds
+# the deploy key and the webhook to the repository by itself; without one
+# both are added by hand, for every app — and that was only said afterwards.
+# The token is read without echo and handed to `cipi git <provider>-token`,
+# the command that saves it later too. Nothing is asked without a terminal.
+_setup_git_token() {
+    local choice provider label token url
+    echo -e "  ${BOLD}Optional — your Git provider${NC}"
+    echo -e "  ${DIM}With an access token, ${NC}cipi app create${DIM} adds the deploy key and the push webhook to each${NC}"
+    echo -e "  ${DIM}repository by itself. Without one you add both by hand for every app. It can be added later.${NC}"
+    echo ""
+    _has_tty || { echo -e "  ${DIM}Later: cipi git github-token <token>  (gitlab-token, bitbucket-token, azure-token — cipi help git)${NC}"; echo ""; return 0; }
+    echo -e "    ${CYAN}1${NC}  GitHub"
+    echo -e "    ${CYAN}2${NC}  GitLab ${DIM}(gitlab.com or self-hosted)${NC}"
+    echo -e "    ${CYAN}3${NC}  Bitbucket"
+    echo -e "    ${CYAN}4${NC}  Azure DevOps"
+    echo -e "    ${CYAN}Enter${NC}  skip — I will add it later, or add keys and webhooks by hand"
+    echo -en "  ${BOLD}Where are your repositories?${NC} [1-4, Enter = skip] "
+    read -r choice < /dev/tty
+    case "$(printf '%s' "$choice" | tr -d '[:space:]')" in
+        1) provider=github; label="GitHub" ;;
+        2) provider=gitlab; label="GitLab" ;;
+        3) provider=bitbucket; label="Bitbucket" ;;
+        4) provider=azure; label="Azure DevOps" ;;
+        *) echo -e "  ${DIM}Skipped. Later: cipi git github-token <token>  (cipi help git for the other providers)${NC}"; echo ""; return 0 ;;
+    esac
+    echo ""
+    echo -e "  ${BOLD}How to create the token${NC}"
+    case "$provider" in
+        github)
+            echo -e "  ${CYAN}https://github.com/settings/personal-access-tokens/new${NC}  ${DIM}(Settings → Developer settings → Fine-grained tokens)${NC}"
+            echo -e "    Repository access   the repositories you will deploy (or all)"
+            echo -e "    Permissions         ${BOLD}Administration: Read and write${NC}  ${DIM}(deploy keys)${NC}"
+            echo -e "                        ${BOLD}Webhooks: Read and write${NC}"
+            echo -e "  ${DIM}A classic token works too: scopes ${NC}repo${DIM} and ${NC}admin:repo_hook${DIM}.${NC}"
+            ;;
+        gitlab)
+            echo -e "  ${CYAN}https://gitlab.com/-/user_settings/personal_access_tokens${NC}  ${DIM}(or the same page of your own GitLab)${NC}"
+            echo -e "    Scope               ${BOLD}api${NC}"
+            echo -e "    Role                ${BOLD}Maintainer${NC} on the projects you will deploy"
+            echo -en "  ${BOLD}Self-hosted GitLab URL${NC} ${DIM}(Enter = gitlab.com)${NC}: "
+            read -r url < /dev/tty
+            url=$(printf '%s' "$url" | tr -d '[:space:]')
+            if [[ -n "$url" ]]; then
+                /usr/local/bin/cipi git gitlab-url "$url" < /dev/tty || echo -e "  ${YELLOW}URL not saved — later: cipi git gitlab-url <url>${NC}"
+            fi
+            ;;
+        bitbucket)
+            echo -e "  An access token of the workspace ${DIM}(Workspace settings → Access tokens)${NC}, pasted as it is,"
+            echo -e "  or an API token of your Atlassian account, pasted as ${BOLD}email:token${NC}"
+            echo -e "  ${CYAN}https://id.atlassian.com/manage-profile/security/api-tokens${NC}"
+            echo -e "    Scopes              ${BOLD}Repositories: Admin${NC}  ${DIM}(deploy keys)${NC}"
+            echo -e "                        ${BOLD}Webhooks: Read and write${NC}"
+            ;;
+        azure)
+            echo -e "  ${CYAN}https://dev.azure.com${NC} → User settings → Personal access tokens"
+            echo -e "  ${DIM}Azure DevOps has no deploy key per repository: the token adds the server's SSH key to${NC}"
+            echo -e "  ${DIM}your account and a service hook to each project, so it must be allowed to manage both${NC}"
+            echo -e "  ${DIM}(a token with Full access is).${NC}"
+            ;;
+    esac
+    echo ""
+    echo -en "  ${BOLD}Paste the ${label} token${NC} ${DIM}(not shown; Enter = skip)${NC}: "
+    read -rs token < /dev/tty
+    echo ""
+    token=$(printf '%s' "$token" | tr -d '[:space:]')
+    if [[ -z "$token" ]]; then
+        echo -e "  ${DIM}Skipped. Later: cipi git ${provider}-token <token>${NC}"
+        echo ""
+        return 0
+    fi
+    if /usr/local/bin/cipi git "${provider}-token" "$token" < /dev/tty; then
+        echo -e "  ${GREEN}✓ ${label} token saved${NC} ${DIM}— new apps get their deploy key and webhook by themselves (cipi git status)${NC}"
+    else
+        echo -e "  ${YELLOW}The token was not saved — see above.${NC} Later: ${CYAN}cipi git ${provider}-token <token>${NC}"
+    fi
+    echo ""
+    return 0
+}
+
 _setup_optional_wizard() {
+    _setup_git_token || true
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
     echo -e "  ${BOLD}Optional — a browser instead of SSH${NC}"
     echo -e "  ${DIM}Two layers, each a yes/no now or one command later. Both need a DNS A record of their own → ${SERVER_IP}.${NC}"
     echo ""

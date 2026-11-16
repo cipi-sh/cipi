@@ -38,6 +38,10 @@ before('deploy:symlink', 'workers:stop');
 __CIPI_HOOK_HORIZON_TERMINATE__
 __CIPI_HOOK_QUEUE_RESTART__
 after('deploy:symlink', 'workers:restart');
+// A deploy that fails releases its own lock: the next one starts without
+// `cipi deploy <app> --unlock`. A deploy refused because another one is
+// running is not a failure for Deployer, and releases nothing.
+after('deploy:failed', 'deploy:unlock');
 
 task('cipi:chmod_storage_logs_dir', function () {
     run('chmod 775 {{release_path}}/storage/logs 2>/dev/null || true');

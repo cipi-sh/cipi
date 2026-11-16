@@ -31,7 +31,13 @@ fi
 
 HOME_DIR="/home/${APP}"
 DEPLOY_FILE="${HOME_DIR}/.deployer/deploy.php"
-LOG="${HOME_DIR}/logs/deploy.log"
+# The deploy log is /var/log/cipi-apps/<app>/deploy.log since 5.9.0: a file of
+# this user in a directory of root's, so `cipi deploy` (root) can append to the
+# same log without following anything this user could put in its place.
+# ~/logs/deploy.log is a symlink to it. Where that file is not there yet, the
+# old place.
+LOG="/var/log/cipi-apps/${APP}/deploy.log"
+[[ -f "$LOG" && ! -L "$LOG" && -w "$LOG" ]] || LOG="${HOME_DIR}/logs/deploy.log"
 
 # The cron moves ~/.deploy-trigger here before calling us. Whoever wrote it
 # (the Git webhook endpoint of cipi/agent, its MCP deploy tool, …) may say who

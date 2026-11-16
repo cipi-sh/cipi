@@ -33,6 +33,25 @@ TMP=$(mktemp -d) || { echo "mktemp failed" >&2; exit 1; }
 trap 'rm -rf "${TMP:?}"' EXIT
 
 extract() { sed -n "/^${2}() {/,/^}/p" "${LIB}/${1}"; }
+# Since 5.9.0 the functions under test hand file work inside an app's home to
+# the app user (app_as: sudo -u, when root). The apps here are directories in
+# a temp dir, not users: sudo is a stub that runs the command as whoever runs
+# the test, and the helpers travel with the function that calls them.
+APP_HELPERS="app_as app_sh app_call app_of_path _app_reown _app_dir_do _app_own_check _app_file_op app_read app_write app_append app_sed app_rm app_mkdir"
+mkdir -p "${TMP}/stub"
+printf '%s\n' '#!/bin/bash' \
+    'while [[ "${1:-}" == -* ]]; do case "$1" in -u) shift 2 ;; --) shift; break ;; *) shift ;; esac; done' \
+    'exec "$@"' > "${TMP}/stub/sudo"
+if ! sed --version >/dev/null 2>&1; then   # BSD sed, in the helpers' own shells too
+    printf '%s\n' '#!/bin/bash' "s='$(command -v sed)'" \
+        'if [[ "${1:-}" == "-i" ]]; then shift; exec "$s" -i "" "$@"; fi' 'exec "$s" "$@"' > "${TMP}/stub/sed"
+fi
+chmod +x "${TMP}/stub/"*
+app_helpers() {   # <the directory that stands for />
+    local f
+    echo "export PATH='${TMP}/stub:'\"\$PATH\""
+    for f in $APP_HELPERS; do extract common.sh "$f"; done | sed "s|/home/|${1}/home/|g"
+}
 mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 
 # ── 1. PHP ini hardening ─────────────────────────────────────
@@ -178,7 +197,8 @@ grep -q '_alias_cert_hint "$app" "$WWW_PAIR_ADDED"' "${LIB}/app.sh" \
 # ── 5. deploy --releases durations ───────────────────────────
 echo "--- deploy durations"
 DEPFN="${TMP}/dep.sh"
-{ extract deploy.sh deploy_app_home | sed "s|/home/|${TMP}/home/|"; extract deploy.sh deploy_log_file
+# deploy.log lives in /var/log/cipi-apps/<app> since 5.9.0: here, under the temp dir like the home
+{ extract deploy.sh deploy_app_home | sed "s|/home/|${TMP}/home/|"; echo "deploy_log_file() { echo \"${TMP}/home/\${1:-}/logs/deploy.log\"; }"
   extract deploy.sh _deploy_fmt_secs; extract deploy.sh _deploy_release_took; } > "$DEPFN"
 mkdir -p "${TMP}/home/demo/logs"
 cat > "${TMP}/home/demo/logs/deploy.log" <<'EOF'
@@ -203,6 +223,7 @@ ENVFN="${TMP}/env.sh"
     if ! sed --version >/dev/null 2>&1; then
         echo 'sed() { if [[ "${1:-}" == "-i" ]]; then shift; command sed -i "" "$@"; else command sed "$@"; fi; }'
     fi
+    app_helpers "$TMP"
     extract common.sh app_env_set_deploy_branch | sed "s|/home/|${TMP}/home/|"
 } > "$ENVFN"
 mkdir -p "${TMP}/home/demo/shared"
@@ -234,6 +255,7 @@ RSFN="${TMP}/reset.sh"
     fi
     echo "CIPI_CONFIG=${TMP}/rcfg"
     echo 'vault_read() { cat "${CIPI_CONFIG}/apps.json"; }'
+    app_helpers "$TMP"
     extract reset.sh _reset_valkey_env_sync | sed "s|/home/|${TMP}/home/|"
 } > "$RSFN"
 mkdir -p "${TMP}/rcfg" "${TMP}/home/gen/shared" "${TMP}/home/own/shared" "${TMP}/home/none/shared"
@@ -354,6 +376,7 @@ mkdir -p "${M}/lib" "${M}/bin" "${M}/cfg"
     extract common.sh php_fpm_ini_hardening
     extract common.sh fpm_pool_hardening
     extract common.sh version_at_least
+    app_helpers "$M"
     extract common.sh app_env_set_deploy_branch | sed "s|/home/|${M}/home/|"
     cat <<EOF
 php_is_installed() { [[ -d "${M}/etc/php/\$1" ]]; }

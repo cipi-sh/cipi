@@ -97,7 +97,7 @@ reset_db_root_password() {
 # names of the apps it updated, one per line.
 # Usage: _reset_valkey_env_sync <old_password> <new_password>
 _reset_valkey_env_sync() {
-    local old="$1" new="$2" app env old_re new_esc
+    local old="$1" new="$2" app env old_re new_esc cur
     [[ -n "$old" && -n "$new" ]] || return 0
     [[ -f "${CIPI_CONFIG}/apps.json" ]] || return 0
     old_re=$(printf '%s' "$old" | sed 's/[][\.*^$|&/]/\\&/g')
@@ -106,8 +106,11 @@ _reset_valkey_env_sync() {
         [[ -n "$app" ]] || continue
         env="/home/${app}/shared/.env"
         [[ -f "$env" ]] || continue
-        grep -qE "^REDIS_PASSWORD=[\"']?${old_re}[\"']?$" "$env" 2>/dev/null || continue
-        sed -i "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=${new_esc}|" "$env" && echo "$app"
+        # Each app's .env is read and edited as that app's user (app_as in
+        # common.sh): as root, a symlink there was another app's .env.
+        cur=$(app_read "$app" "$env") || continue
+        grep -qE "^REDIS_PASSWORD=[\"']?${old_re}[\"']?$" <<< "$cur" || continue
+        app_sed "$app" "$env" "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=${new_esc}|" && echo "$app"
     done < <(vault_read apps.json 2>/dev/null | jq -r 'keys[]' 2>/dev/null || true)
     return 0
 }

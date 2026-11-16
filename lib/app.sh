@@ -14,7 +14,7 @@ app_create() {
     local env_label="${ARG_env:-production}"
     local is_custom="${ARG_custom:-false}"
     local db_engine="${ARG_engine:-}"
-    local octane_server="" octane_port=""
+    local octane_server="" octane_port="" valkey_port=""
 
     # Wizard, first step: what kind of app. Asked on a terminal when no flag
     # already says it (--custom, --octane, --node, --framework); the panel API
@@ -63,6 +63,12 @@ app_create() {
     local app_type="laravel"
     [[ "$is_custom" == "true" ]] && app_type="custom"
 
+    # Valkey: an instance of its own (default) or the server's shared one.
+    case "${ARG_valkey:-own}" in
+        own|shared) ;;
+        *) error "Invalid --valkey value. Use: own (default) or shared"; exit 1 ;;
+    esac
+
     # Optional Laravel Octane (FrankenPHP) — parallel to PHP-FPM apps
     if [[ -n "${ARG_octane+x}" ]]; then
         octane_server=$(_normalize_octane_arg "${ARG_octane}") || {
@@ -109,7 +115,10 @@ app_create() {
     [[ -z "$app_user" ]]    && read_input "App username (lowercase, min 3 chars)" "" app_user
     [[ -z "$domain" ]]      && read_input "Primary domain" "" domain
     if [[ "$app_type" == "custom" ]]; then
-        if [[ -z "$repository" && "${ARG_repository+x}" != x ]]; then
+        # Asked on a terminal only. The panel sends no --repository for an
+        # SFTP-only app: the prompt then read end-of-file, and the command
+        # ended right there with the question as its only output.
+        if [[ -z "$repository" && "${ARG_repository+x}" != x && -t 0 ]]; then
             read_input "Git — leave empty to use SFTP only (no repository)" "" repository
         fi
     else
@@ -159,7 +168,7 @@ app_create() {
     if [[ "$app_type" == "custom" ]]; then
         docroot="${ARG_docroot:-}"
         if [[ -z "$docroot" ]]; then
-            echo -e "  Document root under htdocs (default /): e.g. ${CYAN}/${NC}, ${CYAN}www${NC}, ${CYAN}dist${NC}, ${CYAN}public${NC}"
+            echo -e "  Document root, inside ${CYAN}~/htdocs${NC} — ${CYAN}/${NC} is htdocs itself (default); or a folder in it: ${CYAN}www${NC}, ${CYAN}dist${NC}, ${CYAN}public${NC}"
             read_input "Docroot" "/" docroot
         fi
         [[ "$docroot" == "/" || "$docroot" == "." ]] && docroot=""
@@ -218,8 +227,13 @@ app_create() {
     home="/home/${app_user}"
 
     # 1. Linux user
+    # The membership runs one way only: www-data (nginx, the panel) joins the
+    # app's group to read its docroot and connect to its socket. The app user
+    # is NOT in www-data — every PHP-FPM socket on the server is group
+    # www-data, so that membership let any app run PHP in every other pool
+    # and as www-data itself (5.9.0, migration drops it on existing servers).
     step "Creating user..."
-    useradd -m -s /bin/bash -G www-data,cipi-apps "$app_user"
+    useradd -m -s /bin/bash -G cipi-apps "$app_user"
     app_ssh_apply_default "$app_user"
     echo "${app_user}:${user_pass}" | chpasswd
     chmod 750 "$home"
@@ -395,9 +409,25 @@ BASH
     # 5. Config: .env (Laravel only)
     if [[ "$app_type" == "laravel" ]]; then
         step ".env..."
-        local db_env redis_env
+        local db_env redis_env=""
         db_env=$(db_laravel_env_block "$db_engine" "$app_user" "$app_user" "$db_pass")
-        redis_env=$(_app_redis_env_block)
+        # A Valkey of its own (lib/valkey.sh): its own port and password, so
+        # no other app can read this one's cache, sessions and queues. The
+        # server's shared instance with --valkey=shared, or when an instance
+        # cannot be started — the app then works as it did before 5.9.0.
+        if [[ "${ARG_valkey:-own}" != "shared" && -f "${CIPI_LIB}/valkey.sh" ]]; then
+            # shellcheck source=/dev/null
+            source "${CIPI_LIB}/valkey.sh"
+            if valkey_available; then
+                if valkey_instance_create "$app_user"; then
+                    valkey_port="$VALKEY_NEW_PORT"
+                    redis_env=$(valkey_env_block "$VALKEY_NEW_PORT" "$VALKEY_NEW_PASS")
+                else
+                    warn "Could not start a Valkey instance for '${app_user}' — it gets the shared one (later: cipi valkey isolate ${app_user})"
+                fi
+            fi
+        fi
+        [[ -n "$redis_env" ]] || redis_env=$(_app_redis_env_block)
         cat > "${home}/shared/.env" <<ENV
 APP_NAME="${app_user}"
 APP_ENV=${env_label}
@@ -432,7 +462,7 @@ ENV
         fi
         chown "${app_user}:${app_user}" "${home}/shared/.env"
         chmod 640 "${home}/shared/.env"
-        success ".env with DB${redis_env:+, Valkey} + webhook"
+        success ".env with DB${redis_env:+, Valkey${valkey_port:+ (own instance, 127.0.0.1:${valkey_port})}} + webhook"
     fi
 
     # 6. PHP-FPM pool (Laravel and custom) — skipped for Octane apps
@@ -528,6 +558,9 @@ JSON
         git_save_app_data "$app_user" "$GIT_PROVIDER" "${GIT_DEPLOY_KEY_ID:-}" "${GIT_WEBHOOK_ID:-}"
     fi
     [[ -n "$node_build" ]] && app_set "$app_user" node_build "$node_build"
+    if [[ -n "$valkey_port" ]]; then
+        app_set_json "$app_user" valkey_port "$valkey_port"
+    fi
     log_action "APP CREATED: $app_user domain=$domain env=${env_label} php=$php_ver engine=${db_engine:-none} octane=${octane_server:-none}${NODE_OPT_MODE:+ node=${NODE_OPT_MODE}/${NODE_OPT_VERSION}}${node_build:+ build=${node_build}}"
 
     # Email notification
@@ -657,11 +690,17 @@ SUDO
     fi
     [[ -n "$node_build" ]] && echo -e "  Build:      ${CYAN}${node_build}${NC}  ${DIM}(every deploy, before the release goes live)${NC}"
     echo -e "  Home:       ${CYAN}${home}${NC}"
-    [[ "$app_type" == "custom" ]] && echo -e "  Docroot:    ${CYAN}/${docroot:-}${NC}"
+    [[ "$app_type" == "custom" ]] && echo -e "  Docroot:    ${CYAN}${home}/htdocs${docroot:+/${docroot}}${NC}  ${DIM}(a custom app is served from htdocs; \"/\" is htdocs itself)${NC}"
     echo ""
     echo -e "  ${BOLD}SSH${NC}         ${CYAN}${app_user}${NC} / ${CYAN}${user_pass}${NC}"
     if id -nG "$app_user" 2>/dev/null | tr ' ' '\n' | grep -qx cipi-nossh; then
-        echo -e "              ${YELLOW}SSH/SFTP from outside is disabled for new apps${NC} ${DIM}— cipi ssh apps enable ${app_user}${NC}"
+        echo -e "              ${YELLOW}Password and SFTP from outside are disabled for new apps${NC} ${DIM}— cipi ssh apps enable ${app_user}${NC}"
+        echo -e "              ${DIM}The server's SSH keys (cipi ssh list) already work: ssh ${app_user}@${server_ip:-<server>}${NC}"
+    else
+        echo -e "              ${DIM}The server's SSH keys (cipi ssh list) work too: ssh ${app_user}@${server_ip:-<server>}${NC}"
+    fi
+    if [[ -n "${valkey_port:-}" ]]; then
+        echo -e "  ${BOLD}Valkey${NC}      ${CYAN}127.0.0.1:${valkey_port}${NC}  ${DIM}(its own instance — REDIS_* in .env)${NC}"
     fi
     if [[ "$app_type" == "laravel" ]]; then
         echo -e "  ${BOLD}Database${NC}    ${CYAN}${app_user}${NC} / ${CYAN}${db_pass}${NC}  ${DIM}($(db_engine_label "$db_engine"))${NC}"
@@ -928,6 +967,11 @@ app_show() {
         local cloned; cloned=$(app_get "$app" cloned_from)
         [[ -n "$cloned" ]] && printf "  %-14s ${CYAN}%s${NC}\n" "Cloned from" "$cloned"
     fi
+    # Databases linked to the app (cipi db create --app=, cipi db link). The
+    # one created with a Laravel app has the app's name and is not repeated.
+    local linked_dbs
+    linked_dbs=$(vault_read apps.json | jq -r --arg a "$app" '[(.[$a].databases // [])[] | "\(.name) (\(.engine // "mariadb"))"] | join(", ")' 2>/dev/null || true)
+    [[ -n "$linked_dbs" ]] && printf "  %-14s ${CYAN}%s${NC}\n" "Databases" "$linked_dbs"
     printf "  %-14s ${CYAN}%s${NC}\n" "Created" "$ca"
     if [[ "$(app_get "$app" suspended)" == "true" ]]; then
         printf "  %-14s ${YELLOW}%s${NC}\n" "Status" "suspended (offline)"
@@ -949,7 +993,7 @@ app_show() {
     fi
 
     if [[ -f "/home/${app}/.ssh/id_ed25519.pub" ]]; then
-        echo -e "\n  ${BOLD}Deploy Key${NC}\n  ${CYAN}$(cat "/home/${app}/.ssh/id_ed25519.pub")${NC}"
+        echo -e "\n  ${BOLD}Deploy Key${NC}\n  ${CYAN}$(app_read "$app" "/home/${app}/.ssh/id_ed25519.pub" || true)${NC}"
     fi
     if [[ "$is_custom" != "true" || "$runtime_show" == "node" ]] && [[ -L "/home/${app}/current" ]]; then
         echo -e "\n  ${BOLD}Release${NC}  ${CYAN}$(readlink -f "/home/${app}/current" | xargs basename)${NC}"
@@ -1023,7 +1067,7 @@ _app_change_domain() {
     reload_nginx || return 1
 
     if [[ -f "/home/${app}/shared/.env" ]]; then
-        sed -i "s|^APP_URL=.*|APP_URL=https://$(domain_url_host "$new_domain")|" "/home/${app}/shared/.env" 2>/dev/null || true
+        app_sed "$app" "/home/${app}/shared/.env" "s|^APP_URL=.*|APP_URL=https://$(domain_url_host "$new_domain")|" 2>/dev/null || true
     fi
 
     repo=$(app_get "$app" repository)
@@ -1067,7 +1111,7 @@ app_branch_set() {
     local app="$1" branch="$2" safe_branch
     app_set "$app" branch "$branch"
     safe_branch=$(printf '%s' "$branch" | sed 's/[&|\\\/]/\\&/g')
-    sed -i "s|set('branch', '.*')|set('branch', '${safe_branch}')|" "/home/${app}/.deployer/deploy.php"
+    app_sed "$app" "/home/${app}/.deployer/deploy.php" "s|set('branch', '.*')|set('branch', '${safe_branch}')|"
     if [[ "$(app_get "$app" runtime)" == "node" ]]; then
         # shellcheck source=/dev/null
         declare -f _node_webhook_config >/dev/null 2>&1 || source "${CIPI_LIB}/node.sh"
@@ -1127,11 +1171,17 @@ app_edit() {
             sed -i "s|/usr/bin/php[0-9]\.[0-9]|/usr/bin/php${np}|g" "/etc/supervisor/conf.d/${app}.conf" 2>/dev/null
             reload_supervisor
             crontab -u "$app" -l 2>/dev/null | sed "s|php${cur_php}|php${np}|g" | crontab -u "$app" -
-            sed -i "s|php${cur_php}|php${np}|g" "/home/${app}/.bashrc" "/home/${app}/.deployer/deploy.php" 2>/dev/null
-            if ! grep -q "bin/composer" "/home/${app}/.deployer/deploy.php" 2>/dev/null; then
-                sed -i "/set('bin\/php'/a set('bin/composer', '/usr/bin/php${np} /usr/local/bin/composer');" "/home/${app}/.deployer/deploy.php" 2>/dev/null
+            # The app's own files, edited as the app user (app_as in common.sh).
+            _app_own_check "$app" "/home/${app}/.bashrc"; _app_own_check "$app" "/home/${app}/.deployer/deploy.php"
+            app_as "$app" sed -i "s|php${cur_php}|php${np}|g" "/home/${app}/.bashrc" "/home/${app}/.deployer/deploy.php" 2>/dev/null < /dev/null
+            # Into a variable first: a grep that stops at its first match can
+            # leave the reader's pipe closed, and pipefail then calls that "no match".
+            local dp_now=""
+            dp_now=$(app_read "$app" "/home/${app}/.deployer/deploy.php") || dp_now=""
+            if ! grep -q "bin/composer" <<< "$dp_now"; then
+                app_sed "$app" "/home/${app}/.deployer/deploy.php" "/set('bin\/php'/a set('bin/composer', '/usr/bin/php${np} /usr/local/bin/composer');" 2>/dev/null
             fi
-            sed -i "s|^CIPI_PHP_VERSION=.*|CIPI_PHP_VERSION=${np}|" "/home/${app}/shared/.env"
+            app_sed "$app" "/home/${app}/shared/.env" "s|^CIPI_PHP_VERSION=.*|CIPI_PHP_VERSION=${np}|"
             app_set "$app" php "$np"; success "PHP → $np"; changed=true
         fi
     fi
@@ -1167,14 +1217,14 @@ app_edit() {
         else
             app_set "$app" repository "${ARG_repository}"
             local safe_repo; safe_repo=$(printf '%s' "${ARG_repository}" | sed 's/[&|\\\/]/\\&/g')
-            sed -i "s|set('repository', '.*')|set('repository', '${safe_repo}')|" "/home/${app}/.deployer/deploy.php"
+            app_sed "$app" "/home/${app}/.deployer/deploy.php" "s|set('repository', '.*')|set('repository', '${safe_repo}')|"
 
             # Migrate git provider integration only when the URL actually changes
             source "${CIPI_LIB}/git.sh"
             git_cleanup_repo "$app" "$old_repo"
             git_clear_app_data "$app"
             local pub_key=""
-            [[ -f "/home/${app}/.ssh/id_ed25519.pub" ]] && pub_key=$(cat "/home/${app}/.ssh/id_ed25519.pub")
+            [[ -f "/home/${app}/.ssh/id_ed25519.pub" ]] && pub_key=$(app_read "$app" "/home/${app}/.ssh/id_ed25519.pub" || true)
             local wt; wt=$(app_get "$app" webhook_token)
             local d; d=$(app_get "$app" domain)
             if [[ -n "$pub_key" ]]; then
@@ -1196,7 +1246,7 @@ app_edit() {
         if [[ -n "$cur_repo" ]]; then
             declare -f git_verify_repo_access >/dev/null 2>&1 || source "${CIPI_LIB}/git.sh"
             local pk="" skip=""
-            [[ -f "/home/${app}/.ssh/id_ed25519.pub" ]] && pk=$(cat "/home/${app}/.ssh/id_ed25519.pub")
+            [[ -f "/home/${app}/.ssh/id_ed25519.pub" ]] && pk=$(app_read "$app" "/home/${app}/.ssh/id_ed25519.pub" || true)
             [[ "$(app_get "$app" custom)" == "true" && "$(app_get "$app" runtime)" != "node" ]] && skip="skip_webhook"
             git_verify_repo_access "$app" "$cur_repo" "${cur_branch:-main}" "$(app_get "$app" domain)" \
                 "$(app_get "$app" webhook_token)" "$pk" "$skip" || true
@@ -1282,7 +1332,7 @@ app_edit() {
             _node_valid_major "${ARG_node_version}" || { error "--node-version must be an even (LTS) major such as 22 or 24"; exit 1; }
             node_is_installed "${ARG_node_version}" || _node_install_major "${ARG_node_version}" || exit 1
             app_set "$app" node_version "${ARG_node_version}"
-            sed -i "s|${NODE_ROOT}/[0-9]*/bin|${NODE_ROOT}/${ARG_node_version}/bin|" "/home/${app}/.bashrc" 2>/dev/null || true
+            app_sed "$app" "/home/${app}/.bashrc" "s|${NODE_ROOT}/[0-9]*/bin|${NODE_ROOT}/${ARG_node_version}/bin|" 2>/dev/null || true
             success "Node → ${ARG_node_version}"
         fi
         _node_state_write "$app"
@@ -1348,6 +1398,10 @@ app_delete() {
     step "Workers...";     supervisorctl stop "${app}-worker-"* 2>/dev/null||true; supervisorctl stop "${app}-octane" 2>/dev/null||true; supervisorctl stop "${app}-reverb" 2>/dev/null||true; supervisorctl stop "${app}-horizon" 2>/dev/null||true; rm -f "/etc/supervisor/conf.d/${app}.conf"; reload_supervisor
     step "Nginx...";       rm -f "/etc/nginx/sites-enabled/${app}" "/etc/nginx/sites-available/${app}"; reload_nginx
     step "PHP-FPM...";     rm -f "/etc/php/${p}/fpm/pool.d/${app}.conf"; reload_php_fpm "$p" 2>/dev/null||true
+    # Databases linked to the app (cipi db link) are not the app's to take
+    # with it: they stay, and the link goes with the app's entry.
+    local kept_dbs
+    kept_dbs=$(vault_read apps.json | jq -r --arg a "$app" '[(.[$a].databases // [])[] | "\(.name) (\(.engine // "mariadb"))"] | join(", ")' 2>/dev/null || true)
     local skip_db; skip_db=false
     [[ "$(app_get "$app" custom)" == "true" ]] && skip_db=true
     if [[ "$skip_db" != "true" ]]; then
@@ -1371,6 +1425,14 @@ app_delete() {
     fi
     step "Crontab...";     crontab -u "$app" -r 2>/dev/null||true
     step "Sudoers...";     rm -f "/etc/sudoers.d/cipi-${app}" "/etc/sudoers.d/cipi-${app}-yml"
+    app_logrotate_remove "$app"
+    if [[ -f "${CIPI_LIB}/valkey.sh" ]]; then
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/valkey.sh"
+        if valkey_has_instance "$app"; then
+            step "Valkey instance..."; valkey_instance_remove "$app"
+        fi
+    fi
     step "Basic auth...";  rm -f "/etc/nginx/cipi-basicauth/${app}.htpasswd"
     step "SSL...";         certbot delete --cert-name "$(domain_cert_name "$d")" --non-interactive 2>/dev/null||true
     step "User & files..."
@@ -1379,6 +1441,8 @@ app_delete() {
     step "Config...";      app_remove "$app"
     # Sweep leftovers not in apps.json (failed prior deletes / partial userdel)
     purge_orphan_app_users || true
+    app_logrotate_sweep || true
+    declare -f valkey_instances_sweep >/dev/null && { valkey_instances_sweep || true; }
 
     log_action "APP DELETED: $app"
 
@@ -1388,7 +1452,9 @@ app_delete() {
         "An app was deleted.\n\nServer: $(hostname)\nApp: ${app}\nDomain: ${d}\nPHP: ${p}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         app_delete
 
-    echo ""; success "'${app}' deleted"; echo ""
+    echo ""; success "'${app}' deleted"
+    [[ -n "$kept_dbs" ]] && echo -e "  ${DIM}Linked database(s) kept: ${kept_dbs} — remove one with: cipi db delete <name>${NC}"
+    echo ""
 }
 
 # ── ENV / LOGS / TINKER / ARTISAN ─────────────────────────────
@@ -1410,8 +1476,13 @@ _env_escape_value() {
     fi
 }
 
+# The functions below work on a path. On an app's .env, as root, each hands
+# itself to the app user first (app_of_path and app_call in common.sh): the
+# same code, with that user's rights.
+
 # Read KEY from .env file into stdout (unquoted). Exit 1 if missing.
 _env_read_key() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_read_key" _env_read_key "$@" < /dev/null; return; fi
     local file="$1" key="$2" line raw
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
@@ -1439,6 +1510,7 @@ _env_read_key() {
 
 # Emit all KEY=VALUE pairs as a JSON object on stdout.
 _env_to_json() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_to_json _env_valid_key" _env_to_json "$@" < /dev/null; return; fi
     local file="$1"
     local -a args=()
     local line key raw
@@ -1474,6 +1546,7 @@ _env_to_json() {
 
 # Set KEY=VALUE in .env (update in place or append). Preserves comments/other lines.
 _env_set_key() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_set_key _env_escape_value" _env_set_key "$@" < /dev/null; return; fi
     local file="$1" key="$2" value="$3"
     local escaped tmp found=0 line
     escaped=$(_env_escape_value "$value")
@@ -1499,6 +1572,7 @@ _env_set_key() {
 
 # Remove KEY from .env.
 _env_unset_key() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_unset_key" _env_unset_key "$@" < /dev/null; return; fi
     local file="$1" key="$2"
     local tmp line
     tmp=$(mktemp)
@@ -1548,9 +1622,14 @@ app_env() {
     local noninteractive=false
     [[ "$want_show" == "true" || -n "$get_key" || ${#sets[@]} -gt 0 || ${#unsets[@]} -gt 0 ]] && noninteractive=true
 
+    # The .env is the app user's file: the editor, the edits and the reads
+    # below run as that user (app_as in common.sh). As root they followed
+    # whatever shared/.env was — a symlink showed any file to the panel
+    # (--show, --json) and, after a --set, chown gave it to the app.
     if [[ "$noninteractive" != "true" ]]; then
-        ${EDITOR:-nano} "$env_file"
-        chown "${app}:${app}" "$env_file"; chmod 640 "$env_file"
+        _app_own_check "$app" "$env_file"
+        app_as "$app" ${EDITOR:-nano} "$env_file"
+        app_as "$app" chmod 640 "$env_file" < /dev/null
         success ".env updated"
         return 0
     fi
@@ -1569,7 +1648,7 @@ app_env() {
         _env_unset_key "$env_file" "$key"
     done
     if [[ ${#sets[@]} -gt 0 || ${#unsets[@]} -gt 0 ]]; then
-        chown "${app}:${app}" "$env_file"; chmod 640 "$env_file"
+        app_as "$app" chmod 640 "$env_file" < /dev/null
         log_action "ENV UPDATED: $app"
     fi
 
@@ -1600,7 +1679,7 @@ app_env() {
             [[ "$line" =~ ^[[:space:]]*# ]] && continue
             [[ -z "${line//[[:space:]]/}" ]] && continue
             printf '%s\n' "$line"
-        done < "$env_file"
+        done < <(app_read "$app" "$env_file")
         return 0
     fi
 
@@ -1613,16 +1692,36 @@ app_logs() {
     [[ -z "$app" ]] && { error "Usage: cipi app logs <app> [--type=nginx|php|worker|deploy|laravel|all]"; exit 1; }
     app_exists "$app" || { error "Not found"; exit 1; }
     parse_args "$@"
-    local laravel_dir="/home/${app}/shared/storage/logs"
+    local laravel_dir="/home/${app}/shared/storage/logs" logs="/home/${app}/logs"
     local is_custom; is_custom=$(app_get "$app" custom)
     case "${ARG_type:-all}" in
-        nginx)   tail -f "/home/${app}/logs/nginx-"*.log ;;
-        php)     tail -f "/home/${app}/logs/php-fpm-"*.log ;;
-        worker)  tail -f "/home/${app}/logs/worker-"*.log ;;
-        deploy)  tail -f "/home/${app}/logs/deploy.log" ;;
-        laravel) [[ "$is_custom" != "true" ]] && [[ -d "$laravel_dir" ]] && tail -f "${laravel_dir}/"*.log || tail -f "/home/${app}/logs/"*.log ;;
-        all)     if [[ "$is_custom" == "true" ]] || [[ ! -d "$laravel_dir" ]]; then tail -f "/home/${app}/logs/"*.log; else tail -f "/home/${app}/logs/"*.log "${laravel_dir}/"*.log; fi ;;
+        nginx)   _app_logs_follow "$app" "${logs}/nginx-*.log" ;;
+        php)     _app_logs_follow "$app" "${logs}/php-fpm-*.log" ;;
+        worker)  _app_logs_follow "$app" "${logs}/worker-*.log" ;;
+        deploy)  _app_logs_follow "$app" "${logs}/deploy.log" ;;
+        laravel) if [[ "$is_custom" != "true" && -d "$laravel_dir" ]]; then
+                     _app_logs_follow "$app" "${laravel_dir}/*.log" || _app_logs_follow "$app" "${logs}/*.log"
+                 else
+                     _app_logs_follow "$app" "${logs}/*.log"
+                 fi ;;
+        all)     if [[ "$is_custom" == "true" ]] || [[ ! -d "$laravel_dir" ]]; then _app_logs_follow "$app" "${logs}/*.log"; else _app_logs_follow "$app" "${logs}/*.log" "${laravel_dir}/*.log"; fi ;;
     esac
+}
+
+# tail -f on the app's logs, as the app user. ~/logs and storage/logs belong
+# to the app: read as root, a symlink there called x.log was a way to read
+# any file of the server — on the admin's terminal here, in the panel for
+# `cipi app logs read`. The logs root writes (nginx, supervisor, deploy) are
+# reached through the symlinks in ~/logs, which the app user can read (5.9.0).
+# Returns 1 when no file matches.
+_app_logs_follow() {   # <app> <glob>…
+    local app="$1"; shift
+    (cd / && sudo -u "$app" /bin/bash -c '
+        shopt -s nullglob
+        files=()
+        for p in "$@"; do for f in $p; do [[ -f "$f" && -r "$f" ]] && files+=("$f"); done; done
+        (( ${#files[@]} > 0 )) || { echo "No log files yet" >&2; exit 1; }
+        exec tail -f -- "${files[@]}"' _ "$@")
 }
 
 # Non-following paginated snapshot for the panel API (open_basedir blocks PHP reads under /home).
@@ -1670,23 +1769,23 @@ app_logs_read() {
 
     local pattern
     for pattern in "${patterns[@]}"; do
-        _cipi_emit_log_page "$pattern" "$page" "$per_page"
+        _cipi_emit_log_page "$app" "$pattern" "$page" "$per_page"
     done
 }
 
+# One page of every file a glob matches, read as the app user (see
+# _app_logs_follow). <page> and <per-page> are digits: checked by the caller.
 _cipi_emit_log_page() {
-    local pattern="$1" page="$2" per_page="$3"
-    shopt -s nullglob
-    local f
-    for f in $pattern; do
-        [[ -f "$f" ]] || continue
-        local total from_end
-        total=$(wc -l < "$f" | tr -d ' \n')
-        from_end=$(( page * per_page ))
-        echo "===CIPI_LOG_FILE:${f}:${total}==="
-        /usr/bin/tail -n "$from_end" "$f" | /usr/bin/head -n "$per_page"
-        echo "===CIPI_LOG_END==="
-    done
+    local app="$1" pattern="$2" page="$3" per_page="$4"
+    (cd / && sudo -u "$app" /bin/bash -c '
+        shopt -s nullglob
+        for f in $1; do
+            [[ -f "$f" && -r "$f" ]] || continue
+            total=$(wc -l < "$f" | tr -d " \n")
+            echo "===CIPI_LOG_FILE:${f}:${total}==="
+            /usr/bin/tail -n "$(( $2 * $3 ))" "$f" | /usr/bin/head -n "$3"
+            echo "===CIPI_LOG_END==="
+        done' _ "$pattern" "$page" "$per_page") 2>/dev/null || true
 }
 
 app_tinker() {
@@ -2355,7 +2454,7 @@ pm.min_spare_servers = 1
 pm.max_spare_servers = ${start_servers}
 pm.max_requests = 500
 request_terminate_timeout = 300
-php_admin_value[open_basedir] = /home/${app}/:/tmp/:/proc/
+php_admin_value[open_basedir] = /home/${app}/:/var/log/cipi-apps/${app}/:/tmp/:/proc/
 php_admin_value[error_log] = /home/${app}/logs/php-fpm-error.log
 php_admin_flag[log_errors] = on
 $(fpm_pool_hardening "$v")
@@ -2620,7 +2719,7 @@ _nginx_vhost_tls() {
         warn "Could not write ${CIPI_NGINX_SSL_SNIPPET} — '${app}' is served over HTTP only"
         return 0
     fi
-    if ! nginx_vhost_apply_tls "$vhost" "$cert" "$key" "$mode" "/home/${app}/logs"; then
+    if ! nginx_vhost_apply_tls "$vhost" "$cert" "$key" "$mode" "/var/log/cipi-apps/${app}"; then
         warn "Could not add HTTPS to ${vhost} — '${app}' is served over HTTP only"
     fi
     return 0
@@ -2628,6 +2727,11 @@ _nginx_vhost_tls() {
 
 _create_nginx_vhost_http() {
     local app="$1" domain="$2" v="$3"
+    # access_log / error_log go to /var/log/cipi-apps/<app> (root's directory:
+    # see app_log_dir in common.sh). nginx refuses a configuration whose log
+    # directory is missing, so it is made here, before any vhost is written.
+    app_log_dir_ensure "$app" || warn "Could not create $(app_log_dir "$app") — nginx will refuse the vhost of '${app}' until it exists"
+    app_log_links_default "$app"
     local names aliases_raw vhost_type docroot
     if [[ $# -ge 4 ]]; then
         aliases_raw="${4:-}"
@@ -2659,8 +2763,8 @@ server {
     listen [::]:80;
     server_name ${names};
     root ${SUSPENDED_DIR};
-    access_log /home/${app}/logs/nginx-access.log;
-    error_log /home/${app}/logs/nginx-error.log;
+    access_log /var/log/cipi-apps/${app}/nginx-access.log;
+    error_log /var/log/cipi-apps/${app}/nginx-error.log;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Cache-Control "no-store, no-cache, must-revalidate" always;
@@ -2717,8 +2821,8 @@ server {
     listen 80;
     listen [::]:80;
     server_name ${names};
-    access_log /home/${app}/logs/nginx-access.log;
-    error_log /home/${app}/logs/nginx-error.log;
+    access_log /var/log/cipi-apps/${app}/nginx-access.log;
+    error_log /var/log/cipi-apps/${app}/nginx-error.log;
     location ^~ /.well-known/acme-challenge/ {
         default_type "text/plain";
         root /var/www/html;
@@ -2760,8 +2864,8 @@ server {
     listen 80;
     listen [::]:80;
     server_name ${redirect_from};
-    access_log /home/${app}/logs/nginx-access.log;
-    error_log /home/${app}/logs/nginx-error.log;
+    access_log /var/log/cipi-apps/${app}/nginx-access.log;
+    error_log /var/log/cipi-apps/${app}/nginx-error.log;
     location ^~ /.well-known/acme-challenge/ {
         default_type "text/plain";
         root /var/www/html;
@@ -2807,8 +2911,8 @@ ${www_redirect_block}server {
     server_name ${names};
     root ${root_path};
     index index.html index.php;
-    access_log /home/${app}/logs/nginx-access.log;
-    error_log /home/${app}/logs/nginx-error.log;
+    access_log /var/log/cipi-apps/${app}/nginx-access.log;
+    error_log /var/log/cipi-apps/${app}/nginx-error.log;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -2838,8 +2942,8 @@ ${www_redirect_block}server {
     server_name ${names};
     root /home/${app}/current/public;
     index index.php;
-    access_log /home/${app}/logs/nginx-access.log;
-    error_log /home/${app}/logs/nginx-error.log;
+    access_log /var/log/cipi-apps/${app}/nginx-access.log;
+    error_log /var/log/cipi-apps/${app}/nginx-error.log;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -2881,8 +2985,8 @@ ${www_redirect_block}server {
     server_name ${names};
     root /home/${app}/current/public;
     index index.php;
-    access_log /home/${app}/logs/nginx-access.log;
-    error_log /home/${app}/logs/nginx-error.log;
+    access_log /var/log/cipi-apps/${app}/nginx-access.log;
+    error_log /var/log/cipi-apps/${app}/nginx-error.log;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -2952,7 +3056,11 @@ _create_deployer_config_from_template() {
     local dh="/home/${an}"
     local tpl="${CIPI_LIB}/deployer/${type}.php"
     [[ -f "$tpl" ]] || { error "Deployer template not found: $tpl"; return 1; }
-    mkdir -p "${dh}/.deployer"
+    # ~/.deployer and deploy.php are made and written by the app user (app_as
+    # in common.sh): the recipe is built here, in root's memory, and handed
+    # over whole. Root wrote it in place and then ran chown -R on the
+    # directory — on every regeneration, to whatever deploy.php was.
+    app_mkdir "$an" "${dh}/.deployer"
 
     local repo_safe branch_safe
     repo_safe=$(printf '%s' "$repo" | sed 's/\\/\\\\/g; s/&/\\&/g')
@@ -2969,11 +3077,10 @@ _create_deployer_config_from_template() {
             -e "s|__CIPI_NODE_VERSION__|$(app_get "$an" node_version)|g" \
             -e "s|__CIPI_NODE_MODE__|$(app_get "$an" node_mode)|g" \
             -e "s|__CIPI_NODE_OUTPUT__|$(app_get "$an" node_output)|g" \
-            "$tpl" > "${dh}/.deployer/deploy.php"
+            "$tpl" | app_write "$an" "${dh}/.deployer/deploy.php"
         deployer_audit_ensure_hook "$an" false || warn "Deploy audit hook not added to ${dh}/.deployer/deploy.php"
         declare -f _node_recipe_config_write >/dev/null 2>&1 || source "${CIPI_LIB}/node.sh"
         _node_recipe_config_write "$an"
-        chown -R "${an}:${an}" "${dh}/.deployer"
         return 0
     fi
 
@@ -2984,9 +3091,8 @@ _create_deployer_config_from_template() {
             -e "s|__CIPI_PHP_VERSION__|$v|g" \
             -e "s|__CIPI_REPOSITORY__|$repo_safe|g" \
             -e "s|__CIPI_BRANCH__|$branch_safe|g" \
-            "$tpl" > "${dh}/.deployer/deploy.php"
+            "$tpl" | app_write "$an" "${dh}/.deployer/deploy.php"
         deployer_audit_ensure_hook "$an" true || warn "Deploy audit hook not added to ${dh}/.deployer/deploy.php"
-        chown -R "${an}:${an}" "${dh}/.deployer"
         return 0
     fi
 
@@ -3043,17 +3149,18 @@ _create_deployer_config_from_template() {
         -e "s|__CIPI_HOOK_EXTRA_ARTISAN__|$h_extra|g" \
         "$tpl" > "$tmp"
 
-    : > "${dh}/.deployer/deploy.php"
     while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$line" == *"__CIPI_EXTRA_ARTISAN_TASK__"* ]]; then
-            [[ -n "$extra_task" ]] && printf '%s' "$extra_task" >> "${dh}/.deployer/deploy.php"
+            # An `if`, not `[[ … ]] && …`: the placeholder is the template's
+            # last line, and the loop is now one side of a pipeline — its
+            # status counts (pipefail, set -e).
+            if [[ -n "$extra_task" ]]; then printf '%s' "$extra_task"; fi
         else
-            printf '%s\n' "$line" >> "${dh}/.deployer/deploy.php"
+            printf '%s\n' "$line"
         fi
-    done < "$tmp"
+    done < "$tmp" | app_write "$an" "${dh}/.deployer/deploy.php" || { rm -f "$tmp"; return 1; }
     rm -f "$tmp"
     deployer_audit_ensure_hook "$an" false || warn "Deploy audit hook not added to ${dh}/.deployer/deploy.php"
-    chown -R "${an}:${an}" "${dh}/.deployer"
 }
 
 # Recreate deploy.php for an existing app (detects type from apps.json)
@@ -3234,17 +3341,19 @@ auth_create() {
             exit 1
         fi
     fi
-    cat > "$auth_file" <<JSON
+    # auth.json and deploy.php are the app user's files: written, read and
+    # edited as that user (app_as in common.sh), here and in the commands below.
+    app_write "$app" "$auth_file" 640 <<JSON
 {
     "users": []
 }
 JSON
-    chown "${app}:${app}" "$auth_file"
-    chmod 640 "$auth_file"
 
-    if grep -q "shared_files" "/home/${app}/.deployer/deploy.php" 2>/dev/null; then
-        if ! grep -q "auth.json" "/home/${app}/.deployer/deploy.php" 2>/dev/null; then
-            sed -i "s|add('shared_files', \['.env'\]);|add('shared_files', ['.env', 'auth.json']);|" "/home/${app}/.deployer/deploy.php"
+    local dp_text=""
+    dp_text=$(app_read "$app" "/home/${app}/.deployer/deploy.php") || dp_text=""
+    if grep -q "shared_files" <<< "$dp_text"; then
+        if ! grep -q "auth.json" <<< "$dp_text"; then
+            app_sed "$app" "/home/${app}/.deployer/deploy.php" "s|add('shared_files', \['.env'\]);|add('shared_files', ['.env', 'auth.json']);|"
             info "auth.json added to Deployer shared_files"
         fi
     fi
@@ -3255,7 +3364,14 @@ JSON
         "Composer auth.json was created.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         auth_create
     success "auth.json created at ${auth_file}"
-    info "Edit it with: cipi auth edit ${app}"
+    # On a terminal the editor opens right away: an auth.json with no
+    # credentials in it is of no use, and it took a second command to get
+    # there. Not for the panel or a script (no terminal), nor with --no-edit.
+    if [[ -t 0 && -t 1 && "${ARG_no_edit:-}" != "true" ]]; then
+        auth_edit "$app"
+    else
+        info "Edit it with: cipi auth edit ${app}"
+    fi
 }
 
 auth_edit() {
@@ -3272,8 +3388,7 @@ auth_edit() {
             error "Invalid JSON in ${ARG_file}"
             exit 1
         fi
-        jq . "$ARG_file" > "$auth_file"
-        chown "${app}:${app}" "$auth_file"; chmod 640 "$auth_file"
+        jq . "$ARG_file" | app_write "$app" "$auth_file" 640
         log_action "AUTH EDITED: $app"
         cipi_notify \
             "Cipi auth.json edited: ${app} on $(hostname)" \
@@ -3283,9 +3398,10 @@ auth_edit() {
         return 0
     fi
 
-    ${EDITOR:-nano} "$auth_file"
-    if jq empty "$auth_file" 2>/dev/null; then
-        chown "${app}:${app}" "$auth_file"; chmod 640 "$auth_file"
+    _app_own_check "$app" "$auth_file"
+    app_as "$app" ${EDITOR:-nano} "$auth_file"
+    if app_read "$app" "$auth_file" | jq empty 2>/dev/null; then
+        app_as "$app" chmod 640 "$auth_file" < /dev/null
         log_action "AUTH EDITED: $app"
         cipi_notify \
             "Cipi auth.json edited: ${app} on $(hostname)" \
@@ -3305,13 +3421,15 @@ auth_show() {
     app_exists "$app" || { error "App '$app' not found"; exit 1; }
     local auth_file="/home/${app}/shared/auth.json"
     [[ ! -f "$auth_file" ]] && { error "auth.json not found. Run: cipi auth create ${app}"; exit 1; }
+    local auth_text=""
+    auth_text=$(app_read "$app" "$auth_file") || auth_text=""
     if [[ "${ARG_json:-}" == "true" ]]; then
-        jq . "$auth_file"
+        jq . <<< "$auth_text"
         return 0
     fi
     echo -e "\n${BOLD}auth.json — ${app}${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    jq . "$auth_file" 2>/dev/null || cat "$auth_file"
+    jq . <<< "$auth_text" 2>/dev/null || printf '%s\n' "$auth_text"
     echo ""
 }
 
@@ -3325,10 +3443,12 @@ auth_delete() {
     if [[ "${ARG_force:-}" != "true" ]] && [[ -t 0 ]]; then
         confirm "Delete auth.json for '${app}'?" || { info "Cancelled"; return; }
     fi
-    rm -f "$auth_file"
+    app_rm "$app" "$auth_file" || true
 
-    if grep -q "auth.json" "/home/${app}/.deployer/deploy.php" 2>/dev/null; then
-        sed -i "s|add('shared_files', \['.env', 'auth.json'\]);|add('shared_files', ['.env']);|" "/home/${app}/.deployer/deploy.php"
+    local dp_text=""
+    dp_text=$(app_read "$app" "/home/${app}/.deployer/deploy.php") || dp_text=""
+    if grep -q "auth.json" <<< "$dp_text"; then
+        app_sed "$app" "/home/${app}/.deployer/deploy.php" "s|add('shared_files', \['.env', 'auth.json'\]);|add('shared_files', ['.env']);|"
         info "auth.json removed from Deployer shared_files"
     fi
 
@@ -3633,9 +3753,9 @@ app_reset_db_password() {
 
     local env_file="/home/${app}/shared/.env"
     [[ -f "$env_file" ]] || { warn ".env not found"; return; }
-    sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=${new_pass}|" "$env_file"
-    chown "${app}:${app}" "$env_file"
-    chmod 640 "$env_file"
+    # As the app user (app_as in common.sh).
+    app_sed "$app" "$env_file" "s|^DB_PASSWORD=.*|DB_PASSWORD=${new_pass}|"
+    app_as "$app" chmod 640 "$env_file" < /dev/null
     info ".env updated with new DB password"
 
     log_action "APP DB PASSWORD RESET: $app"
@@ -3662,10 +3782,15 @@ _reapply_ssl_if_present() {
 }
 
 _env_set_or_add() {
-    local file="$1" key="$2" val="$3"
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_set_or_add" _env_set_or_add "$@" < /dev/null; return; fi
+    local file="$1" key="$2" val="$3" esc
     [[ -f "$file" ]] || return 0
     if grep -qE "^${key}=" "$file" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=${val}|" "$file"
+        # The value is data, not part of the sed script: a "|" or an "&" in it
+        # (a value copied from another app's .env by `cipi app clone`) used to
+        # end the replacement early — "|e" ran what followed as a command.
+        esc=$(printf '%s' "$val" | sed 's/[\\&|]/\\&/g')
+        sed -i "s|^${key}=.*|${key}=${esc}|" "$file"
     else
         printf '\n%s=%s\n' "$key" "$val" >> "$file"
     fi
@@ -3681,10 +3806,11 @@ _env_set_or_add() {
 # `fill` = true keeps any existing non-empty value: used where Cipi derives a
 # value the application may legitimately have set for itself.
 _env_apply_group() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_apply_group _env_read_key" _env_apply_group "$@" < /dev/null; return; fi
     local file="$1" fill="$2" header="$3"; shift 3
     [[ -f "$file" ]] || return 0
     local -a missing=()
-    local pair key val cur
+    local pair key val cur esc
     for pair in "$@"; do
         key="${pair%%=*}"; val="${pair#*=}"
         if grep -qE "^${key}=" "$file" 2>/dev/null; then
@@ -3692,7 +3818,10 @@ _env_apply_group() {
                 cur=$(_env_read_key "$file" "$key" 2>/dev/null || true)
                 [[ -n "$cur" ]] && continue
             fi
-            sed -i "s|^${key}=.*|${key}=${val}|" "$file"
+            # Data, not sed script (see _env_set_or_add): some of these values
+            # were read from the app's own .env a moment ago.
+            esc=$(printf '%s' "$val" | sed 's/[\\&|]/\\&/g')
+            sed -i "s|^${key}=.*|${key}=${esc}|" "$file"
         else
             missing+=("${key}=${val}")
         fi
@@ -3709,6 +3838,7 @@ _env_apply_group() {
 }
 
 _env_remove_keys() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_remove_keys" _env_remove_keys "$@" < /dev/null; return; fi
     local file="$1"; shift
     [[ -f "$file" ]] || return 0
     local k
@@ -3762,7 +3892,6 @@ app_convert() {
             _reapply_ssl_if_present "$app"
             _env_set_or_add "$envf" "OCTANE_SERVER" "frankenphp"
             _env_set_or_add "$envf" "OCTANE_HTTPS" "true"
-            chown "${app}:${app}" "$envf" 2>/dev/null || true
             _create_deployer_config_for_app "$app"
             log_action "APP CONVERT: $app → octane port=$port"
             success "Converted to Octane (FrankenPHP) on 127.0.0.1:${port}"
@@ -3785,7 +3914,6 @@ app_convert() {
             reload_nginx || exit 1
             _reapply_ssl_if_present "$app"
             _env_remove_keys "$envf" OCTANE_SERVER OCTANE_HTTPS
-            chown "${app}:${app}" "$envf" 2>/dev/null || true
             _create_deployer_config_for_app "$app"
             log_action "APP CONVERT: $app → fpm"
             success "Converted to PHP-FPM"
@@ -3873,8 +4001,6 @@ _reverb_sync_env() {
         "VITE_REVERB_HOST=${host}" \
         "VITE_REVERB_PORT=${pub_port}" \
         "VITE_REVERB_SCHEME=${scheme}"
-
-    chown "${app}:${app}" "$envf" 2>/dev/null || true
 }
 
 # Raise the file-descriptor ceilings a WebSocket server runs into, and say what
@@ -4254,6 +4380,37 @@ app_limits() {
 
 # ── CLONE / STAGING ───────────────────────────────────────────
 
+# stdin: the source app's .env. Carries its non-secret keys into the clone's
+# (keep new APP_KEY / DB_* / CIPI_*). Runs as the clone's user.
+_app_clone_env_copy() {
+    local dst_env="$1" line key
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+        key="${line%%=*}"
+        case "$key" in
+            # REVERB_*/VITE_REVERB_* are deliberately not carried over: the
+            # clone gets its own port, its own credentials and its own
+            # domain below. Copying them would point a staging clone's
+            # frontend at the production socket and hand it the production
+            # app secret.
+            #
+            # MEILISEARCH_*/SCOUT_PREFIX are excluded for a sharper reason:
+            # the source's key is scoped to the source's index prefix, so a
+            # clone that inherited it would not fail — it would reindex
+            # straight into production's indexes. The clone gets its own
+            # key and prefix below.
+            # APP_ENV is the clone's own label (--env), already in its .env.
+            APP_KEY|APP_ENV|APP_URL|DB_*|DATABASE_URL|CIPI_*|OCTANE_*|REVERB_*|VITE_REVERB_*) continue ;;
+            MEILISEARCH_*|SCOUT_PREFIX) continue ;;
+            # The clone has a Valkey of its own (or the shared one, as its
+            # .env already says): the source's host, port and password would
+            # put a staging copy on production's cache, sessions and queues.
+            REDIS_HOST|REDIS_PORT|REDIS_PASSWORD|REDIS_USERNAME|REDIS_URL) continue ;;
+        esac
+        _env_set_or_add "$dst_env" "$key" "${line#*=}"
+    done
+}
+
 app_clone() {
     local src="${1:-}"; shift || true
     [[ -z "$src" ]] && { error "Usage: cipi app clone <src> --domain=D [--name=] [--branch=] [--env=] [--with-db|--no-db]"; exit 1; }
@@ -4304,30 +4461,11 @@ app_clone() {
     local src_env="/home/${src}/shared/.env"
     local dst_env="/home/${name}/shared/.env"
     if [[ -f "$src_env" && -f "$dst_env" ]]; then
-        local line key
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
-            key="${line%%=*}"
-            case "$key" in
-                # REVERB_*/VITE_REVERB_* are deliberately not carried over: the
-                # clone gets its own port, its own credentials and its own
-                # domain below. Copying them would point a staging clone's
-                # frontend at the production socket and hand it the production
-                # app secret.
-                #
-                # MEILISEARCH_*/SCOUT_PREFIX are excluded for a sharper reason:
-                # the source's key is scoped to the source's index prefix, so a
-                # clone that inherited it would not fail — it would reindex
-                # straight into production's indexes. The clone gets its own
-                # key and prefix below.
-                # APP_ENV is the clone's own label (--env), already in its .env.
-                APP_KEY|APP_ENV|APP_URL|DB_*|DATABASE_URL|CIPI_*|OCTANE_*|REVERB_*|VITE_REVERB_*) continue ;;
-                MEILISEARCH_*|SCOUT_PREFIX) continue ;;
-            esac
-            _env_set_or_add "$dst_env" "$key" "${line#*=}"
-        done < "$src_env"
+        # The source .env is read as the source app's user, the clone's is
+        # written as the clone's — in one go (app_call in common.sh).
+        { app_read "$src" "$src_env" || true; } \
+            | app_call "$name" "_app_clone_env_copy _env_set_or_add" _app_clone_env_copy "$dst_env"
         _env_set_or_add "$dst_env" "APP_URL" "https://$(domain_url_host "$domain")"
-        chown "${name}:${name}" "$dst_env"
     fi
 
     # A clone of a Reverb app gets its own Reverb, the way it gets its own
@@ -4393,14 +4531,20 @@ app_webhook_recreate() {
     git_recreate_webhook "$app" "$@" || exit 1
 }
 
-# Restore home / .ssh / .env / storage / logs ownership and modes.
+# Restore home / .ssh / .env / storage / logs ownership and modes, and make
+# sure nginx, supervisor and the PHP pool use /var/log/cipi-apps/<app> for the
+# logs root writes (lib/app-logs.sh — what migration 5.9.0 does for every app;
+# this is the way to run it again after a step it had to leave alone).
 # Usage: cipi app fix-permissions [app]
 app_fix_permissions() {
     local app="${1:-}"
+    # shellcheck source=/dev/null
+    source "${CIPI_LIB}/app-logs.sh"
     if [[ -n "$app" ]]; then
         app_exists "$app" || { error "App '${app}' not found"; exit 1; }
         step "Restoring permissions for ${app}..."
         ensure_app_permissions "$app"
+        app_logs_relocate "$app"
         log_action "APP PERMISSIONS RESTORED: ${app}"
         success "Permissions restored for ${app}"
         return 0
@@ -4426,6 +4570,14 @@ app_fix_permissions() {
         success "${app}"
         n=$((n + 1))
     done <<< "$apps"
+    app_logs_relocate
+    # shellcheck disable=SC2086
+    app_logrotate_all $apps || true
+    local lr_err
+    if ! lr_err=$(logrotate_cipi_check); then
+        warn "logrotate reports a problem with Cipi's rules:"
+        printf '%s\n' "$lr_err" | sed 's/^/    /'
+    fi
     log_action "APP PERMISSIONS RESTORED: all apps (${n})"
     success "Permissions restored for ${n} app(s)"
 }

@@ -449,7 +449,7 @@ setup_ssh() {
 
     # Save root password in server.json (create if missing)
     mkdir -p /etc/cipi
-    # A server installed from 5.8.6 on starts with SSH/SFTP from outside off
+    # A server installed from 5.9.0 on starts with SSH/SFTP from outside off
     # for app users (`cipi ssh apps enable <app>` or `enable --all` opens it;
     # deploys go through ssh localhost and are not affected). Only on a first
     # install: a server.json that is already there keeps what it says, and a
@@ -1301,7 +1301,7 @@ EOF
     # Sudoers for the panel (www-data runs cipi via sudo — restricted to API
     # commands only). Written only when the API or the GUI is installed, so a
     # fresh server has no www-data → root path at all; `cipi api <domain>` and
-    # `cipi gui <domain>` write it when they install (5.8.6).
+    # `cipi gui <domain>` write it when they install (5.9.0).
     # shellcheck source=/dev/null
     source "${CIPI_LIB}/cipi-api-sudoers.sh"
     ensure_cipi_api_sudoers

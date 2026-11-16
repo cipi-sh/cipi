@@ -39,7 +39,7 @@ HOME_DIR="/home/${APP}"
 # app user owns that directory, supervisord opens a program's log as root
 # each time it starts it, and a symlink there in place of node-blue.log was
 # followed — written to as root, and read back to the app by the tail below
-# (5.8.6). ~/logs/node-<slot>.log is a symlink to the log, made as the app.
+# (5.9.0). ~/logs/node-<slot>.log is a symlink to the log, made as the app.
 LOG_DIR="/var/log/cipi-apps/${APP}"
 SUP_CONF="/etc/supervisor/conf.d/${APP}-node.conf"
 UPSTREAM="/etc/nginx/conf.d/cipi-node-${APP}.conf"

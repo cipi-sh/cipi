@@ -72,7 +72,7 @@ _node_arch() {
 # *started* with sudo, by the cipi admin or by the panel, and passes their
 # SUDO_USER on. `sudo cipi node restart <app>`, `cipi node upgrade
 # --restart`, the status lines of `cipi node status` and the --stop of
-# `cipi app delete` were all refused ("cipi cannot manage <app>") — 5.8.6.
+# `cipi app delete` were all refused ("cipi cannot manage <app>") — 5.9.0.
 _node_switch() { env -u SUDO_USER /usr/local/bin/cipi-node-switch "$@"; }
 
 # Even (LTS) majors only.
@@ -586,7 +586,7 @@ _node_recipe_config_write() {
     # wrote node.json.tmp, renamed it and chowned the result: with the .tmp a
     # symlink, the file it pointed at was overwritten and then handed to the
     # app — and `cipi yml node-sync`, which an app user with `cipi yml auto
-    # on` runs through sudo, ends here (5.8.6).
+    # on` runs through sudo, ends here (5.9.0).
     app_mkdir "$app" "/home/${app}/.deployer"
     # Laravel apps pinned with --node-version get {version} only; without a pin
     # the file goes away and they follow the server default.
@@ -732,7 +732,7 @@ _node_logs_cmd() {
     if [[ -f "$lf" ]]; then
         tail -n "$lines" "$lf" 2>/dev/null || true
     elif [[ -e "/home/${app}/logs/node-${slot}.log" ]]; then
-        # A process started before 5.8.6 and not restarted since still logs
+        # A process started before 5.9.0 and not restarted since still logs
         # to ~/logs: that directory is the app's, so it is read as the app.
         (cd / && sudo -u "$app" tail -n "$lines" -- "/home/${app}/logs/node-${slot}.log") 2>/dev/null || info "No log yet (${lf})"
     else

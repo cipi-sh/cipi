@@ -34,7 +34,7 @@ selfupdate_command() {
     step "Downloading from '${branch}'..."
     # A private, unpredictable directory. The old /tmp/cipi-update-$$ was
     # removed and then cloned into: a local user who recreated it in between
-    # owned the tree that root copies over /opt/cipi (5.8.6).
+    # owned the tree that root copies over /opt/cipi (5.9.0).
     local tmp
     tmp=$(mktemp -d /tmp/cipi-update.XXXXXXXXXX) && [[ -n "$tmp" && -d "$tmp" ]] || {
         error "Cannot create a temporary directory under /tmp"

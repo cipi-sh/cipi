@@ -33,7 +33,7 @@ TMP=$(mktemp -d) || { echo "mktemp failed" >&2; exit 1; }
 trap 'rm -rf "${TMP:?}"' EXIT
 
 extract() { sed -n "/^${2}() {/,/^}/p" "${LIB}/${1}"; }
-# Since 5.8.6 the functions under test hand file work inside an app's home to
+# Since 5.9.0 the functions under test hand file work inside an app's home to
 # the app user (app_as: sudo -u, when root). The apps here are directories in
 # a temp dir, not users: sudo is a stub that runs the command as whoever runs
 # the test, and the helpers travel with the function that calls them.
@@ -197,7 +197,7 @@ grep -q '_alias_cert_hint "$app" "$WWW_PAIR_ADDED"' "${LIB}/app.sh" \
 # ── 5. deploy --releases durations ───────────────────────────
 echo "--- deploy durations"
 DEPFN="${TMP}/dep.sh"
-# deploy.log lives in /var/log/cipi-apps/<app> since 5.8.6: here, under the temp dir like the home
+# deploy.log lives in /var/log/cipi-apps/<app> since 5.9.0: here, under the temp dir like the home
 { extract deploy.sh deploy_app_home | sed "s|/home/|${TMP}/home/|"; echo "deploy_log_file() { echo \"${TMP}/home/\${1:-}/logs/deploy.log\"; }"
   extract deploy.sh _deploy_fmt_secs; extract deploy.sh _deploy_release_took; } > "$DEPFN"
 mkdir -p "${TMP}/home/demo/logs"

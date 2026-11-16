@@ -397,7 +397,7 @@ _ssh_remove() {
 # allowed, because Deployer reaches the app user over `ssh localhost`: deploys
 # keep working. The cipi user is never touched.
 #
-# Since 5.8.6 the server's SSH keys (the cipi user's: cipi ssh list) open a
+# Since 5.9.0 the server's SSH keys (the cipi user's: cipi ssh list) open a
 # shell as any app user, enabled or disabled: whoever administers the server
 # does not need each app's password. An enabled app takes its password and
 # its own keys next to them.
@@ -413,7 +413,7 @@ _ssh_apps_sshd() {
     if command -v sshd >/dev/null 2>&1; then sshd "$@"; else /usr/sbin/sshd "$@"; fi
 }
 
-# The section Cipi manages at the end of sshd_config (5.8.6), and the single
+# The section Cipi manages at the end of sshd_config (5.9.0), and the single
 # block it wrote before that.
 _ssh_apps_section_present() {
     grep -q '^# >>> cipi ssh apps' "$SSH_APPS_SSHD_CONFIG" 2>/dev/null
@@ -699,7 +699,7 @@ _ssh_apps() {
 }
 
 # cipi ssh apps sync — write (or rewrite) the section in sshd_config and say
-# what sshd now does. The migration to 5.8.6 runs it once on every server.
+# what sshd now does. The migration to 5.9.0 runs it once on every server.
 _ssh_apps_sync() {
     _ssh_apps_ensure_block || exit 1
     local u probe_off="" probe_on=""

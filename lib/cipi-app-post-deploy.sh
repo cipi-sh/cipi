@@ -22,7 +22,7 @@ fi
 
 HOME_DIR="/home/${APP}"
 if [[ -z "$LOG" ]]; then
-    # Root's directory since 5.8.6 (see cipi-app-deploy); the old place otherwise.
+    # Root's directory since 5.9.0 (see cipi-app-deploy); the old place otherwise.
     LOG="/var/log/cipi-apps/${APP}/deploy.log"
     [[ -f "$LOG" && ! -L "$LOG" && -w "$LOG" ]] || LOG="${HOME_DIR}/logs/deploy.log"
 fi

@@ -16,7 +16,7 @@ fail() { echo "  FAIL: $*" >&2; FAIL=$((FAIL + 1)); }
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# Since 5.8.6 root hands file work inside an app's home to the app user
+# Since 5.9.0 root hands file work inside an app's home to the app user
 # (app_as: sudo -u). The apps here are directories in a temp dir, not users:
 # sudo is a stub that runs the command as whoever runs the test.
 mkdir -p "${TMP}/stub"
@@ -622,7 +622,7 @@ source "${LIB}/app.sh" 2>/dev/null
 source "${LIB}/yml.sh"
 node_is_installed() { [[ "\$1" == 22 ]]; }
 _ensure_nginx_octane_map() { :; }; _nginx_reapply_ssl() { :; }; reload_nginx() { :; }
-app_log_dir_ensure() { return 0; }; app_log_links_default() { :; }   # 5.8.6: the log directory, not on this machine
+app_log_dir_ensure() { return 0; }; app_log_links_default() { :; }   # 5.9.0: the log directory, not on this machine
 node_app_cleanup() { echo cleanup >> "${NS}/calls"; }
 for fn in _yml_node_sync_cmd _sync_node_build_script _node_recipe_config_write _create_nginx_vhost _create_nginx_vhost_http _nginx_vhost_tls _node_nginx_vhost _node_upstream_ensure; do
     eval "\$(declare -f \$fn | sed -e 's|/home/|${NS}/home/|g' -e 's|/etc/nginx/sites-available/|${NS}/sites/|g' -e 's|/etc/nginx/conf.d/|${NS}/|g')"
@@ -827,7 +827,7 @@ EOF
 printf '#!/bin/bash\necho "${CURL_CODE:-200}"\n' > "${SW}/bin/curl"
 printf '#!/bin/bash\nexit 0\n' > "${SW}/bin/nginx"
 for c in systemctl flock sleep ss; do printf '#!/bin/bash\nexit 0\n' > "${SW}/bin/${c}"; done
-# 5.8.6: the slots log to /var/log/cipi-apps/<app>, a directory root makes (install -o/-g) and links from ~/logs as the app user (sudo -u)
+# 5.9.0: the slots log to /var/log/cipi-apps/<app>, a directory root makes (install -o/-g) and links from ~/logs as the app user (sudo -u)
 printf '#!/bin/bash\nargs=(); while [[ $# -gt 0 ]]; do case "$1" in -o|-g) shift 2;; *) args+=("$1"); shift;; esac; done\nexec /usr/bin/install "${args[@]}"\n' > "${SW}/bin/install"
 printf '#!/bin/bash\n[[ "$1" == -u ]] && shift 2\nexec "$@"\n' > "${SW}/bin/sudo"
 printf '#!/bin/bash\n[[ "$1" == -e ]] && shift\n[[ -e "$1" ]] || exit 1\npython3 -c "import os,sys;print(os.path.realpath(sys.argv[1]))" "$1"\n' > "${SW}/bin/realpath"

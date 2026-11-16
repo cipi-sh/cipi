@@ -147,7 +147,7 @@ cipi ssh apps sync                # rewrite Cipi's section of sshd_config
 
 Disabled means no password and no `~/.ssh/authorized_keys` from another machine — only the server's keys, read by sshd at every login (remove a key with `cipi ssh remove` and it stops working for the apps in the same moment). Deploys are not affected: Deployer reaches the app user over `ssh localhost`, which stays as it was. The `cipi` user is never touched by these commands. A new server starts with access disabled for new apps.
 
-**One Valkey per app.** A new Laravel app gets a Valkey instance of its own — `cipi-valkey@<app>`, running as the app's user on its own localhost port, with its own password and data directory — so no other app on the server can read its cache, its sessions or its queues. Apps created before 5.8.6 keep the server's shared instance until you move them:
+**One Valkey per app.** A new Laravel app gets a Valkey instance of its own — `cipi-valkey@<app>`, running as the app's user on its own localhost port, with its own password and data directory — so no other app on the server can read its cache, its sessions or its queues. Apps created before 5.9.0 keep the server's shared instance until you move them:
 
 ```bash
 cipi valkey list                  # which app uses which instance

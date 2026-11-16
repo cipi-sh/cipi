@@ -55,7 +55,7 @@ for f in "${LIB}/migrations/5.5.0.sh"; do
     grep -q '^/home/\*/shared/storage/logs/\*\[!0-9\]\.log$' "$f" && ! grep -q '^/home/\*/shared/storage/logs/\*\.log$' "$f" \
         && pass "${f#"${ROOT}/"}: logrotate skips logs ending in a date" || fail "${f#"${ROOT}/"}: logrotate still takes *.log"
 done
-# 5.8.6: the apps' own logs have a rule per app (app_logrotate_rule in
+# 5.9.0: the apps' own logs have a rule per app (app_logrotate_rule in
 # common.sh, rotated as the app user); setup.sh no longer names /home/*.
 grep -q '^/home/\${app}/shared/storage/logs/\*\[!0-9\]\.log$' "${LIB}/common.sh" && ! grep -q '^/home/\*/' "${ROOT}/setup.sh" \
     && pass "the per-app rule skips logs ending in a date; setup.sh has no /home/* rule" || fail "per-app logrotate rule: pattern missing, or setup.sh still names /home/*"
@@ -788,7 +788,7 @@ if [[ "\$1" == "-t" ]]; then
     echo "sshd -t \$(grep -c '^Match Group cipi-nossh ' "\$3")" >> "${H}/calls"
     [[ ! -e "${H}/reject" ]]; exit
 fi
-# -T -C user=U,host=H,addr=A — what sshd answers with Cipi's section (5.8.6):
+# -T -C user=U,host=H,addr=A — what sshd answers with Cipi's section (5.9.0):
 # a member of cipi-nossh from outside gets the server's keys and nothing else.
 spec="\$3"; u="\${spec#user=}"; u="\${u%%,*}"; a="\${spec##*addr=}"
 if grep -q '^Match Group cipi-nossh ' "${H}/sshd_config"; then
@@ -829,7 +829,7 @@ jq -e '.new_apps == "enabled" and (.apps | map(.app)) == ["blog","front","shop"]
 out=$(sa disable shop); rc=$?
 [[ $rc -eq 0 ]] && grep -q "OK: SSH/SFTP access from outside disabled for 'shop'" <<< "$out" && grep -qx shop "${H}/members" \
     && pass "disable <app>: the app user joins cipi-nossh" || fail "disable shop wrong (rc=${rc}): ${out}"
-# 5.8.6: the "Match Group cipi-apps" block setup.sh wrote is folded into the
+# 5.9.0: the "Match Group cipi-apps" block setup.sh wrote is folded into the
 # managed section (the server's keys are accepted for app users too); what
 # is not Cipi's stays where it was.
 [[ "$(head -3 "${H}/sshd_config")" == "$(head -3 <<< "$SSHD_ORIG")" && "$(grep -c '^Match Group cipi-nossh Address \*,!127.0.0.1,!::1$' "${H}/sshd_config")" == "1" ]] \

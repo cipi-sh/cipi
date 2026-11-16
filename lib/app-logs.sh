@@ -2,11 +2,11 @@
 #############################################
 # Cipi — an existing app's root-written logs, out of ~/logs
 #
-# Since 5.8.6 nginx, supervisord and `cipi deploy` log to
+# Since 5.9.0 nginx, supervisord and `cipi deploy` log to
 # /var/log/cipi-apps/<app> (root's directory; the why is at app_log_dir in
-# common.sh). Everything Cipi writes from 5.8.6 on already names that
+# common.sh). Everything Cipi writes from 5.9.0 on already names that
 # directory: vhosts, supervisor programs, PHP-FPM pools, the deploy log. This
-# file moves an app that was configured before — by migration 5.8.6 for every
+# file moves an app that was configured before — by migration 5.9.0 for every
 # app, and by `cipi app fix-permissions [app]` afterwards, which is the retry
 # when a step was refused.
 #
@@ -38,7 +38,7 @@
 # Every step tolerates failure and says what it left alone. Nothing here
 # aborts the caller.
 #
-# For the caller (migration 5.8.6 merges these into its own restarts):
+# For the caller (migration 5.9.0 merges these into its own restarts):
 #   APP_LOGS_FPM_VERSIONS    PHP versions whose pools changed and still need a
 #                            restart (with --fpm=defer)
 #   APP_LOGS_UPDATED         supervisor program groups restarted here
@@ -221,7 +221,7 @@ _app_logs_supervisor() {   # <backup> <app>…
             fi
             continue
         fi
-        # Nothing to edit (a second run, or an app created on 5.8.6): only
+        # Nothing to edit (a second run, or an app created on 5.9.0): only
         # make sure ~/logs/<name> is there for what this file already sends
         # to the new directory.
         mapfile -t names < <(_app_logs_supervisor_names "$app" "$conf")

@@ -33,7 +33,7 @@ _deploy_assert_php_compat() {
 # `set -u` a missing one would kill the whole process with an opaque
 # "$1: unbound variable" instead of failing where the mistake is.
 deploy_app_home() { echo "/home/${1:-}"; }
-# The deploy log lives in root's /var/log/cipi-apps/<app> since 5.8.6
+# The deploy log lives in root's /var/log/cipi-apps/<app> since 5.9.0
 # (~/logs/deploy.log is a symlink to it): `cipi deploy` appends to it as root
 # and used to chown it afterwards — in ~/logs, on whatever a symlink called
 # deploy.log pointed at. See app_log_dir in common.sh.

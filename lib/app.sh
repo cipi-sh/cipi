@@ -231,7 +231,7 @@ app_create() {
     # app's group to read its docroot and connect to its socket. The app user
     # is NOT in www-data — every PHP-FPM socket on the server is group
     # www-data, so that membership let any app run PHP in every other pool
-    # and as www-data itself (5.8.6, migration drops it on existing servers).
+    # and as www-data itself (5.9.0, migration drops it on existing servers).
     step "Creating user..."
     useradd -m -s /bin/bash -G cipi-apps "$app_user"
     app_ssh_apply_default "$app_user"
@@ -414,7 +414,7 @@ BASH
         # A Valkey of its own (lib/valkey.sh): its own port and password, so
         # no other app can read this one's cache, sessions and queues. The
         # server's shared instance with --valkey=shared, or when an instance
-        # cannot be started — the app then works as it did before 5.8.6.
+        # cannot be started — the app then works as it did before 5.9.0.
         if [[ "${ARG_valkey:-own}" != "shared" && -f "${CIPI_LIB}/valkey.sh" ]]; then
             # shellcheck source=/dev/null
             source "${CIPI_LIB}/valkey.sh"
@@ -1712,7 +1712,7 @@ app_logs() {
 # to the app: read as root, a symlink there called x.log was a way to read
 # any file of the server — on the admin's terminal here, in the panel for
 # `cipi app logs read`. The logs root writes (nginx, supervisor, deploy) are
-# reached through the symlinks in ~/logs, which the app user can read (5.8.6).
+# reached through the symlinks in ~/logs, which the app user can read (5.9.0).
 # Returns 1 when no file matches.
 _app_logs_follow() {   # <app> <glob>…
     local app="$1"; shift
@@ -4533,7 +4533,7 @@ app_webhook_recreate() {
 
 # Restore home / .ssh / .env / storage / logs ownership and modes, and make
 # sure nginx, supervisor and the PHP pool use /var/log/cipi-apps/<app> for the
-# logs root writes (lib/app-logs.sh — what migration 5.8.6 does for every app;
+# logs root writes (lib/app-logs.sh — what migration 5.9.0 does for every app;
 # this is the way to run it again after a step it had to leave alone).
 # Usage: cipi app fix-permissions [app]
 app_fix_permissions() {

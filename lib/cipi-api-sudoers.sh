@@ -21,7 +21,7 @@
 # was a dormant path from www-data to root (`cipi ssh add` appends a key to
 # the cipi admin user). ensure_cipi_api_sudoers() writes it when a panel is
 # installed and removes it otherwise; `cipi api`, `cipi gui`, their `remove`
-# and the 5.8.6 migration all go through it.
+# and the 5.9.0 migration all go through it.
 #############################################
 
 # True when the panel API or the GUI is installed, or half-installed: the

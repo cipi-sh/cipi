@@ -1045,7 +1045,7 @@ _db_list_row() {   # <engine> <database> <user> <size MB>
 
 # cipi db list [--engine=] [--json]
 #
-# The APP column is for a person at a terminal. The panel API up to 1.38
+# The APP column is for a person at a terminal. The panel API before 1.39
 # reads this table with a regex that takes everything after the user as the
 # size, and the other lines as database names: piped or run by the panel the
 # table keeps the four columns it always had, and --json carries the rest.

@@ -3,7 +3,7 @@
 # Cipi — One Valkey per app
 #
 # The server's Valkey (valkey-server, 127.0.0.1:6379) has one password, and
-# until 5.8.6 every app got it in its .env: any app could read and write the
+# until 5.9.0 every app got it in its .env: any app could read and write the
 # cache, the sessions and the queues of every other app, and FLUSHDB in one
 # emptied them all.
 #
@@ -694,7 +694,7 @@ _valkey_flush_shared_cmd() {
 #     that server's, good for nothing here. It gets its own instance, like
 #     any app created on this server.
 # Where no instance can be started the app is put on this server's shared
-# one, which is what an import did before 5.8.6. An .env that points Redis
+# one, which is what an import did before 5.9.0. An .env that points Redis
 # at another host, or through REDIS_URL, is not touched.
 valkey_sync_adopt() {   # <app>
     local app="${1:-}" text host eport epass port pass want_port="" want_pass="" shared

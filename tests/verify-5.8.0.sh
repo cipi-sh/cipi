@@ -34,7 +34,7 @@ extract() { sed -n "/^${2}() {/,/^}/p" "${LIB}/${1}"; }
 # GNU `sed -i` is what the shipped code uses; on macOS the test shims it.
 SED_SHIM='sed() { if [[ "${1:-}" == "-i" ]]; then shift; command sed -i "" "$@"; else command sed "$@"; fi; }'
 [[ "$(uname)" == "Darwin" ]] || SED_SHIM=''
-# Since 5.8.6 the functions under test hand file work inside an app's home to
+# Since 5.9.0 the functions under test hand file work inside an app's home to
 # the app user (app_as: sudo -u, when root). The apps here are directories in
 # a temp dir, not users: sudo is a stub that runs the command as whoever runs
 # the test, and the helpers travel with the function that calls them.

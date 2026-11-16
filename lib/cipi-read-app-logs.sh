@@ -6,7 +6,7 @@
 # app's home. That directory belongs to the app user: read as root, a symlink
 # there called x.log showed any file of the server to whoever may read that
 # app's logs in the panel — and the pattern itself, checked only at its start,
-# could walk out with "..", or carry a second path after a space. Since 5.8.6
+# could walk out with "..", or carry a second path after a space. Since 5.9.0
 # the files are read as the app user: a link, a "..", whatever the pattern
 # matches, gives nothing the app could not read already. The logs root writes
 # (nginx, supervisor, deploy.log) are in /var/log/cipi-apps/<app> and are

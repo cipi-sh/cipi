@@ -286,8 +286,8 @@ panel_domain(){ echo "panel.example.com"; }; _gui_pkg_version(){ echo "${GUI_PKG
 EOS
     for f in server_public_ip server_local_ips dns_resolve_ips ip_is_cloudflare panel_dns_check confirm_yes \
              panel_env_set _panel_env_set_do panel_env_read; do fn "${LIB}/common.sh" "$f"; done
-    # 5.8.6: in the live tree the panel's .env is edited and read as www-data
-    # (exercised with real users in verify-5.8.6.sh); here the tree is a
+    # 5.9.0: in the live tree the panel's .env is edited and read as www-data
+    # (exercised with real users in verify-5.9.0.sh); here the tree is a
     # temporary directory of the test's own.
     echo '_panel_tree_is_www(){ return 1; }'
     for f in _api_ssl_issue; do fn "${LIB}/api.sh" "$f"; done

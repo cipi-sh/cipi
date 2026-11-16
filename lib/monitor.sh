@@ -333,7 +333,7 @@ _mon_check_http_5xx() {
     local count_lim ratio_lim
     count_lim=$(_mon_cfg_val http_5xx count 20); [[ "$count_lim" =~ ^[0-9]+$ ]] || count_lim=20
     ratio_lim=$(_mon_cfg_val http_5xx ratio 5);  [[ "$ratio_lim" =~ ^[0-9]+$ ]] || ratio_lim=5
-    # /var/log/cipi-apps/<app> since 5.8.6. An app whose vhost was left on
+    # /var/log/cipi-apps/<app> since 5.9.0. An app whose vhost was left on
     # ~/logs (the migration says so) still has a regular file there; the
     # symlink every moved app has is not read twice.
     shopt -s nullglob

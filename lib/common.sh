@@ -582,7 +582,7 @@ deployer_audit_ensure_hook() {
 # stopped at "Deploy locked" until someone ran `cipi deploy <app> --unlock`.
 # The recipes now release the lock when a deploy fails (deploy:failed →
 # deploy:unlock); this adds the same line to a deploy.php written before
-# 5.8.6. Laravel apps only: the custom recipe has no lock, the Node one
+# 5.9.0. Laravel apps only: the custom recipe has no lock, the Node one
 # always had the line. Appended as the app user, like the audit hook.
 deployer_unlock_ensure_hook() {
     local app="$1" df cur
@@ -594,7 +594,7 @@ deployer_unlock_ensure_hook() {
     grep -q "recipe/laravel.php" <<< "$cur" || return 0
     grep -qE '^[[:space:]]*\?>[[:space:]]*$' <<< "$cur" && return 1
     printf '\n%s\n%s\n' \
-        "// Cipi: a deploy that fails releases its own lock (5.8.6)." \
+        "// Cipi: a deploy that fails releases its own lock (5.9.0)." \
         "after('deploy:failed', 'deploy:unlock');" | app_append "$app" "$df" || return 1
     return 0
 }
@@ -1142,7 +1142,7 @@ _sync_node_build_script() {
     # Made, written and removed as the app user (see app_as). Root wrote the
     # script and chowned it: with node-build.sh a symlink, the file it pointed
     # at was overwritten and handed to the app — and an app with `cipi yml
-    # auto on` reaches this on its own, through sudo (5.8.6).
+    # auto on` reaches this on its own, through sudo (5.9.0).
     app_mkdir "$app" "${home}/.deployer"
     if [[ -z "$cmd" ]]; then
         app_rm "$app" "${home}/.deployer/node-build.sh"
@@ -1204,7 +1204,7 @@ remove_app_linux_user() {
     groupdel "$app" 2>/dev/null || true
     # Absolute cleanup — home + SSH keys must not linger after a partial userdel
     [[ -e "/home/${app}" ]] && rm -rf "/home/${app}"
-    # The logs root wrote for it (nginx, supervisor, deploy.log — 5.8.6).
+    # The logs root wrote for it (nginx, supervisor, deploy.log — 5.9.0).
     [[ -d "/var/log/cipi-apps/${app}" ]] && rm -rf "/var/log/cipi-apps/${app}"
     return 0
 }
@@ -1320,7 +1320,7 @@ read_choice() {
 # its arguments here, as root — so that was root for whoever may pass
 # arguments to a root `cipi` through sudo: an app user with the rule
 # `cipi yml node-sync <app> *` (written by `cipi yml auto <app> on`). Same
-# family as the cipi-app-notify exit code (5.8.6). Values are never
+# family as the cipi-app-notify exit code (5.9.0). Values are never
 # evaluated: they are stored with printf '%s'.
 parse_args() {
     for arg in "$@"; do
@@ -1365,7 +1365,7 @@ reload_supervisor() {
 # there in place of a log was followed. `cipi deploy` handed the file it
 # pointed at to the app user — /etc/passwd, say; supervisord appended a
 # worker's output to it, on `sudo cipi-worker restart`, which every app user
-# may run. Any app user to root (5.8.6).
+# may run. Any app user to root (5.9.0).
 #
 # Those logs now live in /var/log/cipi-apps/<app>: root's directory, which the
 # app user reads (it is the directory's group) and cannot add to, rename in or
@@ -1595,7 +1595,7 @@ app_log_links_default() { app_log_links "${1:-}" nginx-access.log nginx-error.lo
 #
 # Everything under the home is the app user's to rename: as root, nothing here
 # dereferences a name found there. ~/logs is created by the app user when it
-# is missing and otherwise left as it is (before 5.8.6 root ran mkdir, chown
+# is missing and otherwise left as it is (before 5.9.0 root ran mkdir, chown
 # app:www-data and chmod 2775 on it — on whatever a symlink called "logs"
 # pointed at); chown is -h; a path that is a symlink is skipped; chmod on the
 # app's own files is done as the app user.
@@ -1613,7 +1613,7 @@ ensure_app_logs_permissions() {
     fi
 
     # Reclaim root-owned log files left by old logrotate "create" rules — and,
-    # since 5.8.6, the logs nginx and supervisor wrote here before the move.
+    # since 5.9.0, the logs nginx and supervisor wrote here before the move.
     # From inside each directory, once it is known to be where its name says
     # (_app_dir_do): `shared` or `storage` as a symlink would otherwise aim
     # this at a `logs` directory anywhere. chown -R walks by descriptor and,
@@ -1631,7 +1631,7 @@ ensure_app_logs_permissions() {
         h="$1"; cu="$2"
         # Its own logs in its own group: logrotate rotates them as this user
         # (app_logrotate_rule) and gives each copy the owner and group of the
-        # log — a group this user is not in (www-data, from before 5.8.6) is
+        # log — a group this user is not in (www-data, from before 5.9.0) is
         # one it cannot give, and the rotation of that file would fail.
         g=$(id -gn 2>/dev/null) || g=""
         if [[ -n "$g" ]]; then
@@ -1697,7 +1697,7 @@ _app_logrotate_shared_clean() {
 
 # Writes (or refreshes) the rule of one app. Nothing to do without logrotate,
 # for a name that is not an app user, or while the shared rule still covers
-# the homes (a server that has not run migration 5.8.6 yet). Idempotent.
+# the homes (a server that has not run migration 5.9.0 yet). Idempotent.
 app_logrotate_rule() {
     local app="${1:-}" d="${CIPI_LOGROTATE_D:-/etc/logrotate.d}" grp f tmp
     [[ "$app" =~ ^[a-z][a-z0-9]{2,31}$ ]] || return 0
@@ -1777,7 +1777,7 @@ _app_logrotate_shared_strip() {
     rm -f "$tmp"; return 1
 }
 
-# Every app, at once (migration 5.8.6, `cipi app fix-permissions`): the shared
+# Every app, at once (migration 5.9.0, `cipi app fix-permissions`): the shared
 # rule first — the other order would name each log twice for a moment — then
 # each app's logs into its own group and its rule. Prints what it did.
 # Returns 1 when the shared rule could not be changed (nothing else is then).
@@ -2016,7 +2016,7 @@ app_ssh_apply_default() {
 #
 # Root, in a directory the app user owns: every chown is -h (the name, never
 # what a symlink of that name points at) and every chmod is done as the app
-# user, who owns what the chowns just gave back. Before 5.8.6 these were
+# user, who owns what the chowns just gave back. Before 5.9.0 these were
 # plain chown and chmod as root, which follow a symlink: `x.pub ->
 # /etc/shadow` in ~/.ssh made shadow 644, `shared/storage -> /etc` gave /etc
 # to the app (chown -R alone is harmless there: it changes the link).

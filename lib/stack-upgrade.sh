@@ -7,7 +7,7 @@
 # its own daily cron (`cipi php upgrade`). These helpers patch the four —
 # patch-level only (`apt --only-upgrade` of packages already installed),
 # Cipi configs kept (`--force-confold`), confirmation unless `--yes` — and
-# since 5.8.6 `cipi autoupdate` runs them every night (lib/autoupdate.sh),
+# since 5.9.0 `cipi autoupdate` runs them every night (lib/autoupdate.sh),
 # one after the other, a database only while no dump or deploy is running.
 #
 # Entry points:

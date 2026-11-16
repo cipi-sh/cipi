@@ -111,7 +111,7 @@ app_get() { vault_read apps.json | jq -r --arg a "$1" --arg k "$2" '.[$a][$k] //
 warn() { echo "WARN: $*" >&2; }
 info() { :; }
 _ensure_nginx_octane_map() { :; }
-app_log_dir() { echo "/var/log/cipi-apps/${1:-}"; }; app_log_dir_ensure() { return 0; }; app_log_links_default() { :; }   # 5.8.6: the log directory, not on this machine
+app_log_dir() { echo "/var/log/cipi-apps/${1:-}"; }; app_log_dir_ensure() { return 0; }; app_log_links_default() { :; }   # 5.9.0: the log directory, not on this machine
 _ensure_suspended_page() { :; }
 export SUSPENDED_DIR=/var/www/cipi-suspended
 

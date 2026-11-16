@@ -93,7 +93,7 @@ _sync_export() {
     # Staged in a private directory. It was /tmp/cipi-sync-<time>, world-readable,
     # for as long as the export ran: every app's .env, the decrypted apps.json,
     # databases.json, smtp.json and the database dumps, open to any local user
-    # (5.8.6). The archive keeps its top-level name, cipi-sync-<time>.
+    # (5.9.0). The archive keeps its top-level name, cipi-sync-<time>.
     local work tmp
     work=$(mktemp -d /tmp/cipi-sync.XXXXXXXXXX) && [[ -n "$work" && -d "$work" ]] || { error "Cannot create a temporary directory under /tmp"; exit 1; }
     chmod 700 "$work"
@@ -711,7 +711,7 @@ BASH
     fi
     # The post-deploy runner reads the environment label from .env (5.8.0).
     app_env_set_environment "$app" "$(app_env_label "$app")" || true
-    # Its own Valkey on this server (5.8.6): the REDIS_* lines it arrived
+    # Its own Valkey on this server (5.9.0): the REDIS_* lines it arrived
     # with name the server it left.
     if [[ -f "${CIPI_LIB}/valkey.sh" && "$(app_get "$app" custom)" != "true" ]]; then
         # shellcheck source=/dev/null
@@ -744,7 +744,7 @@ BASH
     # 13. Supervisor
     step "Workers..."
     if [[ -f "${ad}/supervisor.conf" ]] && [[ -s "${ad}/supervisor.conf" ]]; then
-        # A file exported before 5.8.6 logs to ~/logs: root's directory instead
+        # A file exported before 5.9.0 logs to ~/logs: root's directory instead
         # (app_log_dir in common.sh), with the symlinks in ~/logs.
         app_log_dir_ensure "$app" || true
         sed -e "s|/usr/bin/php[0-9]\.[0-9]|/usr/bin/php${php_ver}|g" \
@@ -870,7 +870,7 @@ _sync_update_app() {
         local local_db_pass local_db_user local_db_name local_db_host local_db_port local_db_conn env_cur=""
         local local_redis_host local_redis_port local_redis_pass
         env_cur=$(app_read "$app" "${home}/shared/.env") || env_cur=""
-        # Valkey is this server's too (5.8.6): the app's own instance, or
+        # Valkey is this server's too (5.9.0): the app's own instance, or
         # the shared one with this server's password — never the source's.
         local_redis_host=$(grep -m1 '^REDIS_HOST=' <<< "$env_cur" | cut -d= -f2- || true)
         local_redis_port=$(grep -m1 '^REDIS_PORT=' <<< "$env_cur" | cut -d= -f2- || true)

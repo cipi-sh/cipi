@@ -68,7 +68,7 @@ _gui_sync_path_package() {
 
     # mktemp, not /tmp/cipi-gui-pkg-$$ removed and made again with mkdir -p:
     # a local user who recreated that name in between owned the directory the
-    # package is unpacked in and moved to /opt/cipi/cipi-gui from (5.8.6).
+    # package is unpacked in and moved to /opt/cipi/cipi-gui from (5.9.0).
     tmp=$(mktemp -d /tmp/cipi-gui-pkg.XXXXXXXXXX) && [[ -n "$tmp" && -d "$tmp" ]] || return 1
     chmod 700 "$tmp"
 
@@ -183,7 +183,7 @@ _gui_cd_safe() {
 
 # The directory exists, empty and 0700, when this returns: composer
 # create-project accepts an empty target. mktemp rather than $$.$RANDOM, so
-# no local user can own the tree root later moves to /opt/cipi/gui (5.8.6).
+# no local user can own the tree root later moves to /opt/cipi/gui (5.9.0).
 _gui_new_build_dir() {
     _gui_cd_safe
     rm -rf /tmp/cipi-gui-build /var/tmp/cipi-gui-build.* 2>/dev/null || true
@@ -609,7 +609,7 @@ gui_setup() {
     success "Config saved"
 
     # The www-data sudoers whitelist: written by the panels themselves since
-    # 5.8.6, no longer by setup.sh on every server.
+    # 5.9.0, no longer by setup.sh on every server.
     _panel_sudoers_ensure
     success "Sudoers whitelist for www-data ready"
 

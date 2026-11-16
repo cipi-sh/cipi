@@ -6,7 +6,7 @@
 # upgrade` the PHP packages. Neither touches what Cipi installs from somewhere
 # else or holds back on purpose: nginx (nginx.org), MariaDB, PostgreSQL and
 # Valkey — blacklisted, because apt restarts them — the Node.js runtimes and
-# Composer. Until 5.8.6 those waited for someone to run `cipi … upgrade`,
+# Composer. Until 5.9.0 those waited for someone to run `cipi … upgrade`,
 # and nothing said there was something to run.
 #
 # `cipi autoupdate run` (root cron, nightly) applies the patch releases of

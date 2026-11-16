@@ -441,7 +441,7 @@ else
 fi
 
 echo "-- CrowdSec actually reads the app vhost logs"
-# /var/log/cipi-apps/* since 5.8.6; /home/*/logs only while a vhost still logs there
+# /var/log/cipi-apps/* since 5.9.0; /home/*/logs only while a vhost still logs there
 grep -q "app_logs='/var/log/cipi-apps/\*'" "${LIB}/crowdsec.sh" && grep -q "app_logs='/home/\*/logs'" "${LIB}/crowdsec.sh" \
     && grep -q -- '- ${app_logs}/nginx-access.log' "${LIB}/crowdsec.sh" \
     && pass "acquisition covers per-app access logs" || fail "acquisition misses the per-app access logs"

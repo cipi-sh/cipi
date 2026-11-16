@@ -382,7 +382,7 @@ api_setup() {
     success "Config saved"
 
     # The www-data sudoers whitelist the panel runs cipi through. Not written
-    # by setup.sh any more (5.8.6): it exists only while a panel is installed.
+    # by setup.sh any more (5.9.0): it exists only while a panel is installed.
     _panel_sudoers_ensure
     success "Sudoers whitelist for www-data ready"
 
@@ -487,7 +487,7 @@ _api_ensure_laravel_app() {
     if [[ ! -f "${CIPI_API_ROOT}/artisan" ]]; then
         step "Installing Laravel API app..."
         # A private build directory: the fixed /tmp/cipi-api-build could be
-        # pre-created by any local user between its removal and the build (5.8.6).
+        # pre-created by any local user between its removal and the build (5.9.0).
         rm -rf /tmp/cipi-api-build /var/tmp/cipi-api-build.* 2>/dev/null || true
         local build
         build=$(mktemp -d /var/tmp/cipi-api-build.XXXXXXXX) && [[ -n "$build" && -d "$build" ]] || {
@@ -1020,7 +1020,7 @@ api_upgrade() {
     # 2. Build new Laravel project
     step "Creating fresh Laravel project..."
     # A private build directory: the fixed /tmp/cipi-api-build could be
-    # pre-created by any local user between its removal and the build (5.8.6).
+    # pre-created by any local user between its removal and the build (5.9.0).
     rm -rf /tmp/cipi-api-build /var/tmp/cipi-api-build.* 2>/dev/null || true
     local build
     build=$(mktemp -d /var/tmp/cipi-api-build.XXXXXXXX) && [[ -n "$build" && -d "$build" ]] || {
@@ -1425,7 +1425,7 @@ api_remove() {
         /var/log/nginx/cipi-api-access.log* /var/log/nginx/cipi-api-error.log* 2>/dev/null || true
 
     # The www-data sudoers whitelist goes with the last panel: kept while the
-    # GUI is still installed, removed otherwise (5.8.6).
+    # GUI is still installed, removed otherwise (5.9.0).
     step "Sudoers..."
     _panel_sudoers_ensure
 

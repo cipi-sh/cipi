@@ -12,7 +12,7 @@
 # is used, and nothing here is ever evaluated by the shell. In particular
 # the exit code is matched as digits and compared as a string: bash's -eq
 # evaluates its operand as an arithmetic expression, and an argument such as
-# `BASH_VERSINFO[$(cmd)]` ran that command as root (5.8.6).
+# `BASH_VERSINFO[$(cmd)]` ran that command as root (5.9.0).
 #############################################
 set -uo pipefail
 

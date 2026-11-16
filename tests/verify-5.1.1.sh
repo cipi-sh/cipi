@@ -118,7 +118,7 @@ vhost_out=$(bash -c '
     app_get() { case "$2" in custom) echo "true" ;; *) echo "" ;; esac; }
     vault_read() { echo "{\"w\":{\"aliases\":[\"*.web.example.com\",\"web.example.com\"]}}"; }
     _ensure_nginx_octane_map() { :; }
-    app_log_dir_ensure() { return 0; }; app_log_links_default() { :; }   # 5.8.6: the log directory, not on this machine
+    app_log_dir_ensure() { return 0; }; app_log_links_default() { :; }   # 5.9.0: the log directory, not on this machine
     source lib/app.sh
     tmp=$(mktemp -d); mkdir -p "${tmp}/etc/nginx/sites-available"
     declare -f _create_nginx_vhost _create_nginx_vhost_http _nginx_vhost_tls | sed "s#/etc/nginx/#${tmp}/etc/nginx/#g" > "${tmp}/v.sh"

@@ -521,7 +521,7 @@ _crowdsec_write_bitbucket_whitelist() {
 }
 
 # Every Cipi vhost overrides access_log to /var/log/cipi-apps/<app>/nginx-access.log
-# (lib/app.sh; /home/<app>/logs before 5.8.6 — a vhost still there is read through
+# (lib/app.sh; /home/<app>/logs before 5.9.0 — a vhost still there is read through
 # its old path, never both: the symlink in ~/logs would deliver every line twice),
 # so /var/log/nginx holds only the catch-all server block. Reading
 # just that made the whole nginx half of CrowdSec inert: no app traffic, no

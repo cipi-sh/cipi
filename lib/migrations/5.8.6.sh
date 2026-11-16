@@ -17,11 +17,16 @@
 #     API nor the GUI installed: setup.sh wrote it everywhere, and it lets
 #     www-data run `cipi ssh add`, i.e. become root. Servers with a panel
 #     keep it as it is; `cipi api` / `cipi gui` write it from now on.
-#  4. Restarts PHP-FPM, then every app's supervisor programs (queue
-#     workers, Horizon, Octane, Reverb — what every deploy restarts
-#     anyway): a running process keeps the groups it started with, so
-#     without this the old membership would live on in the workers.
-#     Open SSH sessions of app users keep it until they log out.
+#  4. Restarts PHP-FPM, then what each of those apps has running under
+#     supervisor (queue workers, Horizon, Octane, Reverb — what every
+#     deploy restarts anyway): a running process keeps the groups it
+#     started with, so without this the old membership would live on in
+#     the workers. Only what is running: a program someone stopped
+#     (`cipi worker stop`) stays stopped. A Node SSR app is restarted the
+#     way a deploy does it, blue/green, with no downtime; if the new
+#     process does not come up the old one keeps serving, and the
+#     migration says so. Open SSH sessions of app users keep the old
+#     membership until they log out.
 #
 # cipi-app-notify, the other half of this release, needs no migration:
 # self-update copies the new helper to /usr/local/bin before this runs.
@@ -61,9 +66,15 @@ n_kept=0
 while IFS= read -r u; do
     [[ -n "$u" ]] || continue
     [[ "$u" == "root" || "$u" == "cipi" || "$u" == "www-data" ]] && continue
-    validate_username "$u" 2>/dev/null || continue
     id "$u" &>/dev/null || continue
     if ! printf '%s\n' "$www_members" | grep -Fxq "$u"; then
+        continue
+    fi
+    # Listed as an app and in www-data, but not a name `cipi app create`
+    # gives out (a reserved word, an odd shape): said, never touched.
+    if ! validate_username "$u" 2>/dev/null; then
+        echo "  WARNING: ${u}: listed as an app but not an app-shaped name — left in www-data (if it is an app user: gpasswd -d ${u} www-data)"
+        n_kept=$((n_kept + 1))
         continue
     fi
     if gpasswd -d "$u" www-data >/dev/null 2>&1; then
@@ -152,12 +163,45 @@ if (( n_removed > 0 )) && command -v supervisorctl &>/dev/null; then
         conf="/etc/supervisor/conf.d/${u}.conf"
         [[ -f "$conf" ]] || continue
         for group in $(grep '^\[program:' "$conf" 2>/dev/null | sed 's/\[program://;s/\]//'); do
-            supervisorctl restart "${group}:*" >/dev/null 2>&1 \
-                || supervisorctl restart "${group}" >/dev/null 2>&1 || true
+            # Only what is running. A process that is not there holds no old
+            # group, and a program someone stopped must not come back at night.
+            running=$(supervisorctl status "${group}:*" 2>/dev/null \
+                | awk '$2 == "RUNNING" || $2 == "STARTING" { print $1 }' || true)
+            [[ -n "$running" ]] || continue
+            for proc in $running; do
+                supervisorctl restart "$proc" >/dev/null 2>&1 || true
+            done
             n_workers=$((n_workers + 1))
         done
     done
     (( n_workers > 0 )) && echo "  ${n_workers} supervisor program(s) restarted (workers forked before this kept the old groups)"
+
+    # Node SSR apps: their process runs under <app>-node-blue|green, outside
+    # <app>.conf. cipi-node-switch starts the release on the idle slot, waits
+    # for it to answer, moves nginx and stops the old process — the restart
+    # every deploy makes. A failure leaves the old process serving. When the
+    # app's switch lock is held (a deploy is making that same switch right
+    # now) the app is left alone rather than waited for. SUDO_USER is
+    # dropped: the switch refuses a sudo caller that is not the app, and this
+    # is root's own maintenance, whoever typed `sudo cipi self-update`.
+    if [[ -x /usr/local/bin/cipi-node-switch ]]; then
+        for u in $removed; do
+            state="/var/lib/cipi/node/${u}.json"
+            [[ -f "$state" && -f "/etc/supervisor/conf.d/${u}-node.conf" && -L "/home/${u}/current" ]] || continue
+            [[ "$(jq -r '.mode // "ssr"' "$state" 2>/dev/null || true)" == "ssr" ]] || continue
+            active=$(jq -r '.active // -1' "$state" 2>/dev/null || true)
+            [[ "$active" == "0" || "$active" == "1" ]] || continue
+            if ! ( exec 8>"/run/lock/cipi-node-${u}.lock" && flock -n 8 ) 2>/dev/null; then
+                echo "  ${u}: Node switch in progress (a deploy?) — left alone; if it was not a deploy: cipi node restart ${u}"
+                continue
+            fi
+            if env -u SUDO_USER /usr/local/bin/cipi-node-switch "$u" current >/dev/null 2>&1; then
+                echo "  ${u}: Node process restarted (blue/green, no downtime)"
+            else
+                echo "  WARNING: ${u}: Node process not restarted — it keeps the old groups until the next deploy or: cipi node restart ${u}"
+            fi
+        done
+    fi
     echo "  Open SSH/SFTP sessions of app users keep www-data until they log out"
 fi
 

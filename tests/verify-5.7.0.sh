@@ -65,6 +65,9 @@ cipi_notify(){ :; }
 confirm(){ return 1; }
 # 5.8.2: the moves check the DNS of the new name first; here the name always points at the server.
 panel_dns_check(){ echo "panel_dns_check $*" >> "${CALLS}"; return 0; }
+# 5.8.6: setup writes the www-data sudoers whitelist and remove drops it with the
+# last panel (lib/cipi-api-sudoers.sh, exercised in verify-5.8.6.sh); here a no-op.
+_panel_sudoers_ensure(){ echo "_panel_sudoers_ensure" >> "${CALLS}"; }
 vault_read(){ cat "${CIPI_CONFIG}/$1"; }
 vault_write(){ cat > "${CIPI_CONFIG}/$1.tmp" && mv "${CIPI_CONFIG}/$1.tmp" "${CIPI_CONFIG}/$1"; }
 certbot(){

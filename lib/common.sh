@@ -1140,15 +1140,29 @@ read_choice() {
     done
 }
 
+# --key=value → ARG_key=value, --flag → ARG_flag=true.
+#
+# An option name is letters, digits, "-" and "_" and nothing else; anything
+# else is not an option and is ignored. The name ends up in `printf -v`, and
+# bash evaluates an array subscript in the name it is given there, command
+# substitutions included: `--x[$(cmd)]` ran cmd. Every `cipi` command parses
+# its arguments here, as root — so that was root for whoever may pass
+# arguments to a root `cipi` through sudo: an app user with the rule
+# `cipi yml node-sync <app> *` (written by `cipi yml auto <app> on`). Same
+# family as the cipi-app-notify exit code (5.8.6). Values are never
+# evaluated: they are stored with printf '%s'.
 parse_args() {
     for arg in "$@"; do
         case "$arg" in
             --*=*) local k="${arg%%=*}" v="${arg#*=}"; k="${k#--}"
+                [[ "$k" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || continue
                 # Panel API builds --key='value' via escapeshellarg(); keep the value, drop wrapping quotes.
                 if [[ "$v" == \'*\' && ${#v} -ge 2 ]]; then v="${v:1:${#v}-2}"; fi
                 if [[ "$v" == \"*\" && ${#v} -ge 2 ]]; then v="${v:1:${#v}-2}"; fi
                 printf -v "ARG_${k//-/_}" '%s' "$v" ;;
-            --*)   local k="${arg#--}"; printf -v "ARG_${k//-/_}" '%s' "true" ;;
+            --*)   local k="${arg#--}"
+                [[ "$k" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || continue
+                printf -v "ARG_${k//-/_}" '%s' "true" ;;
         esac
     done
 }

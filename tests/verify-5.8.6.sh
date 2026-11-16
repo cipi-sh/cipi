@@ -1,10 +1,13 @@
 #!/bin/bash
 # Local regression checks for 5.8.6 — app users out of www-data, the stock
 # www pool socket 0600, the panel sudoers written only with a panel, root's
-# temp directories from mktemp, and cipi-app-notify validating its arguments
-# (the -eq arithmetic injection). Pure bash + coreutils: cipi-app-notify is
-# run for real against a stub lib under the temp dir; nothing outside it is
-# touched and no mail is sent.
+# temp directories from mktemp, cipi-app-notify validating its arguments
+# (the -eq arithmetic injection) and parse_args refusing an option name that
+# is not one (the same injection through `printf -v`). Pure bash + coreutils:
+# cipi-app-notify and parse_args are run for real, and so is the migration —
+# against a fake root under the temp dir, with getent, gpasswd, systemctl and
+# supervisorctl stubbed (that part needs jq and is skipped without it).
+# Nothing outside the temp dir is touched and no mail is sent.
 # Run from repo root: bash tests/verify-5.8.6.sh
 set -uo pipefail
 
@@ -125,6 +128,10 @@ grep -q 'is not the Cipi placeholder' "$M" && pass "migration leaves a hand-edit
 grep -q '_cipi_panel_installed' "$M" && pass "migration keeps the sudoers where a panel is installed" || fail "migration: sudoers check"
 grep -q 'php-fpm\${v}" -t' "$M" && pass "migration tests the FPM config before restarting" || fail "migration restarts FPM untested"
 grep -q 'supervisorctl restart' "$M" && pass "migration restarts the apps' supervisor programs" || fail "migration: workers keep the old groups"
+grep -q 'supervisorctl restart "\${group}:\*"' "$M" \
+    && fail "migration restarts whole groups (it would start workers someone stopped)" || pass "migration restarts only what is running"
+grep -q 'env -u SUDO_USER /usr/local/bin/cipi-node-switch "\$u" current' "$M" \
+    && pass "migration restarts Node SSR apps blue/green, as root itself" || fail "migration: Node SSR processes keep the old groups"
 
 # ── 6. functional: cipi-app-notify ──────────────────────────
 echo "--- functional: cipi-app-notify"
@@ -178,6 +185,122 @@ rc=$(SUDO_USER=otherapp notify myapp deploy 1)
 [[ "$rc" == "2" ]] && pass "called through sudo by another user → refused" || fail "SUDO_USER mismatch accepted (rc=${rc})"
 rc=$(SUDO_USER=myapp notify myapp deploy 1)
 [[ "$rc" == "0" ]] && pass "called through sudo by the app's own user → accepted" || fail "own user refused (rc=${rc})"
+
+# ── 7. functional: parse_args ───────────────────────────────
+# Every `cipi` command parses its arguments here as root, and an app user
+# with `cipi yml auto` on may pass arguments: `cipi yml node-sync <app> *`.
+echo "--- functional: parse_args"
+fn common.sh parse_args > "${TMP}/parse_args.sh"
+[[ -s "${TMP}/parse_args.sh" ]] && pass "parse_args extracted from common.sh" || fail "parse_args not found in common.sh"
+pa() {
+    rm -f "${TMP}/pwned"
+    bash -c 'set -euo pipefail; source "$1"; shift; parse_args "$@"
+             printf "%s|%s|%s|%s|%s|%s\n" "${ARG_finalize:-}" "${ARG_per_page:-}" "${ARG_301:-}" "${ARG_set:-}" "${ARG_name:-}" "${ARG_x:-}"' \
+        _ "${TMP}/parse_args.sh" "$@" 2>&1
+}
+out=$(pa --finalize "--x[\$(touch ${TMP}/pwned)]")
+[[ ! -e "${TMP}/pwned" && "$out" == "true|||||" ]] \
+    && pass "PoC '--x[\$(cmd)]' is ignored and the command does not run" || fail "PoC flag: out=${out}, pwned=$([[ -e "${TMP}/pwned" ]] && echo yes || echo no)"
+out=$(pa "--x[\$(touch ${TMP}/pwned)]=1" --finalize)
+[[ ! -e "${TMP}/pwned" && "$out" == "true|||||" ]] \
+    && pass "PoC '--x[\$(cmd)]=value' is ignored and the command does not run" || fail "PoC key=value: out=${out}, pwned=$([[ -e "${TMP}/pwned" ]] && echo yes || echo no)"
+out=$(pa '--a b=1' '--=1' '--' '--x.y=1' "--x;touch ${TMP}/pwned" --finalize)
+[[ ! -e "${TMP}/pwned" && "$out" == "true|||||" ]] \
+    && pass "names with spaces, dots, separators or no name at all are not options" || fail "odd option names: out=${out}"
+out=$(pa --finalize --per-page=20 --301 --set=APP_KEY=a=b "--name='with space'" --x=1)
+[[ "$out" == "true|20|true|APP_KEY=a=b|with space|1" ]] \
+    && pass "real options parse as before (flags, key=value, numeric names, values with =, quoted values)" || fail "legitimate options broken: ${out}"
+out=$(pa "--x=\$(touch ${TMP}/pwned)" "--name=a[\$(touch ${TMP}/pwned)]")
+[[ ! -e "${TMP}/pwned" && "$out" == "||||a[\$(touch ${TMP}/pwned)]|\$(touch ${TMP}/pwned)" ]] \
+    && pass "values are stored as text, never evaluated" || fail "a value was evaluated: ${out}"
+
+# ── 8. functional: migration 5.8.6 against a fake root ──────
+echo "--- functional: migration 5.8.6 (fake root)"
+if ! command -v jq >/dev/null 2>&1; then
+    echo "  SKIP: jq not installed — migration dry run not executed"
+else
+    R="${TMP}/root"
+    mkdir -p "$R"/{lib,bin,cfg,log,etc/php/8.3/fpm/pool.d,etc/supervisor/conf.d,etc/sudoers.d,var/lib/cipi/node,run/lock,home/nodeapp/releases/7,home/staticnode}
+    cp "${LIB}"/*.sh "$R/lib/"
+    cp "$M" "$R/migration.sh"
+    # Absolute paths → the fake root.
+    sed -i -e "s#/etc/php/#$R/etc/php/#g" -e "s#/etc/supervisor/conf.d/#$R/etc/supervisor/conf.d/#g" \
+        -e "s#/var/lib/cipi/node/#$R/var/lib/cipi/node/#g" -e "s#\"/home/\${u}/current\"#\"$R/home/\${u}/current\"#g" \
+        -e "s#/run/lock/#$R/run/lock/#g" -e "s#/usr/local/bin/cipi-node-switch#$R/bin/cipi-node-switch#g" \
+        -e "s#/etc/sudoers.d/cipi-api#$R/etc/sudoers.d/cipi-api#g" -e "s#/etc/nginx/sites-available/#$R/etc/nginx/sites-available/#g" \
+        -e "s#/etc/systemd/system/cipi-queue.service#$R/etc/systemd/system/cipi-queue.service#g" -e "s#/etc/cron.d/cipi-#$R/etc/cron.d/cipi-#g" \
+        "$R/migration.sh" "$R/lib/cipi-api-sudoers.sh"
+
+    # Four apps (one not in www-data, one Node SSR, one Node static), an app
+    # with a reserved name, and an account that is in www-data and not an app.
+    echo '{"appa":{},"appb":{},"nodeapp":{},"staticnode":{},"admin":{}}' > "$R/cfg/apps.json"
+    printf 'cipi-apps:x:1001:appa,appb,nodeapp,staticnode\n' > "$R/group.cipi-apps"
+    printf 'www-data:x:33:appa,nodeapp,staticnode,admin,sysuser\n' > "$R/group.www-data"
+    printf '[www]\nuser = www-data\ngroup = www-data\nlisten = /run/php/php8.3-fpm.sock\nlisten.owner = www-data\nlisten.group = www-data\npm = ondemand\n' \
+        > "$R/etc/php/8.3/fpm/pool.d/www.conf"
+    printf '[program:appa-worker-default]\ncommand=x\n[program:appa-horizon]\ncommand=y\n' > "$R/etc/supervisor/conf.d/appa.conf"
+    : > "$R/etc/supervisor/conf.d/nodeapp-node.conf"; : > "$R/etc/supervisor/conf.d/staticnode-node.conf"
+    echo '{"mode":"ssr","active":0}' > "$R/var/lib/cipi/node/nodeapp.json"
+    echo '{"mode":"static"}' > "$R/var/lib/cipi/node/staticnode.json"
+    ln -s releases/7 "$R/home/nodeapp/current"; ln -s . "$R/home/staticnode/current"
+    echo 'www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi ssh add *' > "$R/etc/sudoers.d/cipi-api"
+
+    stub() { printf '#!/bin/bash\n%s\n' "$2" > "$R/bin/$1"; chmod +x "$R/bin/$1"; }
+    stub getent  "f=\"$R/group.\$2\"; [[ \"\$1\" == group && -f \"\$f\" ]] && cat \"\$f\" || exit 2"
+    stub id      'case "${@: -1}" in appa|appb|nodeapp|staticnode|admin|sysuser|root|cipi|www-data) exit 0;; *) exit 1;; esac'
+    stub gpasswd "echo \"gpasswd \$*\" >> \"$R/calls\"; [[ \"\$1\" == -d ]] && sed -i -E \"s/(:|,)\$2(,|\\\$)/\\\\1\\\\2/; s/,\\\$//; s/:,/:/\" \"$R/group.\$3\""
+    stub dpkg    '[[ "$2" == php8.3-fpm ]]'
+    stub systemctl "echo \"systemctl \$*\" >> \"$R/calls\"; exit 0"
+    stub php-fpm8.3 'exit 0'
+    stub supervisorctl "echo \"supervisorctl \$*\" >> \"$R/calls\"
+case \"\$1 \$2\" in
+  'status appa-worker-default:*') printf 'appa-worker-default:appa-worker-default_00   RUNNING   pid 11, uptime 1:00:00\nappa-worker-default:appa-worker-default_01   RUNNING   pid 12, uptime 1:00:00\n';;
+  'status appa-horizon:*')        printf 'appa-horizon                     STOPPED   Not started\n'; exit 3;;
+  status*) echo \"\$2: ERROR (no such group)\"; exit 4;;
+esac"
+    stub cipi-node-switch "echo \"node-switch \$* SUDO_USER=\${SUDO_USER:-unset}\" >> \"$R/calls\"; exit \${NODE_SWITCH_RC:-0}"
+
+    migrate() {
+        : > "$R/calls"
+        ( cd "$R" && PATH="$R/bin:$PATH" CIPI_LIB="$R/lib" CIPI_CONFIG="$R/cfg" CIPI_LOG="$R/log" \
+            CIPI_API_ROOT="$R/opt/api" CIPI_GUI_ROOT="$R/opt/gui" SUDO_USER=cipi bash "$R/migration.sh" ) > "$R/out" 2>&1
+    }
+
+    migrate; rc=$?
+    [[ "$rc" -eq 0 ]] && grep -q 'Migration 5.8.6 complete' "$R/out" && pass "migration runs to the end (exit 0)" || { fail "migration aborted (rc=${rc})"; sed 's/^/    /' "$R/out" >&2; }
+    [[ "$(grep -c '^gpasswd -d' "$R/calls")" -eq 3 ]] && grep -q '^gpasswd -d appa www-data$' "$R/calls" \
+        && grep -q '^gpasswd -d nodeapp www-data$' "$R/calls" && grep -q '^gpasswd -d staticnode www-data$' "$R/calls" \
+        && pass "the three app users in www-data are removed, and only they" || fail "wrong gpasswd calls: $(tr '\n' ';' < "$R/calls")"
+    [[ "$(cut -d: -f4 "$R/group.www-data")" == "admin,sysuser" ]] \
+        && pass "an account that is not an app stays in www-data" || fail "www-data members after: $(cat "$R/group.www-data")"
+    grep -q 'WARNING: admin: listed as an app but not an app-shaped name' "$R/out" \
+        && pass "an app with a reserved name is reported, not skipped in silence" || fail "reserved-name app skipped without a word"
+    grep -q '^listen.mode = 0600$' "$R/etc/php/8.3/fpm/pool.d/www.conf" && pass "www pool gets listen.mode = 0600" || fail "www.conf not updated"
+    [[ ! -e "$R/etc/sudoers.d/cipi-api" ]] && pass "panel sudoers removed on a server with no panel" || fail "panel sudoers left behind"
+    grep -q '^systemctl restart php8.3-fpm$' "$R/calls" && pass "PHP-FPM restarted" || fail "PHP-FPM not restarted"
+    grep -q '^supervisorctl restart appa-worker-default:appa-worker-default_00$' "$R/calls" \
+        && grep -q '^supervisorctl restart appa-worker-default:appa-worker-default_01$' "$R/calls" \
+        && pass "running workers are restarted" || fail "running workers not restarted"
+    grep -q '^supervisorctl restart appa-horizon' "$R/calls" \
+        && fail "a stopped program was started by the migration" || pass "a stopped program stays stopped"
+    [[ "$(grep -c '^node-switch' "$R/calls")" -eq 1 ]] && grep -q '^node-switch nodeapp current SUDO_USER=unset$' "$R/calls" \
+        && pass "the Node SSR app is switched blue/green, without the caller's SUDO_USER; the static one is left alone" \
+        || fail "node switch calls: $(grep '^node-switch' "$R/calls" | tr '\n' ';')"
+
+    migrate; rc=$?
+    [[ "$rc" -eq 0 && ! -s "$R/calls" ]] && grep -q 'No app user in www-data' "$R/out" \
+        && pass "second run changes nothing (idempotent)" || fail "second run: rc=${rc}, calls=$(tr '\n' ';' < "$R/calls")"
+
+    # A Node process that does not come up, and a panel that is installed.
+    printf 'www-data:x:33:nodeapp\n' > "$R/group.www-data"
+    echo '{"domain":"panel.example.com"}' > "$R/cfg/api.json"
+    echo 'kept' > "$R/etc/sudoers.d/cipi-api"
+    NODE_SWITCH_RC=1 migrate; rc=$?
+    [[ "$rc" -eq 0 ]] && grep -q 'WARNING: nodeapp: Node process not restarted' "$R/out" \
+        && pass "a Node switch that fails is a warning, not an aborted migration" || fail "failed node switch: rc=${rc}"
+    [[ "$(cat "$R/etc/sudoers.d/cipi-api" 2>/dev/null)" == "kept" ]] \
+        && pass "panel sudoers untouched where a panel is installed" || fail "panel sudoers changed on a server with a panel"
+fi
 
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="

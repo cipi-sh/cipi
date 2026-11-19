@@ -8,7 +8,11 @@
 # None of that showed anywhere. This collects it in one list:
 #
 #   - a reboot that installed updates are waiting for (kernel, libc, …)
-#   - PHP below the security floor, or a branch that is end of life
+#   - PHP below the security floor, a branch that is end of life, one that
+#     is still a pre-release, or one installed before its extensions were
+#     packaged
+#   - nginx below its security floor, on the Ubuntu archive's build, or
+#     upgraded on disk while the old binary is still the one running
 #   - a newer package of nginx / MariaDB / PostgreSQL / Valkey where the
 #     automatic update is off, or where its last run failed
 #   - Composer and Node.js below their security floors
@@ -92,8 +96,8 @@ _pending_reboot() {
 
 # ── PHP ──────────────────────────────────────────────────────
 _pending_php() {
-    local v state full floor
-    for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+    local v state full floor ext
+    for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         php_is_installed "$v" || continue
         read -r state full <<< "$(php_security_state "$v")"
         floor=$(php_security_floor "$v")
@@ -104,8 +108,38 @@ _pending_php() {
             eol)
                 _pending_add warning "php-${v}-eol" "PHP ${v} (${full}) is end of life — the PHP project no longer patches it" "move its apps: cipi app edit <app> --php=8.5"
                 ;;
+            prerelease)
+                _pending_add warning "php-${v}-prerelease" "PHP ${v} is a pre-release (${full}) — not for production; ${floor} is not in the repository yet" "cipi php upgrade   (daily at 03:30; it installs ${floor} when the repository has it)"
+                ;;
         esac
+        # A version installed before its extensions were packaged.
+        ext=$(php_ext_pending "$v" | paste -sd' ' - || true)
+        if [[ -n "$ext" ]]; then
+            _pending_add warning "php-${v}-ext" "PHP ${v} is installed without: ${ext} — the repository has no package of them for ${v} yet; an app that needs one does not work on ${v}" "cipi php upgrade   (daily at 03:30; it installs them when the repository has them)"
+        fi
     done
+}
+
+# ── nginx ────────────────────────────────────────────────────
+# Below the release with the latest security fixes, from a repository that
+# backports instead of releasing, or upgraded on disk and not in memory.
+_pending_nginx() {
+    command -v nginx >/dev/null 2>&1 || return 0
+    declare -f nginx_security_state >/dev/null || source "${CIPI_LIB}/nginx.sh"
+    local state ver floor
+    read -r state ver <<< "$(nginx_security_state)"
+    floor=$(nginx_security_floor)
+    case "$state" in
+        vulnerable)
+            _pending_add critical nginx "nginx ${ver} is below ${floor}, the release with the latest security fixes" "cipi nginx upgrade"
+            ;;
+        distro)
+            _pending_add warning nginx-distro "nginx ${ver} is the Ubuntu archive build, not nginx.org mainline — Cipi cannot tell its patch level from the version, and the nightly update does not reach it" "cipi nginx upgrade   (moves it to nginx.org mainline, ${floor} or newer)"
+            ;;
+    esac
+    if nginx_running_binary_stale; then
+        _pending_add critical nginx-stale "nginx was upgraded on disk, but the binary from before the upgrade is still the one running — its fixes are not active" "systemctl restart nginx"
+    fi
 }
 
 # ── packages held back from unattended-upgrades ──────────────
@@ -284,6 +318,7 @@ pending_collect() {
     _pending_load_libs
     _pending_reboot
     _pending_php
+    _pending_nginx
     _pending_stack
     _pending_composer
     _pending_node

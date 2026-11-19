@@ -361,7 +361,7 @@ _cipi_complete() {
 
         nginx)
             case $pos in
-                1) sub="default-server upgrade" ;;
+                1) sub="default-server upgrade security" ;;
                 2) case "$w1" in
                        default-server) sub="status on off" ;;
                        upgrade)        sub="--yes" ;;

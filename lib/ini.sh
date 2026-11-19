@@ -188,9 +188,12 @@ _ini_normalize_value() {
 
 # ── PHP versions ─────────────────────────────────────────────
 
+# Legacy versions too (7.4–8.2, installed before 4.5.4): "server-wide" means
+# every PHP an app of this server runs on. Oldest first — the callers that
+# want one version take the last.
 _ini_installed_versions() {
     local v
-    for v in 8.3 8.4 8.5; do
+    for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         [[ -d "/etc/php/${v}" ]] && echo "$v"
     done
 }

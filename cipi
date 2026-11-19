@@ -236,6 +236,7 @@ show_help_topic() {
             _help_cmd "cipi app list"                  "List apps"
             _help_cmd "cipi app show <app>"            "App details"
             _help_cmd "cipi app edit <app>"            "Edit app  ${DIM}[--domain=] [--php=] [--branch=] [--env=] [--node-build=]${NC}"
+            _help_note "--php= (also on app create) refuses a PHP still waiting for extensions (cipi pending); --force to go on."
             _help_cmd "cipi app convert <app>"         "FPM ↔ Octane  ${DIM}--to=octane|fpm${NC}"
             _help_cmd "cipi app clone <app>"           "Clone app (staging)  ${DIM}--domain= [--env=staging] [--branch=] [--with-db]${NC}"
             _help_cmd "cipi app reverb …"              "Reverb WebSockets  ${DIM}enable|disable|status${NC}"
@@ -692,8 +693,11 @@ show_help_topic() {
             _help_cmd "cipi php install <ver>"         "Install PHP"
             _help_cmd "cipi php switch <ver>"          "Switch system default PHP"
             _help_cmd "cipi php upgrade"               "Upgrade installed PHP packages"
-            _help_note "Weekly cron (Sunday 03:30). Nginx / MariaDB / PostgreSQL / Valkey"
-            _help_note "are not automatic — see cipi help nginx, db, service."
+            _help_note "<ver>: 8.3, 8.4, 8.5 or 8.6. Daily cron (03:30). Nginx / MariaDB /"
+            _help_note "PostgreSQL / Valkey: cipi autoupdate (cipi help updates)."
+            _help_note "A branch that is new in the repository can lack redis, memcached or imagick"
+            _help_note "for a while: it is installed without them, and cipi php upgrade adds them"
+            _help_note "when they are published (cipi pending lists what is missing)."
             echo ""
             ;;
 
@@ -918,7 +922,10 @@ show_help_topic() {
             _help_cmd "cipi nginx default-server on"     "Close unmatched requests (444)"
             _help_cmd "cipi nginx default-server off"    "Let the first vhost answer them again"
             _help_cmd "cipi nginx upgrade"               "Patch nginx from nginx.org  ${DIM}[--yes]${NC}"
-            _help_note "Keeps /etc/nginx/nginx.conf (force-confold), tests, then reloads."
+            _help_cmd "cipi nginx security"              "Patch level, running binary, HTTP/2 exposure"
+            _help_note "Keeps /etc/nginx/nginx.conf (force-confold), tests, then reloads — or"
+            _help_note "restarts, when the binary from before the upgrade is still in memory."
+            _help_note "On the Ubuntu archive's nginx, upgrade moves it to nginx.org mainline."
             echo ""
             _help_note "Recommended with wildcard/multi-tenant apps: without it an HTTPS request"
             _help_note "carrying an unknown Host lands on whichever app sorts first, and its"
@@ -1079,8 +1086,10 @@ show_status() {
         fi
     done
 
+    # Every version Cipi ever installed: a server set up before 4.5.4 can
+    # still run apps on 7.4–8.2, and a running FPM belongs on this page.
     echo -e "\n${BOLD}PHP${NC}"
-    for v in 8.4 8.5; do
+    for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         if systemctl is-active --quiet "php${v}-fpm" 2>/dev/null; then
             local pools; pools=$(ls /etc/php/${v}/fpm/pool.d/*.conf 2>/dev/null | wc -l)
             printf "  %-16s ${GREEN}● running${NC} (%d pools)\n" "PHP $v" "$pools"

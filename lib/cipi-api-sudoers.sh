@@ -35,7 +35,7 @@ _cipi_panel_installed() {
     [[ -f /etc/nginx/sites-available/cipi-api || -f /etc/nginx/sites-available/cipi-gui ]] && return 0
     [[ -f /etc/systemd/system/cipi-queue.service ]] && return 0
     [[ -f /etc/cron.d/cipi-api || -f /etc/cron.d/cipi-gui ]] && return 0
-    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         [[ -f "/etc/php/${pv}/fpm/pool.d/cipi-api.conf" || -f "/etc/php/${pv}/fpm/pool.d/cipi-gui.conf" ]] && return 0
     done
     return 1

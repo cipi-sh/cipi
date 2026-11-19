@@ -34,7 +34,7 @@ _resolve_services() {
             systemd_unit_exists crowdsec && list+=("crowdsec")
             systemd_unit_exists crowdsec-firewall-bouncer && list+=("crowdsec-firewall-bouncer")
             systemd_unit_exists cloudflared && list+=("cloudflared")
-            for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+            for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
                 systemd_unit_exists "php${v}-fpm" && list+=("php${v}-fpm")
             done
             # The apps' own Valkey instances (cipi valkey).
@@ -47,7 +47,7 @@ _resolve_services() {
             echo "${list[@]}"
             ;;
         php)
-            for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+            for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
                 systemd_unit_exists "php${v}-fpm" && echo -n "php${v}-fpm "
             done
             ;;

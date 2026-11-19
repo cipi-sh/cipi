@@ -510,7 +510,7 @@ php_admin_value[error_log] = /var/log/cipi-gui-php-error.log
 php_admin_value[open_basedir] = ${basedir}
 $(fpm_pool_hardening "$v")
 EOF
-    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         [[ "$pv" == "$v" ]] && continue
         rm -f "/etc/php/${pv}/fpm/pool.d/cipi-gui.conf" 2>/dev/null || true
     done
@@ -568,7 +568,7 @@ _gui_is_installed() {
     [[ -f "${CIPI_GUI_CONFIG}" ]] && return 0
     [[ -f /etc/nginx/sites-available/cipi-gui ]] && return 0
     [[ -f /etc/cron.d/cipi-gui ]] && return 0
-    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         [[ -f "/etc/php/${pv}/fpm/pool.d/cipi-gui.conf" ]] && return 0
     done
     return 1
@@ -903,7 +903,7 @@ gui_upgrade() {
     _gui_apply_sqlite_pragmas
     local gui_php pv
     gui_php=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || echo "8.5")
-    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         if [[ -f "/etc/php/${pv}/fpm/pool.d/cipi-gui.conf" ]]; then
             gui_php="$pv"
             break
@@ -975,7 +975,7 @@ gui_remove() {
 
     step "PHP-FPM..."
     local pv
-    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         if [[ -f "/etc/php/${pv}/fpm/pool.d/cipi-gui.conf" ]]; then
             rm -f "/etc/php/${pv}/fpm/pool.d/cipi-gui.conf"
             reload_php_fpm "$pv" 2>/dev/null || true

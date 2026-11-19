@@ -92,7 +92,7 @@ Every app gets a fully isolated environment. **Laravel** (default): zero-downtim
 | Component          | Details                                                                                                      |
 | ------------------ | ------------------------------------------------------------------------------------------------------------ |
 | **Web server**     | Nginx reverse proxy with per-app virtual hosts — PHP-FPM or Octane (`proxy_pass`), optimized for Laravel     |
-| **PHP & Composer** | Selectable per app — PHP 7.4 to 8.5, hot-swappable                                                           |
+| **PHP & Composer** | Selectable per app — PHP 8.3 to 8.6, hot-swappable; a new server is installed with 8.6                       |
 | **Runtime**        | PHP-FPM pools by default; optional **Laravel Octane (FrankenPHP)** per app (`--octane`)                      |
 | **Database**       | MariaDB (default) + optional PostgreSQL; dedicated DB and user per Laravel app                               |
 | **Search**         | Optional **Meilisearch** for Laravel Scout — native binary, loopback only, per-app scoped key + index prefix  |
@@ -171,7 +171,7 @@ cipi scan enable        # nightly: release integrity + ClamAV on uploads
 
 Ubuntu security updates land daily via `unattended-upgrades`. PHP patch releases are applied every night at 03:30 by `cipi php upgrade`, which restarts PHP-FPM after an upgrade and reports each version's security patch level. The mitigations of the 2026-10-21 PHP advisory (`session.upload_progress.enabled`, `fatal_error_backtraces`) are in every FPM pool, in each version's `fpm/conf.d/99-cipi.ini` and in the ini Octane apps load. **Nginx, MariaDB, PostgreSQL and Valkey are left alone until you ask** — restarting a database at 04:00 is not a surprise Cipi will create:
 
-The rest of the stack — nginx (nginx.org), MariaDB, PostgreSQL, Valkey, the Node.js runtimes and Composer — is patched every night at 04:20 by `cipi autoupdate`: patch releases only (`apt --only-upgrade` of what is already installed), Cipi's configuration kept, nginx tested before it is reloaded, one component after the other and the databases last. A database is left for the next night while a dump or a deploy is running. Each upgrade is mailed like any other event.
+The rest of the stack — nginx (nginx.org), MariaDB, PostgreSQL, Valkey, the Node.js runtimes and Composer — is patched every night at 04:20 by `cipi autoupdate`: patch releases only (`apt --only-upgrade` of what is already installed), Cipi's configuration kept, nginx tested before it is reloaded — and restarted when the binary from before the upgrade is still the one in memory —, one component after the other and the databases last. A database is left for the next night while a dump or a deploy is running. Each upgrade is mailed like any other event.
 
 ```bash
 cipi autoupdate                    # what is on, how the last run went
@@ -180,6 +180,7 @@ cipi autoupdate on                 # everything back on
 cipi autoupdate run nginx          # now
 
 cipi nginx upgrade                 # the same, by hand: asks first
+cipi nginx security                # patch level, running binary, HTTP/2 exposure
 cipi db upgrade                    # MariaDB, and PostgreSQL if installed
 cipi service upgrade valkey
 ```
@@ -194,7 +195,7 @@ cipi reboot auto on --at=04:45     # restart at night, only on the nights one is
 cipi reboot auto off
 ```
 
-`cipi pending` is checked every morning and mailed when the list changes (and again after a week, while it lasts); `cipi status` shows the same list when there is one. Besides a reboot it names PHP below its security release, a component whose automatic update is off or failed, Composer and Node.js below theirs, apps that still share one Valkey, and PHP extensions installed with PECL — Cipi installs extensions from apt only, nothing updates the ones built by hand, and PECL itself is deprecated by the PHP project in favour of [PIE](https://github.com/php/pie).
+`cipi pending` is checked every morning and mailed when the list changes (and again after a week, while it lasts); `cipi status` shows the same list when there is one. Besides a reboot it names PHP below its security release (or still a release candidate, or installed before its extensions were packaged), nginx below its own, on the Ubuntu archive's build or upgraded on disk but not in memory, a component whose automatic update is off or failed, Composer and Node.js below theirs, apps that still share one Valkey, and PHP extensions installed with PECL — Cipi installs extensions from apt only, nothing updates the ones built by hand, and PECL itself is deprecated by the PHP project in favour of [PIE](https://github.com/php/pie).
 
 ### ⚡ Zero-Downtime Deploys
 

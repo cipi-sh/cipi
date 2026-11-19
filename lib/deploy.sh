@@ -14,7 +14,7 @@ _deploy_assert_php_compat() {
     [[ -z "$dep_major" ]] && return 0
     if (( dep_major >= 8 )) && ! validate_php_version "$php_ver"; then
         error "App '${app}' uses PHP ${php_ver}, but Deployer ${dep_major} requires PHP >= 8.3."
-        warn  "Upgrade the app first:  cipi app edit ${app}   (set PHP to 8.3, 8.4 or 8.5)"
+        warn  "Upgrade the app first:  cipi app edit ${app}   (set PHP to 8.3, 8.4, 8.5 or 8.6)"
         warn  "Install the version if needed:  cipi php install 8.3"
         log_action "DEPLOY BLOCKED: $app php=${php_ver} dep=${dep_major}"
         exit 1

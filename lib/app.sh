@@ -10,7 +10,10 @@ app_create() {
     # shellcheck source=/dev/null
     source "${CIPI_LIB}/db.sh"
     local app_user="${ARG_user:-}" domain="${ARG_domain:-}" repository="${ARG_repository:-}"
-    local branch="${ARG_branch:-main}" php_ver="${ARG_php:-8.5}"
+    # No --php: the server's PHP (8.6 on a server installed with Cipi 5.9.1
+    # or later, 8.5 on the ones before) — see php_app_default.
+    local branch="${ARG_branch:-main}" php_ver="${ARG_php:-}"
+    [[ -n "$php_ver" ]] || php_ver=$(php_app_default)
     local env_label="${ARG_env:-production}"
     local is_custom="${ARG_custom:-false}"
     local db_engine="${ARG_engine:-}"
@@ -136,14 +139,9 @@ app_create() {
     if [[ -z "${ARG_env:-}" && -t 0 ]]; then
         read_input "Environment (production, staging, …)" "$env_label" env_label
     fi
-    if [[ "$app_type" == "node" ]]; then
-        # PHP only runs Deployer and the webhook receiver here: take the newest
-        # one installed instead of asking.
-        if [[ -z "${ARG_php:-}" ]]; then
-            local _pv
-            for _pv in 8.5 8.4 8.3; do php_is_installed "$_pv" && { php_ver="$_pv"; break; }; done
-        fi
-    elif [[ -z "${ARG_php:-}" ]]; then
+    # A Node app is not asked: PHP only runs Deployer and the webhook
+    # receiver there, and the server's own (php_app_default, above) does.
+    if [[ "$app_type" != "node" && -z "${ARG_php:-}" ]]; then
         read_input "PHP version" "$php_ver" php_ver
     fi
 
@@ -177,12 +175,18 @@ app_create() {
     # Validate
     validate_username "$app_user"  || { error "Invalid username '${app_user}'"; exit 1; }
     validate_domain_or_wildcard "$domain" || { error "Invalid domain '${domain}'"; exit 1; }
-    validate_php_version "$php_ver" || { error "Invalid PHP version. Use: 8.3 8.4 8.5"; exit 1; }
+    validate_php_version "$php_ver" || { error "Invalid PHP version. Use: 8.3 8.4 8.5 8.6"; exit 1; }
     [[ -n "$repository" ]] && { validate_git_repository "$repository" || { error "Invalid repository URL '${repository}'"; exit 1; }; }
     [[ -n "$branch" ]]     && { validate_git_branch "$branch"         || { error "Invalid branch name '${branch}'"; exit 1; }; }
     [[ "${ARG_env:-}" == "true" ]] && { error "--env needs a value: --env=staging"; exit 1; }
     validate_env_label "$env_label" || { error "Invalid --env '${env_label}'. ${ENV_LABEL_HELP}"; exit 1; }
     php_is_installed "$php_ver"    || { error "PHP $php_ver not installed. Run: cipi php install $php_ver"; exit 1; }
+    # A PHP installed before its extensions were packaged (php_ext_pending).
+    # A Node app is let through: PHP only runs Deployer and the webhook
+    # receiver there, and neither uses redis, memcached or imagick.
+    if [[ "$app_type" != "node" ]]; then
+        php_ext_pending_refuse "$php_ver" "To use ${php_ver} anyway repeat the command with --force; cipi app create also takes another version: --php=" || exit 1
+    fi
     app_exists "$app_user"         && { error "App '${app_user}' already exists"; exit 1; }
     id "$app_user" &>/dev/null     && { error "User '${app_user}' already exists"; exit 1; }
     domain_is_used_by_other_app "$domain" && { error "Domain '${domain}' is already used by app '${DOMAIN_USED_BY_APP}'"; exit 1; }
@@ -1126,9 +1130,20 @@ app_edit() {
     local app="${1:-}"; shift || true
     [[ -z "$app" ]] && { error "Usage: cipi app edit <app> [--domain=D] [--php=X.Y] [--branch=B] [--env=LABEL] [--repository=URL] [--node-build=CMD|--no-node-build] [--predeploy-snapshot|--no-predeploy-snapshot]"; exit 1; }
     app_exists "$app" || { error "App '$app' not found"; exit 1; }
+    # --force is read below (php_ext_pending_refuse). parse_args only adds:
+    # a --force left by the command that called this one must not count.
+    unset ARG_force 2>/dev/null || true
     parse_args "$@"
     local changed=false cur_php domain_change_from="" repo_changed=false
     cur_php=$(app_get "$app" php)
+
+    # Asked before anything is changed, so that a refusal does not leave a
+    # --domain given in the same command already applied: the new PHP is
+    # still waiting for extensions (php_ext_pending). Not for a Node app,
+    # whose PHP only runs Deployer and the webhook receiver.
+    if [[ -n "${ARG_php:-}" && "${ARG_php}" != "$cur_php" && "$(app_get "$app" runtime)" != "node" ]]; then
+        php_ext_pending_refuse "${ARG_php}" "To use ${ARG_php} anyway: cipi app edit ${app} --php=${ARG_php} --force" || exit 1
+    fi
 
     if [[ -n "${ARG_domain:-}" ]]; then
         domain_change_from=$(app_get "$app" domain)

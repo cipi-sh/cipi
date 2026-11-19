@@ -356,16 +356,54 @@ validate_db_name() {
 # Deployer (v8) requires PHP >= 8.3 and `dep` is invoked with the app's PHP
 # version — running it under an older interpreter would break every deploy.
 validate_php_version() {
-    case "$1" in 8.3|8.4|8.5) return 0 ;; *) return 1 ;; esac
+    case "$1" in 8.3|8.4|8.5|8.6) return 0 ;; *) return 1 ;; esac
 }
 
 # Any PHP version Cipi has ever managed. Used where we must still operate on a
 # legacy install (e.g. `cipi php remove 8.0` to clean up a pre-4.5.4 server).
 validate_php_version_known() {
-    case "$1" in 7.4|8.0|8.1|8.2|8.3|8.4|8.5) return 0 ;; *) return 1 ;; esac
+    case "$1" in 7.4|8.0|8.1|8.2|8.3|8.4|8.5|8.6) return 0 ;; *) return 1 ;; esac
 }
 
 php_is_installed() { dpkg -l "php${1}-fpm" &>/dev/null 2>&1; }
+
+# Extensions `cipi php install` asked for and the repository did not have:
+# one "<version> <extension>" per line. A new PHP branch is published with
+# its core packages first; redis, memcached and imagick are separate
+# projects and follow days or weeks later. `cipi php upgrade` installs what
+# is listed here as soon as apt has it (lib/php.sh), `cipi pending` shows it.
+[[ -z "${PHP_EXT_PENDING:-}" ]] && readonly PHP_EXT_PENDING="/var/lib/cipi/php-ext-pending"
+
+# The extensions still missing for PHP <version>, one per line; with no
+# argument, every "<version> <extension>" line.
+php_ext_pending() {
+    [[ -f "$PHP_EXT_PENDING" ]] || return 0
+    awk -v v="${1:-}" 'NF == 2 && $1 ~ /^[0-9]+\.[0-9]+$/ && $2 ~ /^[a-z0-9]+$/ {
+        if (v == "") print $1, $2; else if ($1 == v) print $2 }' "$PHP_EXT_PENDING" 2>/dev/null || true
+}
+
+# Stops an app from being put on a PHP version that is still waiting for
+# extensions: the app would be live on a PHP without, say, the redis
+# extension, and a Laravel app that keeps cache, sessions or queues in Redis
+# answers 500 there. `cipi app create`, `cipi app edit --php` and the plan
+# of `cipi yml apply` ask here first; --force goes on anyway (an app that
+# uses none of them). Returns 1 after saying why, 0 when there is nothing
+# pending or --force was given.
+#   $1  PHP version    $2  the last line of the refusal: how to go on
+php_ext_pending_refuse() {
+    local v="$1" hint="${2:-}" ext
+    ext=$(php_ext_pending "$v" | paste -sd' ' - || true)
+    [[ -z "$ext" ]] && return 0
+    if [[ "${ARG_force:-}" == "true" ]]; then
+        warn "PHP ${v} is installed without: ${ext} — going on because of --force; an app that needs one of them does not work until cipi php upgrade installs it"
+        return 0
+    fi
+    error "PHP ${v} is installed without: ${ext} — the repository has no package of them for ${v} yet"
+    echo "  An app that needs one does not work on ${v}: Laravel's default Redis client is the redis extension." >&2
+    echo "  cipi php upgrade (daily, 03:30) installs them when the repository has them; cipi pending lists them until then." >&2
+    [[ -n "$hint" ]] && echo "  ${hint}" >&2
+    return 1
+}
 
 # True when version $1 is $2 or newer (dotted numbers: 8.5, 8.5.12).
 version_at_least() {
@@ -375,16 +413,33 @@ version_at_least() {
 
 # Oldest release of each PHP branch that carries every security fix Cipi
 # knows about. Raised with each PHP security release; the last one was
-# 2026-10-21 (CVE-2026-109618, CVE-2026-109619 — unauthenticated RCE).
+# 2026-11-19: 8.2.36, 8.3.37, 8.4.28 and 8.5.13, with among others
+#   CVE-2026-129289  PHP-FPM request smuggling through an unread request
+#                    body (needs fastcgi_keep_conn on, which Cipi never writes)
+#   CVE-2026-129291  PHP-FPM epoll use-after-free, worker to master (root)
+#   CVE-2026-126714, CVE-2026-115560  session files / serializer, RCE
+#   CVE-2026-129496  timezone cache use-after-free, RCE
+#   CVE-2026-129474  use-after-free in backtraces, RCE (8.5 and later)
 # Empty for branches the PHP project no longer patches (8.1 and older).
+# 8.6.0 came out the same day with all of these fixed, so 8.6 starts at its
+# first release; a release candidate is reported as such
+# (php_security_state), not measured against this.
 php_security_floor() {
     case "$1" in
-        8.2) echo "8.2.35" ;;
-        8.3) echo "8.3.36" ;;
-        8.4) echo "8.4.27" ;;
-        8.5) echo "8.5.12" ;;
+        8.2) echo "8.2.36" ;;
+        8.3) echo "8.3.37" ;;
+        8.4) echo "8.4.28" ;;
+        8.5) echo "8.5.13" ;;
+        8.6) echo "8.6.0" ;;
     esac
 }
+
+# Oldest nginx that carries every security fix Cipi knows about. 1.31.9
+# (2026-11-18) fixes, among others, CVE-2026-123007 and CVE-2026-123633
+# (memory corruption and use-after-free in HTTP/2), CVE-2026-118899 (endless
+# loop reading a request body over TLS) and CVE-2026-125283 (try_files with
+# alias). Mainline numbers: Cipi installs nginx from nginx.org mainline.
+nginx_security_floor() { echo "1.31.9"; }
 
 # Oldest Composer that carries every security fix Cipi knows about: 2.10.2
 # and 2.10.3 (2026-08-27) are security releases.
@@ -408,11 +463,24 @@ node_security_floor() {
 #               backports fixes without raising the upstream version, so
 #               only the package changelog can tell
 #   eol         a branch the PHP project no longer patches
+#   prerelease  an alpha, beta or release candidate (8.6.0RC5): what the
+#               repositories carry for a branch until its first release.
+#               Not a version to measure against a floor — it gets no
+#               security releases of its own; the version printed is the
+#               whole string, suffix included
 #   unknown     the CLI binary for that branch is missing
 php_security_state() {
-    local v="$1" full floor pkg
+    local v="$1" full floor pkg extra
     full=$("php${v}" -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION, ".", PHP_RELEASE_VERSION;' 2>/dev/null || true)
     [[ -n "$full" ]] || { echo "unknown -"; return 0; }
+    # PHP_EXTRA_VERSION is empty on a release and "RC5", "beta2", "-dev" before
+    # one. Only those shapes count: a build that carries some other suffix of
+    # its packager's is a release.
+    extra=$("php${v}" -r 'echo PHP_EXTRA_VERSION;' 2>/dev/null || true)
+    if [[ "$extra" =~ ^-?(alpha|beta|RC|rc|dev) ]]; then
+        echo "prerelease ${full}${extra}"
+        return 0
+    fi
     floor=$(php_security_floor "$v")
     [[ -n "$floor" ]] || { echo "eol ${full}"; return 0; }
     if version_at_least "$full" "$floor"; then
@@ -463,8 +531,10 @@ php_fpm_ini_hardening() {
 # still loads its conf.d; the binary started by Octane inherits the variable.
 # Both keys are written whatever the binary's PHP: PHP ignores a key it does
 # not know. Loaded at startup, so ini_set() cannot turn upload progress back
-# on (PHP_INI_PERDIR). The 2026-10-23 advisory (CVE-2026-115560, no fix yet)
-# asks for the same session.upload_progress.enabled=0.
+# on (PHP_INI_PERDIR). The 2026-10-23 advisory (CVE-2026-115560) asked for
+# the same session.upload_progress.enabled=0; the fix came with the releases
+# of 2026-11-19, and the setting stays: it is also what the advisory for
+# CVE-2026-126714 asks of a server that has not taken them yet.
 OCTANE_INI_DIR="/etc/php/cipi-octane.d"
 octane_php_ini_ensure() {
     local f="${OCTANE_INI_DIR}/99-cipi-hardening.ini" tmp
@@ -1348,6 +1418,36 @@ reload_nginx() {
 
 reload_php_fpm() {
     systemctl restart "php${1}-fpm" || { error "Failed to restart php${1}-fpm"; return 1; }
+}
+
+# The PHP the `php` command is (cipi php switch) — the one whose FPM hosts
+# the panel's pools (cipi-api, cipi-gui): what setup.sh installed, 8.6 from
+# Cipi 5.9.1 and 8.5 before. 8.5 when the CLI does not answer.
+php_system_version() {
+    php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || echo "8.5"
+}
+
+# The PHP a new app gets when none is asked for: the server's own. So a
+# server installed with 8.6 creates apps on 8.6, and one installed before
+# keeps creating them on what it has — `cipi php install 8.6` adds a
+# version there, it does not make it the default (`cipi php switch` does).
+# When the server's PHP cannot host an app (the CLI does not answer, or it
+# is older than 8.3): the first one installed, 8.6 last, since on a server
+# that did not choose it it may still be a release candidate.
+php_app_default() {
+    local v
+    v=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)
+    if validate_php_version "$v" && php_is_installed "$v"; then
+        echo "$v"
+        return 0
+    fi
+    for v in 8.5 8.4 8.3 8.6; do
+        if php_is_installed "$v"; then
+            echo "$v"
+            return 0
+        fi
+    done
+    echo "8.5"
 }
 
 reload_supervisor() {

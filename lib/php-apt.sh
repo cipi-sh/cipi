@@ -97,7 +97,7 @@ php_ondrej_ppa_available() {
 }
 
 # packages.sury.org — same maintainer/packages as ondrej; often ahead of Launchpad on new
-# Ubuntu releases (e.g. resolute / 26.04). Required for co-installable php8.3/8.4/8.5.
+# Ubuntu releases (e.g. resolute / 26.04). Required for co-installable php8.3/8.4/8.5/8.6.
 php_sury_repo_available() {
     local codename="${1:-$(ubuntu_codename)}"
     [[ -n "$codename" ]] || return 1
@@ -138,7 +138,7 @@ php_setup_sury_repo() {
         > /etc/apt/sources.list.d/php-sury.list
 }
 
-# Configure PHP APT sources for co-installable versions (8.3 / 8.4 / 8.5).
+# Configure PHP APT sources for co-installable versions (8.3 / 8.4 / 8.5 / 8.6).
 # Priority: packages.sury.org → Launchpad ondrej PPA → Ubuntu archive only.
 # Same maintainer and packages either way, but sury.org publishes first: on
 # the 2026-10-21 security release it had the fixed builds for noble while

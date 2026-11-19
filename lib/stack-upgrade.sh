@@ -136,7 +136,8 @@ _stack_upgrade_ensure_repo() {
                 # shellcheck source=/dev/null
                 source "${CIPI_LIB}/nginx.sh"
             fi
-            nginx_setup_mainline_repo
+            # With the key that is already there when the download fails.
+            nginx_setup_mainline_repo || true
             ;;
         mariadb)
             # shellcheck source=/dev/null
@@ -175,7 +176,10 @@ _stack_upgrade_reload() {
                 error "nginx -t failed after the upgrade — the new packages are installed, fix the config before reloading"
                 return 1
             fi
-            reload_nginx
+            # A reload is not enough when the binary from before the upgrade
+            # is still the one in memory: nginx_activate restarts it then.
+            declare -f nginx_activate >/dev/null || source "${CIPI_LIB}/nginx.sh"
+            nginx_activate || { error "nginx is not running the upgraded binary — systemctl restart nginx"; return 1; }
             ;;
         *)
             if ! systemctl is-active --quiet "$unit" 2>/dev/null; then
@@ -279,6 +283,30 @@ _stack_upgrade() {
         before="${before:-unknown}"
 
         echo -e "  ${DIM}${label} ${before}${NC}"
+
+        # The Ubuntu archive's nginx is not upgraded: it is replaced by
+        # nginx.org mainline, which is another package set (it conflicts
+        # with nginx-common) and needs nginx.conf adapted — not something
+        # `--only-upgrade` of what is installed can do.
+        if [[ "$kind" == "nginx" ]] && nginx_is_distro_build; then
+            info "This is the Ubuntu archive's nginx ($(nginx_package_version)); Cipi follows nginx.org mainline (security fixes: $(nginx_security_floor) or newer)"
+            if [[ "${ARG_yes:-}" != "true" && "${ARG_force:-}" != "true" ]]; then
+                confirm "Move nginx to nginx.org mainline? nginx.conf is adapted (a copy is kept), nginx restarts." \
+                    || { info "Aborted"; exit 0; }
+            fi
+            step "Moving nginx to nginx.org mainline..."
+            nginx_upgrade_mainline_for_http2_bomb || { error "nginx was not moved to nginx.org mainline"; exit 1; }
+            after=$(_stack_upgrade_version "$kind")
+            after="${after:-unknown}"
+            log_action "STACK UPGRADE: nginx ${before} (Ubuntu archive) → ${after} (nginx.org mainline)"
+            cipi_notify \
+                "Cipi ${label} upgraded on $(hostname)" \
+                "nginx was moved from the Ubuntu archive build to nginx.org mainline.\n\nServer: $(hostname)\nFrom: ${before}\nTo: ${after}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+                "$(_stack_upgrade_notify_id "$kind")"
+            success "${label} upgraded (${before} → ${after})"
+            exit 0
+        fi
+
         _stack_upgrade_preview "${installed[@]}" || {
             error "apt cannot resolve an upgrade for: ${installed[*]}"
             exit 1
@@ -287,6 +315,13 @@ _stack_upgrade() {
 
         if [[ "${newly:-0}" -eq 0 ]]; then
             info "${label} packages are up to date (${before})"
+            # Up to date on disk is not up to date in memory.
+            if [[ "$kind" == "nginx" ]] && nginx_running_binary_stale; then
+                step "The nginx binary from before the last upgrade is still running — restarting..."
+                _stack_upgrade_reload nginx || exit 1
+                log_action "STACK UPGRADE: nginx restarted (old binary was still running)"
+                success "nginx now runs ${before}"
+            fi
             exit 0
         fi
 
@@ -300,7 +335,7 @@ _stack_upgrade() {
                     prompt="Upgrade ${label}? This restarts the cache."
                     ;;
                 nginx)
-                    prompt="Upgrade ${label}? Config is tested, then nginx is reloaded."
+                    prompt="Upgrade ${label}? Config is tested, then nginx is reloaded (restarted if the old binary stays in memory)."
                     ;;
             esac
             confirm "$prompt" || { info "Aborted"; exit 0; }
@@ -387,7 +422,7 @@ _stack_upgrade_service() {
     case "$raw" in
         php|php-fpm|php*-fpm)
             error "PHP is upgraded separately: cipi php upgrade"
-            echo -e "  ${DIM}Weekly cron, Sunday 03:30. Not part of this command.${NC}"
+            echo -e "  ${DIM}Daily cron, 03:30. Not part of this command.${NC}"
             return 1
             ;;
         all)

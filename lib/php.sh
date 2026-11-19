@@ -5,6 +5,71 @@
 
 readonly _PHP_EXT="fpm common cli curl bcmath mbstring mysql sqlite3 pgsql memcached redis zip xml soap gd imagick intl"
 
+# True when apt can install every package given, now. A simulation, not a
+# look at the candidate: on the Ubuntu archive some of these names are
+# virtual packages, and a package can be listed and still not install.
+_php_pkg_installable() {
+    DEBIAN_FRONTEND=noninteractive apt-get install -s -qq "$@" >/dev/null 2>&1
+}
+
+# PHP_EXT_PENDING and its reader (php_ext_pending) are in common.sh:
+# `cipi pending` reads the list too. Here, what writes it. Replaces the
+# lines of <version> with the extensions given (none: forgets the version).
+_php_ext_pending_set() {
+    local v="$1" tmp e; shift
+    mkdir -p "$(dirname "$PHP_EXT_PENDING")" 2>/dev/null || return 0
+    tmp=$(mktemp "${PHP_EXT_PENDING}.XXXXXX" 2>/dev/null) || return 0
+    {
+        # The other versions' lines, and only lines of the shape the reader
+        # accepts: anything else would keep the file alive for ever.
+        php_ext_pending | awk -v v="$v" '$1 != v' || true
+        for e in "$@"; do printf '%s %s\n' "$v" "$e"; done
+    } > "$tmp"
+    if [[ -s "$tmp" ]]; then
+        chmod 644 "$tmp" 2>/dev/null || true
+        mv -f "$tmp" "$PHP_EXT_PENDING" 2>/dev/null || rm -f "$tmp"
+    else
+        rm -f "$tmp" "$PHP_EXT_PENDING"
+    fi
+    return 0
+}
+
+# Installs the listed extensions apt has by now. Sets _PHP_EXT_ADDED to the
+# PHP versions that got one (their FPM has to be restarted to load it).
+_php_ext_pending_install() {
+    _PHP_EXT_ADDED=""
+    [[ -s "$PHP_EXT_PENDING" ]] || return 0
+    local v e still got
+    for v in $(php_ext_pending | awk '{ print $1 }' | sort -u); do
+        if ! php_is_installed "$v"; then
+            _php_ext_pending_set "$v"
+            continue
+        fi
+        still=""; got=""
+        for e in $(php_ext_pending "$v"); do
+            if _php_pkg_installable "php${v}-${e}" \
+               && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -qq \
+                    -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
+                    "php${v}-${e}" >/dev/null 2>&1; then
+                got="${got} ${e}"
+            else
+                still="${still} ${e}"
+            fi
+        done
+        # shellcheck disable=SC2086
+        _php_ext_pending_set "$v" $still
+        if [[ -n "$got" ]]; then
+            _PHP_EXT_ADDED="${_PHP_EXT_ADDED} ${v}"
+            log_action "PHP EXTENSIONS: ${v} +${got# }"
+            success "PHP ${v}: installed${got} (now in the repository)"
+        fi
+        if [[ -n "$still" ]]; then
+            info "PHP ${v}: still not in the repository:${still}"
+        fi
+    done
+    return 0
+}
+
 php_command() {
     local sub="${1:-}"; shift||true
     case "$sub" in
@@ -54,8 +119,8 @@ _php_branch_eol() {
 # repository that ships upstream versions — the fix exists, this server
 # does not have it yet.
 _php_security_report() {
-    local v state full floor eol bad=0
-    for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+    local v state full floor eol ext bad=0
+    for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         php_is_installed "$v" || continue
         read -r state full <<< "$(php_security_state "$v")"
         floor=$(php_security_floor "$v")
@@ -74,10 +139,17 @@ _php_security_report() {
             eol)
                 echo -e "  PHP ${v}  ${RED}${full}${NC}  ${RED}END OF LIFE${NC} — the PHP project no longer patches ${v}; move its apps: cipi app edit <app> --php=8.5"
                 ;;
+            prerelease)
+                echo -e "  PHP ${v}  ${YELLOW}${full}${NC}  ${YELLOW}pre-release${NC} — not for production; the repository does not have ${floor} yet, this command installs it when it does"
+                ;;
             *)
                 echo -e "  PHP ${v}  ${YELLOW}php${v} CLI not found${NC} — version unknown"
                 ;;
         esac
+        ext=$(php_ext_pending "$v" | paste -sd' ' - || true)
+        if [[ -n "$ext" ]]; then
+            echo -e "           ${YELLOW}without: ${ext}${NC} — not in the repository for ${v} yet; installed by this command when they are"
+        fi
     done
     return "$bad"
 }
@@ -125,7 +197,7 @@ _php_upgrade() {
     fi
 
     local has_php=false v
-    for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+    for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         if php_is_installed "$v"; then
             has_php=true
             break
@@ -153,14 +225,21 @@ _php_upgrade() {
     upgraded=$(echo "$out" | grep -oE '^[0-9]+ upgraded' | grep -oE '^[0-9]+' | head -1)
     upgraded=${upgraded:-0}
 
+    # Extensions the repository did not have when the version was installed.
+    _php_ext_pending_install || true
+
     if [[ "$upgraded" -eq 0 ]]; then
         info "PHP packages are up to date"
         rc=0
+        # A new extension is loaded by the FPM that starts after it.
+        for v in ${_PHP_EXT_ADDED:-}; do
+            php_is_installed "$v" && reload_php_fpm "$v" 2>/dev/null || true
+        done
     else
         # A restart, not a reload: every worker has to go, since a stale
         # worker can hold request state across requests (CVE-2026-109619).
         step "Restarting PHP-FPM services..."
-        for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+        for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
             php_is_installed "$v" && reload_php_fpm "$v" 2>/dev/null || true
         done
 
@@ -181,11 +260,34 @@ _php_upgrade() {
     return "$rc"
 }
 
+# setup.sh and `cipi php switch` set the `php` alternative by hand, and a
+# package installed later leaves it alone. Where it is still automatic (a
+# server whose alternative was never set, or reset with --auto), apt gives
+# `php` to the highest version it has just installed: 8.6 would become the
+# server's PHP by being installed. Put back what it was ($1).
+_php_keep_system() {
+    local was="${1:-}" now
+    [[ -n "$was" ]] || return 0
+    now=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)
+    [[ "$now" == "$was" ]] && return 0
+    update-alternatives --set php "/usr/bin/php${was}" >/dev/null 2>&1 || true
+    now=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)
+    if [[ "$now" == "$was" ]]; then
+        info "The server's PHP stays ${was} (cipi php switch changes it)"
+    else
+        warn "The php command now answers ${now:-nothing}, it was ${was} — put it back: cipi php switch ${was}"
+    fi
+}
+
 _php_install() {
     local v="${1:-}"
-    [[ -z "$v" ]] && { error "Usage: cipi php install <8.3|8.4|8.5>"; exit 1; }
-    validate_php_version "$v" || { error "Invalid PHP version: $v (Deployer 8 requires PHP >= 8.3; use 8.3, 8.4 or 8.5)"; exit 1; }
+    [[ -z "$v" ]] && { error "Usage: cipi php install <8.3|8.4|8.5|8.6>"; exit 1; }
+    validate_php_version "$v" || { error "Invalid PHP version: $v (Deployer 8 requires PHP >= 8.3; use 8.3, 8.4, 8.5 or 8.6)"; exit 1; }
     php_is_installed "$v" && { info "PHP $v already installed"; return; }
+    # Installing a version adds it; it does not make it the server's PHP
+    # (the `php` command, the panel's pools, what a new app gets by default).
+    local sys_before
+    sys_before=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)
     # shellcheck source=/dev/null
     source "${CIPI_LIB}/php-apt.sh"
     step "Configuring PHP APT sources..."
@@ -196,9 +298,35 @@ _php_install() {
     fi
     apt-get update -qq
     step "Installing PHP ${v}..."
-    local pkgs=""
+    # What the repository has. FPM, common and the CLI are PHP itself: without
+    # them there is nothing to install. The rest is installed where it exists
+    # and remembered where it does not (PHP_EXT_PENDING above).
+    local pkgs="" missing="" e
     for e in $_PHP_EXT; do pkgs+=" php${v}-${e}"; done
+    # shellcheck disable=SC2086
+    if ! _php_pkg_installable $pkgs; then
+        # Not all of them: one by one, to know which.
+        pkgs=""
+        for e in $_PHP_EXT; do
+            if _php_pkg_installable "php${v}-${e}"; then
+                pkgs+=" php${v}-${e}"
+                continue
+            fi
+            case "$e" in
+                fpm|common|cli)
+                    error "apt cannot install php${v}-${e} (packages from: $(php_apt_source_label)) — PHP ${v} is not available here"
+                    echo -e "  ${DIM}Check: apt-get install -s php${v}-${e}${NC}"
+                    exit 1
+                    ;;
+            esac
+            missing+=" ${e}"
+        done
+    fi
+    # shellcheck disable=SC2086
     apt-get install -y -qq $pkgs
+    _php_keep_system "$sys_before"
+    # shellcheck disable=SC2086
+    _php_ext_pending_set "$v" $missing
     # The hardening lines (php_fpm_ini_hardening) reach every pool of this
     # version, including the stock `www` pool below, which no Cipi vhost uses
     # but which still answers on its socket.
@@ -226,12 +354,29 @@ pm.max_children = 2
 pm.process_idle_timeout = 10s
 POOLEOF
     systemctl restart "php${v}-fpm"; systemctl enable "php${v}-fpm"
-    log_action "PHP INSTALLED: $v"
+    log_action "PHP INSTALLED: $v${missing:+ (without:${missing})}"
     cipi_notify \
         "Cipi PHP installed: ${v} on $(hostname)" \
-        "A PHP version was installed.\n\nServer: $(hostname)\nVersion: ${v}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A PHP version was installed.\n\nServer: $(hostname)\nVersion: ${v}${missing:+\nNot in the repository yet, installed later by cipi php upgrade:${missing}}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         php_install
     success "PHP ${v} installed"
+    if [[ -n "$sys_before" && "$sys_before" != "$v" ]]; then
+        echo -e "  ${DIM}The server's PHP is still ${sys_before}: an app moves with cipi app edit <app> --php=${v}, the server with cipi php switch ${v}${NC}"
+    fi
+
+    # What a new branch looks like on its first days: said here, once, and
+    # every morning by `cipi pending` for as long as it lasts.
+    local sec full
+    read -r sec full <<< "$(php_security_state "$v")"
+    if [[ "$sec" == "prerelease" ]]; then
+        warn "The repository's PHP ${v} is a pre-release (${full}) — not for production. cipi php upgrade (daily, 03:30) moves it to $(php_security_floor "$v") when the repository has it."
+    fi
+    if [[ -n "$missing" ]]; then
+        warn "PHP ${v} is installed without:${missing} — the repository ($(php_apt_source_label)) has no package of them for ${v} yet."
+        echo -e "  ${DIM}cipi php upgrade (daily, 03:30) installs them when it has. Until then an app that needs one${NC}"
+        echo -e "  ${DIM}does not work on ${v} — Laravel's default Redis client (phpredis) is the redis extension —${NC}"
+        echo -e "  ${DIM}and cipi app create / cipi app edit --php=${v} ask for --force.${NC}"
+    fi
 }
 
 # update-alternatives + FPM pool moves need a writable /etc (same remount-ro
@@ -271,7 +416,7 @@ _php_pool_path() {
 _php_find_pool_version() {
     # $1=pool name — prints first PHP version that has it, or empty.
     local name="$1" pv
-    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         if [[ -f "$(_php_pool_path "$pv" "$name")" ]]; then
             echo "$pv"
             return 0
@@ -283,7 +428,7 @@ _php_find_pool_version() {
 _php_clear_named_pools_except() {
     # $1=keep version (empty=all)  $2=pool name
     local keep="${1:-}" name="$2" pv
-    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         [[ "$pv" == "$keep" ]] && continue
         rm -f "$(_php_pool_path "$pv" "$name")" 2>/dev/null || true
     done
@@ -543,8 +688,8 @@ _php_switch() {
     local v="${1:-}"
     # Panel API builds args with escapeshellarg; strip leftover wrapping quotes.
     v="${v#\'}"; v="${v%\'}"; v="${v#\"}"; v="${v%\"}"
-    [[ -z "$v" ]] && { error "Usage: cipi php switch <8.3|8.4|8.5>"; exit 1; }
-    validate_php_version "$v" || { error "Invalid PHP version: $v (use 8.3, 8.4 or 8.5)"; exit 1; }
+    [[ -z "$v" ]] && { error "Usage: cipi php switch <8.3|8.4|8.5|8.6>"; exit 1; }
+    validate_php_version "$v" || { error "Invalid PHP version: $v (use 8.3, 8.4, 8.5 or 8.6)"; exit 1; }
     php_is_installed "$v" || { error "PHP $v not installed. Run: cipi php install $v"; exit 1; }
 
     local cur; cur=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || echo "")
@@ -635,6 +780,7 @@ _php_remove() {
     fi
     systemctl stop "php${v}-fpm" 2>/dev/null; systemctl disable "php${v}-fpm" 2>/dev/null
     apt-get purge -y "php${v}-*" &>/dev/null; apt-get autoremove -y &>/dev/null
+    _php_ext_pending_set "$v"
     log_action "PHP REMOVED: $v"
     cipi_notify \
         "Cipi PHP removed: ${v} on $(hostname)" \
@@ -649,7 +795,7 @@ _php_list() {
 
     if [[ "${ARG_json:-}" == "true" ]]; then
         local items="[]"
-        for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+        for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
             if php_is_installed "$v"; then
                 local st="stopped"
                 systemctl is-active --quiet "php${v}-fpm" 2>/dev/null && st="running"
@@ -669,13 +815,13 @@ _php_list() {
             fi
         done
         jq -n --argjson versions "$items" --arg default "$sys_ver" \
-            --argjson installable '["8.3","8.4","8.5"]' \
+            --argjson installable '["8.3","8.4","8.5","8.6"]' \
             '{default: (if $default == "" then null else $default end), installable: $installable, versions: $versions}'
         return 0
     fi
 
     echo -e "\n${BOLD}PHP Versions${NC}"
-    for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+    for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         if php_is_installed "$v"; then
             local st="${RED}stopped" c="${RED}"
             systemctl is-active --quiet "php${v}-fpm" 2>/dev/null && st="running" && c="${GREEN}"

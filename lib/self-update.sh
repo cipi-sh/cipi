@@ -232,7 +232,8 @@ selfupdate_command() {
         fi
         ensure_cipi_gui_permissions || true
         _gui_create_fpm_pool || true
-        reload_php_fpm "8.5" 2>/dev/null || true
+        # The FPM the pool was just written for (the system PHP), not 8.5 by name.
+        reload_php_fpm "$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || echo "8.5")" 2>/dev/null || true
         success "cipi/gui package step finished"
     fi
 

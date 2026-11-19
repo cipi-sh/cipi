@@ -411,7 +411,7 @@ confirm_plan() {
     echo -e "  Passwords:      ${RED}off${NC} for SSH (app users excepted)"
     echo ""
     echo -e "  ${BOLD}Stack${NC}"
-    echo -e "  Nginx · MariaDB 11.4 · PHP 8.5 (FPM) · Composer · Deployer · Node.js 22 · Supervisor"
+    echo -e "  Nginx · MariaDB 11.4 · PHP ${PHP_DEFAULT} (FPM) · Composer · Deployer · Node.js 22 · Supervisor"
     echo -e "  Valkey · Certbot · UFW (22, 80, 443) + fail2ban · swap · unattended security updates"
     echo ""
     echo -e "  ${BOLD}Generated during the install, shown once at the end${NC}"
@@ -617,7 +617,42 @@ MATCHEOF
 install_nginx() {
     step_msg "Installing Nginx..."
 
-    _cipi_apt_install -y -qq nginx libnginx-mod-http-headers-more-filter
+    # nginx.org mainline, not the Ubuntu archive's nginx: it is the stream
+    # `cipi autoupdate` follows every night, and the one whose version says
+    # which security fixes are in (nginx_security_floor, lib/common.sh).
+    # The same repository, key and pin as nginx_setup_mainline_repo in
+    # lib/nginx.sh — written out here because /opt/cipi/lib is not installed
+    # yet at this step.
+    _cipi_apt_install -y -qq curl gnupg2 ca-certificates lsb-release ubuntu-keyring
+    local nginx_keyring=/usr/share/keyrings/nginx-archive-keyring.gpg
+    if ! curl -fsSL --retry 3 https://nginx.org/keys/nginx_signing.key \
+            | gpg --dearmor > "${nginx_keyring}.tmp" || [[ ! -s "${nginx_keyring}.tmp" ]]; then
+        rm -f "${nginx_keyring}.tmp"
+        echo -e "${RED}✗ Could not download the nginx.org signing key (https://nginx.org/keys/nginx_signing.key)${NC}"
+        exit 1
+    fi
+    chmod 644 "${nginx_keyring}.tmp"
+    mv -f "${nginx_keyring}.tmp" "$nginx_keyring"
+    echo "deb [signed-by=${nginx_keyring}] \
+https://nginx.org/packages/mainline/ubuntu $(lsb_release -cs) nginx" \
+        > /etc/apt/sources.list.d/nginx.list
+    echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" \
+        > /etc/apt/preferences.d/99nginx
+    _cipi_apt_update -qq
+    _cipi_apt_install -y -qq nginx
+
+    # The package of the Ubuntu archive would install just as quietly if the
+    # repository above were unreachable or had nothing for this release.
+    local nginx_pkg
+    nginx_pkg=$(dpkg-query -W -f='${Version}' nginx 2>/dev/null || true)
+    if [[ "$nginx_pkg" =~ -[0-9]+ubuntu[0-9] ]]; then
+        echo -e "${RED}✗ apt installed the Ubuntu archive's nginx (${nginx_pkg}), not nginx.org mainline — check https://nginx.org/packages/mainline/ubuntu/ for $(lsb_release -cs)${NC}"
+        exit 1
+    fi
+
+    # nginx.org packages use conf.d/ only — Cipi expects sites-available/sites-enabled.
+    mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /var/www/html
+    rm -f /etc/nginx/conf.d/default.conf
 
     local CPU_CORES
     CPU_CORES=$(nproc)
@@ -632,7 +667,6 @@ worker_processes ${CPU_CORES};
 # two values to servers installed before this was the default.
 worker_rlimit_nofile 65535;
 pid /run/nginx.pid;
-include /etc/nginx/modules-enabled/*.conf;
 
 events {
     worker_connections 8192;
@@ -647,7 +681,7 @@ http {
     types_hash_max_size 2048;
     server_names_hash_bucket_size 64;
     server_tokens off;
-    more_clear_headers 'Server' 'X-Powered-By';
+    max_headers 1000;
 
     include /etc/nginx/mime.types;
     default_type application/octet-stream;
@@ -668,6 +702,11 @@ http {
     fastcgi_read_timeout 300;
 
     limit_req_zone \$binary_remote_addr zone=global:10m rate=30r/s;
+
+    map \$http_upgrade \$connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
 
     include /etc/nginx/conf.d/*.conf;
     include /etc/nginx/sites-enabled/*;
@@ -971,8 +1010,44 @@ install_valkey() {
 
 # ── PHP (multi-version) ──────────────────────────────────────
 
+# A new server gets PHP 8.6 (8.5 until Cipi 5.9.0) — a release of it, with
+# every extension below. For its first days a new branch is in the
+# repositories as a release candidate, and redis, memcached and imagick are
+# separate projects that follow later: a server without phpredis has apps
+# that cannot reach Valkey. Until apt has all of it the server gets
+# PHP_FALLBACK, and the installer says so again at the end (the screen is
+# cleared at every step). Servers already installed are not touched by any
+# of this: there 8.6 is `cipi php install 8.6`, when the admin wants it.
+readonly PHP_DEFAULT="8.6"
+readonly PHP_FALLBACK="8.5"
+readonly PHP_EXTENSIONS="fpm common cli curl bcmath mbstring mysql sqlite3 pgsql memcached redis zip xml soap gd imagick intl"
+PHP_INSTALLED=""         # the version install_php installed
+PHP_DEFAULT_SKIPPED=""   # why it is not PHP_DEFAULT, when it is not
+
+# Why apt cannot give this server a complete release of PHP $1 right now.
+# Prints nothing when it can.
+_setup_php_unavailable() {
+    local v="$1" cand e missing=""
+    cand=$(apt-cache policy "php${v}-fpm" 2>/dev/null | awk '$1 == "Candidate:" { print $2 }' || true)
+    if [[ -z "$cand" || "$cand" == "(none)" ]]; then
+        echo "the repository has no PHP ${v} yet"
+        return 0
+    fi
+    # 8.6.0~rc5-2+0~deb.sury.org.1+ubuntu24.04: "~" is how a Debian version
+    # says "before the release".
+    if [[ "$cand" =~ [0-9]~(alpha|beta|rc|RC|dev) ]]; then
+        echo "the repository only has a pre-release of it (${cand%%-*})"
+        return 0
+    fi
+    for e in $PHP_EXTENSIONS; do
+        DEBIAN_FRONTEND=noninteractive apt-get install -s -qq "php${v}-${e}" >/dev/null 2>&1 || missing+=" ${e}"
+    done
+    [[ -z "$missing" ]] || echo "the repository has no php${v} package of:${missing}"
+    return 0
+}
+
 install_php() {
-    step_msg "Installing PHP 8.5..."
+    step_msg "Installing PHP..."
 
     _cipi_source_apt_helpers && cipi_sanitize_broken_apt_sources 2>/dev/null || _cipi_sanitize_known_broken_apt_sources
     if _cipi_source_apt_helpers; then
@@ -984,22 +1059,27 @@ install_php() {
     fi
     _cipi_apt_update -qq
 
-    local EXTENSIONS="fpm common cli curl bcmath mbstring mysql sqlite3 pgsql memcached redis zip xml soap gd imagick intl"
+    PHP_INSTALLED="$PHP_DEFAULT"
+    PHP_DEFAULT_SKIPPED=$(_setup_php_unavailable "$PHP_DEFAULT")
+    if [[ -n "$PHP_DEFAULT_SKIPPED" ]]; then
+        PHP_INSTALLED="$PHP_FALLBACK"
+        echo -e "${YELLOW}→ PHP ${PHP_DEFAULT} is not ready for a new server (${PHP_DEFAULT_SKIPPED}) — installing PHP ${PHP_FALLBACK}${NC}"
+    fi
 
-    for VER in 8.5; do
-        echo -e "${CYAN}→ PHP ${VER}...${NC}"
+    local VER="$PHP_INSTALLED"
+    echo -e "${CYAN}→ PHP ${VER}...${NC}"
 
-        local PACKAGES=""
-        for EXT in $EXTENSIONS; do
-            PACKAGES+=" php${VER}-${EXT}"
-        done
-        _cipi_apt_install -y -qq $PACKAGES
+    local PACKAGES=""
+    for EXT in $PHP_EXTENSIONS; do
+        PACKAGES+=" php${VER}-${EXT}"
+    done
+    _cipi_apt_install -y -qq $PACKAGES
 
-        # Cipi defaults. The last two lines are the PHP advisory mitigations of
-        # 2026-10-21 (CVE-2026-109618/109619), the same lines every Cipi pool
-        # carries (lib/common.sh php_fpm_ini_hardening): here they also cover
-        # the stock `www` pool. PHP ignores fatal_error_backtraces before 8.5.
-        cat > "/etc/php/${VER}/fpm/conf.d/99-cipi.ini" <<INIEOF
+    # Cipi defaults. The last two lines are the PHP advisory mitigations of
+    # 2026-10-21 (CVE-2026-109618/109619), the same lines every Cipi pool
+    # carries (lib/common.sh php_fpm_ini_hardening): here they also cover
+    # the stock `www` pool. PHP ignores fatal_error_backtraces before 8.5.
+    cat > "/etc/php/${VER}/fpm/conf.d/99-cipi.ini" <<INIEOF
 memory_limit = 256M
 upload_max_filesize = 256M
 post_max_size = 256M
@@ -1010,10 +1090,10 @@ session.upload_progress.enabled = 0
 fatal_error_backtraces = 0
 INIEOF
 
-        # Replace default www pool with a minimal placeholder so FPM can start.
-        # No vhost points at it; it runs as www-data without open_basedir, so
-        # its socket is 0600 — reachable by www-data alone, never by an app.
-        cat > "/etc/php/${VER}/fpm/pool.d/www.conf" <<POOLEOF
+    # Replace default www pool with a minimal placeholder so FPM can start.
+    # No vhost points at it; it runs as www-data without open_basedir, so
+    # its socket is 0600 — reachable by www-data alone, never by an app.
+    cat > "/etc/php/${VER}/fpm/pool.d/www.conf" <<POOLEOF
 [www]
 user = www-data
 group = www-data
@@ -1026,14 +1106,15 @@ pm.max_children = 2
 pm.process_idle_timeout = 10s
 POOLEOF
 
-        systemctl restart "php${VER}-fpm"
-        systemctl enable "php${VER}-fpm"
-    done
+    systemctl restart "php${VER}-fpm"
+    systemctl enable "php${VER}-fpm"
 
-    # Set 8.5 as default CLI
-    update-alternatives --set php /usr/bin/php8.5 2>/dev/null || true
+    # The server's PHP: the `php` command, the panel's pools, and what a new
+    # app gets when no version is asked for. Set by hand, so that installing
+    # another version later never moves it — `cipi php switch` does.
+    update-alternatives --set php "/usr/bin/php${PHP_INSTALLED}" 2>/dev/null || true
 
-    echo -e "${GREEN}✓ PHP 8.5${NC}"
+    echo -e "${GREEN}✓ PHP ${PHP_INSTALLED}${NC}"
 }
 
 # ── COMPOSER ──────────────────────────────────────────────────
@@ -1554,6 +1635,11 @@ final_summary() {
     echo -e "  All commands:   ${CYAN}cipi help${NC}"
     echo -e "  ${DIM}Server sync key (cipi sync push): /home/cipi/.ssh/id_ed25519.pub${NC}"
     echo ""
+    if [[ -n "$PHP_DEFAULT_SKIPPED" ]]; then
+        echo -e "  ${YELLOW}${BOLD}PHP ${PHP_INSTALLED}, not ${PHP_DEFAULT}${NC} — ${PHP_DEFAULT_SKIPPED}."
+        echo -e "  When it has:    ${CYAN}cipi php install ${PHP_DEFAULT}${NC}, then ${CYAN}cipi php switch ${PHP_DEFAULT}${NC} to make it the server's PHP"
+        echo ""
+    fi
     _setup_optional_wizard
 }
 

@@ -413,7 +413,7 @@ api_setup() {
     # PHP-FPM pool for API
     step "PHP-FPM pool..."
     _api_create_fpm_pool
-    reload_php_fpm "8.5"
+    reload_php_fpm "$(php_system_version)"
     success "PHP-FPM pool (cipi-api)"
 
     # Nginx vhost for API (no aliases)
@@ -874,7 +874,7 @@ php_admin_value[error_log] = /var/log/cipi-api-php-error.log
 php_admin_flag[log_errors] = on
 $(fpm_pool_hardening "$v")
 POOL
-    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         [[ "$pv" == "$v" ]] && continue
         rm -f "/etc/php/${pv}/fpm/pool.d/cipi-api.conf" 2>/dev/null || true
     done
@@ -898,8 +898,9 @@ server {
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     client_max_body_size 256M;
+    # No `alias` here: the server's root is already .../public, and try_files
+    # under an alias is the combination CVE-2026-125283 was in (nginx < 1.31.9).
     location /api-docs {
-        alias ${CIPI_API_ROOT}/public/api-docs;
         try_files \$uri =404;
     }
     # FPM status page (used by 'cipi api status' to report active/idle
@@ -960,7 +961,7 @@ api_update() {
     _api_ensure_session_driver_env
     _api_apply_sqlite_pragmas
     _api_setup_cron
-    reload_php_fpm "8.5"
+    reload_php_fpm "$(php_system_version)"
 
     _api_show_versions
 
@@ -1104,7 +1105,7 @@ api_upgrade() {
 
     # 8. Restart services
     systemctl restart cipi-queue 2>/dev/null || true
-    reload_php_fpm "8.5"
+    reload_php_fpm "$(php_system_version)"
 
     # 9. Show result
     _api_show_versions
@@ -1354,7 +1355,7 @@ _api_is_installed() {
     [[ -f /etc/nginx/sites-available/cipi-api ]] && return 0
     [[ -f /etc/systemd/system/cipi-queue.service ]] && return 0
     [[ -f /etc/cron.d/cipi-api ]] && return 0
-    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         [[ -f "/etc/php/${pv}/fpm/pool.d/cipi-api.conf" ]] && return 0
     done
     return 1
@@ -1395,7 +1396,7 @@ api_remove() {
 
     step "PHP-FPM..."
     local pv
-    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5 8.6; do
         if [[ -f "/etc/php/${pv}/fpm/pool.d/cipi-api.conf" ]]; then
             rm -f "/etc/php/${pv}/fpm/pool.d/cipi-api.conf"
             reload_php_fpm "$pv" 2>/dev/null || true

@@ -156,7 +156,7 @@ MAX_LINES = 2000
 MAX_DEPTH = 6
 MAX_SEQ = 200
 
-PHP_VERSIONS = {"8.3", "8.4", "8.5"}
+PHP_VERSIONS = {"8.3", "8.4", "8.5", "8.6"}
 ENGINES = {"mariadb", "pgsql"}
 SCOPES = {"all", "files", "db"}
 DESTINATIONS = {"local", "s3"}
@@ -1812,8 +1812,14 @@ _yml_build_plan() {
     if [[ -n "$want_php" ]]; then
         cur_php=$(app_get "$app" php)
         if [[ "$want_php" != "$cur_php" ]]; then
+            local php_wait=""
+            [[ "$(app_get "$app" runtime)" == "node" ]] || php_wait=$(php_ext_pending "$want_php" | paste -sd' ' - || true)
             if ! php_is_installed "$want_php"; then
                 _YML_BLOCKERS+=("PHP ${want_php} is not installed — run: cipi php install ${want_php}")
+            elif [[ -n "$php_wait" ]]; then
+                # Same rule as cipi app edit --php (php_ext_pending_refuse):
+                # the app would be live on a PHP without these extensions.
+                _YML_BLOCKERS+=("PHP ${want_php} is installed without: ${php_wait} — not in the repository for ${want_php} yet (cipi php upgrade installs them when they are); to move the app anyway: cipi app edit ${app} --php=${want_php} --force")
             else
                 _YML_ACTIONS+=("php|${want_php}|PHP ${cur_php} → ${want_php}")
             fi
@@ -4251,14 +4257,18 @@ _yml_generate_save() {
 # template that trips over them on first use is a trap rather than a starting
 # point.
 _yml_example() {
-    local app="${1:-example}" domain=""
+    local app="${1:-example}" domain="" php=""
     if [[ "$app" != "example" ]]; then
         validate_username "$app" || { error "Invalid app name: ${app}"; exit 1; }
         if app_exists "$app"; then
             domain=$(app_get "$app" domain)
+            php=$(app_get "$app" php 2>/dev/null || true)
         fi
     fi
     [[ -n "$domain" ]] || domain="example.com"
+    # The app's PHP, or the server's: a version that is installed here, so
+    # the sample does not start with a blocker.
+    validate_php_version "$php" || php=$(php_app_default)
 
     cat <<YMLEXAMPLE
 # cipi.yml — declarative configuration for one Cipi app.
@@ -4288,8 +4298,8 @@ _yml_example() {
 version: 1
 
 app:
-  # 8.3, 8.4 or 8.5 — must already be installed (cipi php install 8.5)
-  php: "8.5"
+  # 8.3, 8.4, 8.5 or 8.6 — must already be installed (cipi php install ${php})
+  php: "${php}"
 
   # The declared list replaces the current aliases: an alias you remove here
   # is removed from the server. The primary domain is not managed here.

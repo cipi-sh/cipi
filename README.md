@@ -1,10 +1,15 @@
 <div align="center">
 
-<img src="https://cipi.sh/favicon-light-192.png" width="64" height="64" alt="Cipi logo" />
+<a href="https://cipi.sh">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://cipi.sh/brand/cipi-logo-dark.svg">
+    <img src="https://cipi.sh/brand/cipi-logo.svg" alt="Cipi" height="56">
+  </picture>
+</a>
 
-# Cipi
+### Ship Laravel. Own the server.
 
-**Easy Laravel Deployments**  
+**The self-hosted PHP deploy platform.**  
 One command installs a complete production stack. One command deploys your app.<br>
 No panel, no bloat — so you can focus on what you love: building your application.
 

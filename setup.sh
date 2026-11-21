@@ -1145,13 +1145,35 @@ install_composer() {
 
 # ── DEPLOYER ──────────────────────────────────────────────────
 
+# Deployer comes from its GitHub release, pinned and checksummed
+# (lib/deployer-install.sh). https://deployer.org/deployer.phar serves
+# Deployer 6 now, and Cipi's recipes need 8: a server that got it could not
+# deploy anything (#519). An install that does not get Deployer 8 stops here
+# rather than finishing a server that cannot deploy.
 install_deployer() {
     step_msg "Installing Deployer..."
 
-    curl -fsSL https://deployer.org/deployer.phar -o /usr/local/bin/dep
-    chmod 755 /usr/local/bin/dep
+    local helper="${CIPI_LIB}/deployer-install.sh" dl=""
+    if [[ ! -f "$helper" ]]; then
+        dl="/tmp/cipi-deployer-install-$$.sh"
+        curl -fsSL "https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH}/lib/deployer-install.sh" -o "$dl" 2>/dev/null || true
+        helper="$dl"
+    fi
+    if [[ ! -s "$helper" ]]; then
+        rm -f "$dl"
+        echo -e "${RED}Error: could not load lib/deployer-install.sh${NC}"
+        exit 1
+    fi
+    # shellcheck source=/dev/null
+    source "$helper"
+    [[ -n "$dl" ]] && rm -f "$dl"
 
-    echo -e "${GREEN}✓ Deployer$(dep --version 2>/dev/null | awk '{print " "$2}')${NC}"
+    if ! cipi_deployer_install /usr/local/bin/dep; then
+        echo -e "${RED}Error: Deployer ${CIPI_DEPLOYER_VERSION} could not be installed — without it no app can deploy.${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}✓ Deployer $(cipi_deployer_phar_version /usr/local/bin/dep)${NC}"
 }
 
 # ── NODE.JS ───────────────────────────────────────────────────

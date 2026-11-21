@@ -4,6 +4,29 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.9.2] — 2026-11-22
+
+Two bugs of a fresh server, both reported by @batv45.
+
+### Fixed
+
+- **Every deploy of a new server failed with "Task `deploy:publish` not found"** ([#519](https://github.com/cipi-sh/cipi/issues/519)). `setup.sh` downloaded `https://deployer.org/deployer.phar`, which now serves **Deployer 6.8.0**; Cipi's recipes are written for Deployer 8, and Deployer 6 has no `deploy:publish`. The installer printed the version without checking it, and the deploy-time check only acted on Deployer 8 and later. Now:
+  - Deployer comes from its GitHub release, **pinned to 8.0.5** and checked against the SHA-256 GitHub publishes for `deployer.phar`, then asked its version before it is installed (`lib/deployer-install.sh`, `cipi_deployer_install`). A download that does not match, or a phar that is not Deployer 8, is not installed.
+  - `setup.sh` stops when it cannot install it, instead of finishing a server that cannot deploy.
+  - `cipi deploy` stops on Deployer 6 with what to run, instead of the task error.
+- **`cipi gui <domain>` failed at its SSL step** ([#520](https://github.com/cipi-sh/cipi/issues/520)): the panel's vhost included `snippets/fastcgi-php.conf`, which Ubuntu's `nginx-common` ships and the nginx.org packages — Cipi's since 5.9.1 — do not, so `nginx -t` refused the vhost. It now has the lines the app and API vhosts use (`try_files $uri =404;`, `include fastcgi_params;`, an explicit `SCRIPT_FILENAME`).
+
+### Migration 5.9.2
+
+1. A server whose `/usr/local/bin/dep` is not Deployer 8 gets 8.0.5, the same way. **Deployer 7 is kept** where an app still runs PHP older than 8.3, which Deployer 8 cannot run: the migration names those apps; after `cipi app edit <app> --php=8.3` the upgrade is `source /opt/cipi/lib/deployer-install.sh && cipi_deployer_install`. A download that fails leaves the current `dep` in place, with a warning.
+2. An existing panel vhost that includes `snippets/fastcgi-php.conf` gets the same line instead — on a server moved to nginx.org by migration 5.9.1 the snippet may be gone, and the next reload would fail. `nginx -t`, then a reload; the previous file is put back if nginx refuses the new one.
+
+### Verification
+
+`tests/verify-5.9.2.sh` (28 checks): the installer against a stubbed download (wrong checksum, a Deployer 6 phar with a matching checksum, a failed download, the pinned one), the deploy guard, and the migration against temp paths — Deployer 6 → 8, Deployer 7 kept for an app on PHP 7.4 and upgraded without one, a second run, a refused download, the vhost rewritten and put back when `nginx -t` fails. Not run against the real GitHub download: the SHA-256 is the one GitHub's release API publishes for v8.0.5.
+
+---
+
 ## [5.9.1] — 2026-11-19
 
 nginx 1.31.9 (18 November) is a security release with ten CVEs. On 19 November the PHP project released PHP 8.6.0, and security releases of every other supported branch with it: 8.2.36, 8.3.37, 8.4.28 and 8.5.13. This release is about all three.

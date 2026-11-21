@@ -4,7 +4,9 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
-## [5.10.0] — 2026-11-21
+## [5.10.0] — 2026-11-22
+
+Includes 5.9.2 (Deployer 8 pinned, the panel vhost on nginx.org): its migration runs first on a server that skips it.
 
 An Octane app answers on the PHP built into its FrankenPHP binary, and until now that binary was nobody's: Laravel Octane downloads `releases/latest` of FrankenPHP into the project whenever it finds none there, `octane:install` puts `frankenphp` in `.gitignore`, and Deployer starts every release from a fresh checkout. So **every deploy of an Octane app downloaded whatever FrankenPHP GitHub had that minute** — a new PHP minor included, the day FrankenPHP's static builds move to it — and the deploy that did it could be a webhook at any hour. Nothing at night touched the binary; the deploys did. And the fix `cipi php upgrade` printed for a vulnerable build (`php artisan octane:install --server=frankenphp`, then a restart) did not work: `octane:install` keeps a binary that is already there.
 
@@ -64,7 +66,30 @@ JIT stays off for every app. The notification configuration is not touched: `smt
 
 ### Verification
 
-`tests/verify-5.10.0.sh` (156 checks) runs the real libraries, the link helper and the migration under `set -euo pipefail` against a fake root, with Supervisor, systemd, curl/GitHub, runuser, PHP and PHP-FPM as stubs that keep state and FrankenPHP binaries as scripts that answer `-v`, `build-info` and `php-cli` as the real one does. The notification channels are checked against a curl that records every request: the Resend request (key on stdin, body), the SES request (its SigV4 signature recomputed in the test, and the key derivation against AWS's own published test vector), the webhook signature, Pushover's form, one request per enabled channel and none for a disabled one. **Not verified on a real server before this release:** delivery to the real Resend, SES, Pushover, Mattermost and Google Chat endpoints; a real FrankenPHP static binary (its `-v` and `php-cli` output, JIT under its ZTS build), PHP's own acceptance of `opcache.jit` set per FPM pool after `opcache.jit = off` at startup, Supervisor's `update` on a rewritten program, and GitHub's asset digests. The verify scripts of 5.7.1 and 5.9.0 pin the old Octane `environment=` line and the old list of autoupdate components, and fail on those checks now.
+`tests/verify-5.10.0.sh` (156 checks) runs the real libraries, the link helper and the migration under `set -euo pipefail` against a fake root, with Supervisor, systemd, curl/GitHub, runuser, PHP and PHP-FPM as stubs that keep state and FrankenPHP binaries as scripts that answer `-v`, `build-info` and `php-cli` as the real one does. The notification channels are checked against a curl that records every request: the Resend request (key on stdin, body), the SES request (its SigV4 signature recomputed in the test, and the key derivation against AWS's own published test vector), the webhook signature, Pushover's form, one request per enabled channel and none for a disabled one. **Not verified on a real server before this release:** delivery to the real Resend, SES, Pushover, Mattermost and Google Chat endpoints; a real FrankenPHP static binary (its `-v` and `php-cli` output, JIT under its ZTS build), PHP's own acceptance of `opcache.jit` set per FPM pool after `opcache.jit = off` at startup, Supervisor's `update` on a rewritten program, and GitHub's asset digests. The verify scripts of 5.7.1 and 5.9.0 pin the old Octane `environment=` line and the old list of autoupdate components, and fail on those checks now. So does `tests/verify-5.9.2.sh`, on its version check only.
+
+---
+
+## [5.9.2] — 2026-11-22
+
+Two bugs of a fresh server, both reported by @batv45.
+
+### Fixed
+
+- **Every deploy of a new server failed with "Task `deploy:publish` not found"** ([#519](https://github.com/cipi-sh/cipi/issues/519)). `setup.sh` downloaded `https://deployer.org/deployer.phar`, which now serves **Deployer 6.8.0**; Cipi's recipes are written for Deployer 8, and Deployer 6 has no `deploy:publish`. The installer printed the version without checking it, and the deploy-time check only acted on Deployer 8 and later. Now:
+  - Deployer comes from its GitHub release, **pinned to 8.0.5** and checked against the SHA-256 GitHub publishes for `deployer.phar`, then asked its version before it is installed (`lib/deployer-install.sh`, `cipi_deployer_install`). A download that does not match, or a phar that is not Deployer 8, is not installed.
+  - `setup.sh` stops when it cannot install it, instead of finishing a server that cannot deploy.
+  - `cipi deploy` stops on Deployer 6 with what to run, instead of the task error.
+- **`cipi gui <domain>` failed at its SSL step** ([#520](https://github.com/cipi-sh/cipi/issues/520)): the panel's vhost included `snippets/fastcgi-php.conf`, which Ubuntu's `nginx-common` ships and the nginx.org packages — Cipi's since 5.9.1 — do not, so `nginx -t` refused the vhost. It now has the lines the app and API vhosts use (`try_files $uri =404;`, `include fastcgi_params;`, an explicit `SCRIPT_FILENAME`).
+
+### Migration 5.9.2
+
+1. A server whose `/usr/local/bin/dep` is not Deployer 8 gets 8.0.5, the same way. **Deployer 7 is kept** where an app still runs PHP older than 8.3, which Deployer 8 cannot run: the migration names those apps; after `cipi app edit <app> --php=8.3` the upgrade is `source /opt/cipi/lib/deployer-install.sh && cipi_deployer_install`. A download that fails leaves the current `dep` in place, with a warning.
+2. An existing panel vhost that includes `snippets/fastcgi-php.conf` gets the same line instead — on a server moved to nginx.org by migration 5.9.1 the snippet may be gone, and the next reload would fail. `nginx -t`, then a reload; the previous file is put back if nginx refuses the new one.
+
+### Verification
+
+`tests/verify-5.9.2.sh` (28 checks): the installer against a stubbed download (wrong checksum, a Deployer 6 phar with a matching checksum, a failed download, the pinned one), the deploy guard, and the migration against temp paths — Deployer 6 → 8, Deployer 7 kept for an app on PHP 7.4 and upgraded without one, a second run, a refused download, the vhost rewritten and put back when `nginx -t` fails. Not run against the real GitHub download: the SHA-256 is the one GitHub's release API publishes for v8.0.5.
 
 ---
 

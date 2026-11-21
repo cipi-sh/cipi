@@ -534,7 +534,9 @@ server {
     }
 
     location ~ \\.php\$ {
-        include snippets/fastcgi-php.conf;
+        # Not snippets/fastcgi-php.conf: Ubuntu's nginx ships it, nginx.org's
+        # (Cipi's since 5.9.1) does not (#520). Same lines as the app vhosts.
+        try_files \$uri =404;
         fastcgi_pass unix:/run/php/cipi-gui.sock;
         fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
         fastcgi_param HTTP_X_FORWARDED_PROTO \$scheme;

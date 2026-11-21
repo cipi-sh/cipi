@@ -48,7 +48,7 @@ echo "=== Cipi 5.10.0 regression checks ==="
 # ── 0. release files, static ─────────────────────────────────
 [[ "$(tr -d '[:space:]' < "${ROOT}/version.md")" == "5.10.0" ]] && pass "version.md is 5.10.0" || fail "version.md"
 grep -q '^## \[5.10.0\]' "${ROOT}/CHANGELOG.md" && pass "CHANGELOG has a 5.10.0 entry" || fail "CHANGELOG 5.10.0"
-for f in common.sh app.sh frankenphp.sh php.sh ini.sh pending.sh autoupdate.sh deploy.sh completion.sh notifications.sh \
+for f in common.sh app.sh frankenphp.sh php.sh ini.sh pending.sh autoupdate.sh deploy.sh completion.sh notifications.sh alerts.sh smtp.sh compliance.sh monitor.sh \
          cipi-api-sudoers.sh cipi-frankenphp-link.sh self-update.sh migrations/5.10.0.sh; do
     bash -n "${LIB}/${f}" && pass "${f} parses" || fail "${f} does not parse"
 done
@@ -196,6 +196,7 @@ done
 stub curl <<'EOF'
 #!/bin/bash
 S="$STATE"; out=""; w=""; url=""
+ARGS=""; for a in "$@"; do ARGS="$ARGS$(printf '%s' "$a" | tr '\n' '~')"$'\n'; done
 while [ $# -gt 0 ]; do
     case "$1" in
         -o) out="$2"; shift ;;
@@ -212,6 +213,11 @@ case "$url" in
     */releases/tags/*) t="${url##*/}"; [ -f "$S/gh.tag.$t" ] || exit 22; cat "$S/gh.tag.$t" ;;
     https://dl.test/*) n="${url##*/}"; [ -f "$S/dl/$n" ] || exit 22; cp "$S/dl/$n" "$out" ;;
     http://127.0.0.1:*) printf '%s' "$(cat "$S/port.code" 2>/dev/null || echo 200)" ;;
+    *)
+        n=$(ls "$S"/req.*.args 2>/dev/null | wc -l); n=$((n + 1))
+        printf '%s\n' "$url" > "$S/req.$n.url"
+        printf '%s\n' "$ARGS" > "$S/req.$n.args"
+        if printf '%s' "$ARGS" | grep -qx '@-'; then cat > "$S/req.$n.stdin"; fi ;;
 esac
 exit 0
 EOF
@@ -570,6 +576,116 @@ echo '<?php // hand-written' > "${FAKE}/home/shop/.deployer/deploy.php"
 out=$(MIG)
 grep -q 'shop: deploy.php does not have the lines of the Octane recipe' <<< "$out" && grep -qx '<?php // hand-written' "${FAKE}/home/shop/.deployer/deploy.php" \
     && pass "a hand-written deploy.php is left alone, with a warning" || fail "hand-written: $out"
+
+# ── 10. notification channels ────────────────────────────────
+echo "--- cipi notification"
+rm -f "${STATE}"/req.*
+N() { L 'source "$CIPI_LIB/notifications.sh"; source "$CIPI_LIB/alerts.sh"; source "$CIPI_LIB/smtp.sh"; '"$1" < /dev/null; }
+req() { ls "${STATE}"/req.*.url 2>/dev/null | sort -V | tail -n 1 | sed 's/\.url$//'; }
+out=$(N 'notifications_command add resend mail --api-key=re_TestKey_123 --from="Cipi <alerts@example.com>" --to="ops@example.com, dev@example.com"' 2>&1); rc=$?
+cfg=$(L 'vault_read alerts.json')
+[[ $rc -eq 0 ]] && jq -e '.channels[] | select(.id == "mail") | .type == "resend" and .api_key == "re_TestKey_123" and .to == ["ops@example.com","dev@example.com"] and .from == "Cipi <alerts@example.com>"' <<< "$cfg" >/dev/null \
+    && pass "resend: added, recipients as a list" || fail "resend add: $out $cfg"
+! grep -q 're_TestKey_123' "${CFG}/alerts.json" && pass "the API key is stored encrypted (vault)" || fail "alerts.json in clear"
+out=$(N 'notifications_command add resend bad --api-key=sk_x --from=a@b.it --to=c@d.it' 2>&1); rc=$?
+[[ $rc -ne 0 ]] && grep -q 'Resend API key' <<< "$out" && pass "resend: a key that is not re_… is refused" || fail "resend bad key: $out"
+out=$(N 'notifications_command add resend bad2 --api-key=re_x --from=a@b.it --to=not-an-address' 2>&1); rc=$?
+[[ $rc -ne 0 ]] && pass "resend: a recipient that is not an address is refused" || fail "resend bad to"
+N 'cipi_notify "Deploy failed: shop" "Line one\nLine two" deploy_fail' >/dev/null 2>&1
+r=""; for f in "${STATE}"/req.*.url; do grep -q api.resend.com "$f" && r="${f%.url}"; done
+[[ -n "$r" ]] && grep -qx 'Authorization: Bearer re_TestKey_123' "${r}.stdin" \
+    && ! grep -q 're_TestKey_123' "${r}.args" \
+    && pass "resend: delivered, the key on stdin (-H @-), not on the command line" || fail "resend deliver: $(cat "${r}.args" 2>&1)"
+body=$(awk 'p { print; exit } $0 == "-d" { p = 1 }' "${r}.args" | tr '~' '\n')
+jq -e '.subject == "Deploy failed: shop" and (.text | startswith("Line one\nLine two")) and .to == ["ops@example.com","dev@example.com"]' <<< "$body" >/dev/null \
+    && pass "resend: subject, recipients, real newlines in the text" || fail "resend body: $body"
+
+# SES: Signature Version 4, checked by doing it again here
+k=$(L 'source "$CIPI_LIB/alerts.sh"; k=$(_alert_hmac "key:AWS4wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY" 20120215); k=$(_alert_hmac "hexkey:$k" us-east-1); k=$(_alert_hmac "hexkey:$k" iam); _alert_hmac "hexkey:$k" aws4_request')
+[[ "$k" == f4780e2d9f65fa895f9c67b32ce1baf0b0d8a43505a000a1a9e090d414db404d ]] && pass "SigV4 signing key: AWS's own test vector" || fail "signing key: $k"
+SK="wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
+out=$(N 'notifications_command add ses aws --region=eu-west-1 --access-key=AKIAIOSFODNN7EXAMPLE --secret-key='"$SK"' --from=alerts@example.com --to=ops@example.com' 2>&1); rc=$?
+[[ $rc -eq 0 ]] && pass "ses: added" || fail "ses add: $out"
+out=$(N 'notifications_command add ses aws2 --region=mars --access-key=AKIAIOSFODNN7EXAMPLE --secret-key='"$SK"' --from=a@b.it --to=c@d.it' 2>&1); rc=$?
+[[ $rc -ne 0 ]] && grep -q -- '--region' <<< "$out" && pass "ses: a region that is not one is refused" || fail "ses region: $out"
+N 'notifications_command disable mail' >/dev/null 2>&1
+rm -f "${STATE}"/req.*
+N 'cipi_notify "Backup failed" "Profile nightly" backup_fail' >/dev/null 2>&1
+r=""; for f in "${STATE}"/req.*.url; do grep -q 'https://email.eu-west-1.amazonaws.com/v2/email/outbound-emails' "$f" && r="${f%.url}"; done
+! grep -l api.resend.com "${STATE}"/req.*.url >/dev/null 2>&1 && pass "a disabled channel (mail) gets nothing" || fail "disabled channel delivered"
+if [[ -n "$r" ]]; then
+    payload=$(cat "${r}.stdin")
+    amz=$(grep '^X-Amz-Date: ' "${r}.args" | cut -d' ' -f2)
+    auth=$(grep '^Authorization: AWS4-HMAC-SHA256 ' "${r}.args")
+    day="${amz:0:8}"
+    h() { printf '%s' "$2" | openssl dgst -sha256 -mac HMAC -macopt "$1" | awk '{print $NF}'; }
+    sha() { printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}'; }
+    creq="POST"$'\n'"/v2/email/outbound-emails"$'\n'$'\n'"content-type:application/json"$'\n'"host:email.eu-west-1.amazonaws.com"$'\n'"x-amz-date:${amz}"$'\n'$'\n'"content-type;host;x-amz-date"$'\n'"$(sha "$payload")"
+    sts="AWS4-HMAC-SHA256"$'\n'"${amz}"$'\n'"${day}/eu-west-1/ses/aws4_request"$'\n'"$(sha "$creq")"
+    kk=$(h "key:AWS4${SK}" "$day"); kk=$(h "hexkey:$kk" eu-west-1); kk=$(h "hexkey:$kk" ses); kk=$(h "hexkey:$kk" aws4_request)
+    want=$(h "hexkey:$kk" "$sts")
+    [[ "$auth" == "Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/${day}/eu-west-1/ses/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=${want}" ]] \
+        && pass "ses: the request is signed as SigV4 asks (recomputed here)" || fail "ses signature: $auth / want $want"
+    jq -e '.FromEmailAddress == "alerts@example.com" and .Destination.ToAddresses == ["ops@example.com"] and .Content.Simple.Subject.Data == "Backup failed"' <<< "$payload" >/dev/null \
+        && pass "ses: SendEmail v2 body" || fail "ses body: $payload"
+    ! grep -q "$SK" "${r}.args" && pass "ses: the secret key never goes over the wire or the command line" || fail "secret leaked"
+else
+    fail "ses: nothing sent"
+fi
+
+# webhook with a secret, pushover, mattermost, googlechat
+N 'notifications_command add webhook siem --url=https://hooks.test/in --secret=s3cr3t' >/dev/null 2>&1
+N 'notifications_command add pushover phone --token=azGDORePK8gMaC0QOYAMyEEuzJnyUi --user=uQiRzpo4DXghDmr9QzzfQu27cmVRsG' >/dev/null 2>&1
+N 'notifications_command add mattermost mm --url=https://chat.test/hooks/abc' >/dev/null 2>&1
+N 'notifications_command add googlechat gc --url=https://chat.googleapis.com/v1/spaces/x/messages?key=k' >/dev/null 2>&1
+N 'notifications_command disable aws' >/dev/null 2>&1
+rm -f "${STATE}"/req.*
+N 'cipi_notify "Scan hit" "1 file" scan_hit' >/dev/null 2>&1
+for f in "${STATE}"/req.*.url; do
+    b="${f%.url}"
+    case "$(cat "$f")" in
+        https://hooks.test/in)
+            sig=$(grep '^X-Cipi-Signature: sha256=' "${b}.args" | cut -d= -f2)
+            [[ -n "$sig" && "$sig" == "$(printf '%s' "$(cat "${b}.stdin")" | openssl dgst -sha256 -mac HMAC -macopt key:s3cr3t | awk '{print $NF}')" ]] \
+                && jq -e '.trigger == "scan_hit" and .subject == "Scan hit"' "${b}.stdin" >/dev/null \
+                && pass "webhook: JSON body, X-Cipi-Signature is the HMAC-SHA256 of it" || fail "webhook signature" ;;
+        https://api.pushover.net/1/messages.json)
+            grep -qx 'token=azGDORePK8gMaC0QOYAMyEEuzJnyUi' "${b}.args" && grep -qx 'priority=1' "${b}.args" && grep -qx -- '--form-string' "${b}.args" \
+                && pass "pushover: form fields with --form-string, an urgent trigger at priority 1" || fail "pushover: $(cat "${b}.args")" ;;
+        https://chat.test/hooks/abc) grep -q '"text"' "${b}.args" && pass "mattermost: Slack's payload" || fail "mattermost" ;;
+        https://chat.googleapis.com/*) grep -q '"text"' "${b}.args" && pass "googlechat: text message" || fail "googlechat" ;;
+    esac
+done
+[[ "$(ls "${STATE}"/req.*.url 2>/dev/null | wc -l)" -eq 4 ]] && pass "one request per enabled channel (4)" || fail "requests: $(cat "${STATE}"/req.*.url)"
+out=$(N 'notifications_command add webhook w2 --url=http://plain.test' 2>&1); rc=$?
+[[ $rc -eq 0 ]] && pass "webhook: http:// allowed (an internal receiver)" || fail "webhook http"
+out=$(N 'notifications_command add slack s2 --url=http://hooks.slack.com/x' 2>&1); rc=$?
+[[ $rc -ne 0 ]] && pass "slack: http:// refused" || fail "slack http"
+
+# status, secrets, triggers, compatibility
+L 'jq -n "{host: \"smtp.test\", port: \"587\", user: \"u\", password: \"pw\", from: \"a@x.it\", to: \"b@x.it, c@x.it\", tls: true, enabled: true}" | vault_write smtp.json' >/dev/null 2>&1
+out=$(N 'notifications_command status --json' 2>/dev/null)
+jq -e '.channels[0] | .id == "smtp" and .type == "smtp" and .enabled and .to == ["b@x.it","c@x.it"]' <<< "$out" >/dev/null \
+    && jq -e '[.channels[].id] | contains(["smtp","mail","aws","siem","phone"])' <<< "$out" >/dev/null \
+    && jq -e '.triggers.total > 100 and .triggers.enabled == .triggers.total' <<< "$out" >/dev/null \
+    && pass "status --json: SMTP (the smtp.json of before) first, then every channel, the triggers" || fail "status json: $out"
+! grep -qE 're_TestKey_123|s3cr3t|wJalrX|azGDORe|"pw"' <<< "$out" && jq -e '.channels[] | select(.id == "mail") | .api_key_set == true' <<< "$out" >/dev/null \
+    && pass "status --json shows no secret (api_key_set: true)" || fail "secret in json: $out"
+N 'notifications_command status' >/dev/null 2>&1 && pass "status (text) runs" || fail "status text"
+out=$(N 'notifications_command disable deploy_fail' 2>&1)
+[[ "$(L 'source "$CIPI_LIB/notifications.sh"; _notify_trigger_enabled deploy_fail && echo on || echo off')" == off ]] && pass "disable <trigger>: the older form still toggles the trigger" || fail "trigger toggle: $out"
+N 'notifications_command triggers enable deploy_fail' >/dev/null 2>&1
+[[ "$(L 'source "$CIPI_LIB/notifications.sh"; _notify_trigger_enabled deploy_fail && echo on || echo off')" == on ]] && pass "triggers enable <trigger>" || fail "triggers enable"
+N 'notifications_command disable smtp' >/dev/null 2>&1
+[[ "$(L 'vault_read smtp.json | jq -r .enabled')" == false && "$(L 'vault_read smtp.json | jq -r .password')" == pw ]] \
+    && pass "disable smtp: the SMTP configuration is kept, only switched off" || fail "smtp toggle"
+out=$(N '_smtp_configure() { echo "SMTPCONF $*"; }; notifications_command add smtp --host=h --user=u' 2>&1)
+grep -q 'SMTPCONF --host=h --user=u' <<< "$out" && pass "add smtp is cipi smtp configure" || fail "add smtp: $out"
+out=$(N 'notifications_command channel add discord legacy --url=https://discord.com/api/webhooks/1/x' 2>&1); rc=$?
+[[ $rc -eq 0 ]] && pass "cipi notifications channel add … (before 5.10.0) still works" || fail "legacy channel: $out"
+grep -q 'notification|notifications) _maybe_cmd_help notification' "${ROOT}/cipi" && grep -q '        smtp)       _maybe_cmd_help smtp' "${ROOT}/cipi" \
+    && pass "dispatch: cipi notification, cipi notifications, cipi smtp" || fail "dispatch notification"
+grep -q '/usr/local/bin/cipi smtp configure \*' "${LIB}/cipi-api-sudoers.sh" && pass "the panel's SMTP commands are unchanged" || fail "smtp sudoers"
 
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="

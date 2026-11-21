@@ -8,7 +8,7 @@ All notable changes to Cipi are documented in this file.
 
 An Octane app answers on the PHP built into its FrankenPHP binary, and until now that binary was nobody's: Laravel Octane downloads `releases/latest` of FrankenPHP into the project whenever it finds none there, `octane:install` puts `frankenphp` in `.gitignore`, and Deployer starts every release from a fresh checkout. So **every deploy of an Octane app downloaded whatever FrankenPHP GitHub had that minute** — a new PHP minor included, the day FrankenPHP's static builds move to it — and the deploy that did it could be a webhook at any hour. Nothing at night touched the binary; the deploys did. And the fix `cipi php upgrade` printed for a vulnerable build (`php artisan octane:install --server=frankenphp`, then a restart) did not work: `octane:install` keeps a binary that is already there.
 
-This release makes the binary Cipi's, and adds JIT per app.
+This release makes the binary Cipi's, adds JIT per app, and turns `cipi smtp` into `cipi notification`: one command for every channel a notification can go to — SMTP, Resend, Amazon SES, Slack, Discord, Mattermost, Google Chat, Telegram, ntfy, Pushover and signed webhooks.
 
 ### Added
 
@@ -30,6 +30,17 @@ This release makes the binary Cipi's, and adds JIT per app.
 - **Panel API sudoers:** `cipi app jit *`, `cipi frankenphp status [*]`, `cipi frankenphp upgrade *`. Not `import` (a path on the server) nor `use` (whose `--force` skips the PHP-minor check). The routes that use them come with cipi/api 1.40.0 (`GET|PUT /api/apps/{name}/jit`, `GET /api/frankenphp`, `POST /api/frankenphp/upgrade`, and the matching MCP tools).
 - `cipi help frankenphp`, tab-completion for `cipi frankenphp` and `cipi app jit`.
 
+- **`cipi notification`** — where notifications go, in one place. Every trigger (`cipi notification triggers`) reaches every enabled channel:
+  - `cipi notification [status] [--json]` — SMTP and every other channel, enabled or not, and how many triggers are on. `--json` never contains a secret: an API key, token, AWS secret key or webhook secret is reported as `<name>_set: true`, a webhook URL down to its host.
+  - `cipi notification add <type> <id> …`, `remove|enable|disable|test <id>` (`test all`), `triggers [list|enable|disable|enable-all|disable-all|reset]`.
+  - **`smtp`** — the SMTP server, as before: `cipi notification add smtp --host= --user= --password= --from= --to=` is `cipi smtp configure`, and the channel is the `/etc/cipi/smtp.json` the server already has. **Nothing to redo on an existing server.**
+  - **`resend`** (new) — email through the [Resend](https://resend.com) API: `--api-key=re_… --from= --to=a@x,b@y`. The key goes to curl on stdin, not on its command line.
+  - **`ses`** (new) — email through Amazon SES, API v2 (`SendEmail`), with the request signed with AWS Signature Version 4 by Cipi itself (openssl; no AWS CLI): `--region= --access-key= --secret-key= --from= --to=`. The IAM user needs `ses:SendEmail` only; while the account is in SES's sandbox the recipients must be verified too. The secret key is used to sign and never sent.
+  - **`mattermost`**, **`googlechat`** (new, incoming-webhook URL) and **`pushover`** (new, `--token=<app> --user=<user key>`; an urgent trigger is sent at priority 1). `slack`, `discord`, `telegram`, `ntfy` as before.
+  - **`webhook`** takes `--secret=`: the JSON body is then signed, `X-Cipi-Signature: sha256=<HMAC-SHA256 of the body, hex>`, so the receiver can tell the request comes from this server. http:// is accepted for `webhook` and `ntfy` (an internal receiver), https:// is required for the chat webhooks.
+  - A secret left out of the command line is asked for on a terminal, without echo. All channels are kept in `alerts.json`, encrypted by the vault, as the chat channels already were.
+  - `cipi notifications` (the older name, with its `list`, `enable|disable <trigger>`, `channel …`) and `cipi smtp …` keep working, and so does the panel's SMTP page: its sudoers rules are the same. `enable|disable <name>` toggles a channel when `<name>` is one, a trigger otherwise.
+
 ### Changed
 
 - **The Octane recipe links the pinned build into each release** (`cipi:frankenphp`, the first task after `deploy:vendors`, run as the app user by `/usr/local/bin/cipi-frankenphp-link`): `<release>/frankenphp → /opt/cipi-frankenphp/apps/<app>/frankenphp`. Octane finds it and downloads nothing; every release — the live one and the ones a rollback goes back to — follows the pin, and releases no longer carry a 100 MB copy each. When the release's `laravel/octane` asks for a newer FrankenPHP than the pin, the deploy stops there, before the migrations and with the live release untouched, and says what to run. An app without a pin is deployed as before (Octane downloads), and `cipi deploy` then pins the binary Octane downloaded, the nightly run too.
@@ -49,11 +60,11 @@ This release makes the binary Cipi's, and adds JIT per app.
 3. Adds the `cipi:frankenphp` hook and task to each Octane app's `deploy.php` in place, the rest of the file as it is; a `deploy.php` without the lines of Cipi's recipe is left alone, with a warning.
 4. Rewrites the panel's sudoers where a panel is installed, checked with `visudo` and put back if refused.
 
-JIT stays off for every app.
+JIT stays off for every app. The notification configuration is not touched: `smtp.json` is the SMTP channel, the chat channels of `alerts.json` are channels of `cipi notification` as they are.
 
 ### Verification
 
-`tests/verify-5.10.0.sh` (122 checks) runs the real libraries, the link helper and the migration under `set -euo pipefail` against a fake root, with Supervisor, systemd, curl/GitHub, runuser, PHP and PHP-FPM as stubs that keep state and FrankenPHP binaries as scripts that answer `-v`, `build-info` and `php-cli` as the real one does. **Not verified on a real server before this release:** a real FrankenPHP static binary (its `-v` and `php-cli` output, JIT under its ZTS build), PHP's own acceptance of `opcache.jit` set per FPM pool after `opcache.jit = off` at startup, Supervisor's `update` on a rewritten program, and GitHub's asset digests. The verify scripts of 5.7.1 and 5.9.0 pin the old Octane `environment=` line and the old list of autoupdate components, and fail on those checks now.
+`tests/verify-5.10.0.sh` (156 checks) runs the real libraries, the link helper and the migration under `set -euo pipefail` against a fake root, with Supervisor, systemd, curl/GitHub, runuser, PHP and PHP-FPM as stubs that keep state and FrankenPHP binaries as scripts that answer `-v`, `build-info` and `php-cli` as the real one does. The notification channels are checked against a curl that records every request: the Resend request (key on stdin, body), the SES request (its SigV4 signature recomputed in the test, and the key derivation against AWS's own published test vector), the webhook signature, Pushover's form, one request per enabled channel and none for a disabled one. **Not verified on a real server before this release:** delivery to the real Resend, SES, Pushover, Mattermost and Google Chat endpoints; a real FrankenPHP static binary (its `-v` and `php-cli` output, JIT under its ZTS build), PHP's own acceptance of `opcache.jit` set per FPM pool after `opcache.jit = off` at startup, Supervisor's `update` on a rewritten program, and GitHub's asset digests. The verify scripts of 5.7.1 and 5.9.0 pin the old Octane `environment=` line and the old list of autoupdate components, and fail on those checks now.
 
 ---
 

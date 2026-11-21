@@ -103,6 +103,7 @@ Every app gets a fully isolated environment. **Laravel** (default): zero-downtim
 | **Healthchecks**   | HTTP probes every 5 minutes, plus a post-deploy check with optional automatic rollback of a broken release    |
 | **Backups**        | Backup profiles: what, how often, where, how long — S3/S3-compatible/local, client-side encryption           |
 | **Frontends**      | Node apps: SPA and static sites served by nginx, SSR (Next, Nuxt, SvelteKit, Astro, Remix) with blue/green deploys, per-app Node version |
+| **Notifications**  | `cipi notification`: SMTP, Resend, Amazon SES, Slack, Discord, Mattermost, Google Chat, Telegram, ntfy, Pushover, signed webhooks — every trigger to every channel |
 | **Configuration**  | `cipi ini` for php.ini; optional per-project `cipi.yml` for aliases, www, basic auth, redirects and proxies, search, databases, workers, Reverb, limits, deploy recipe, forced HTTPS, required .env names, scheduled commands, backups and post-deploy steps  |
 
 ---
@@ -514,14 +515,26 @@ cipi monitor set disk --warn=80 --crit=90
 
 **The disk is watched from the first boot.** Every filesystem of the server is checked every 5 minutes: a warning at **80%** full, a critical alert at **90%**, a recovery message when it drops back, and a reminder every 4 hours while it stays over. Those are the defaults, changed with the command above. Apps that have a soft disk limit (`cipi app limits <app> --disk=<GB>`) are watched the same way by the `app_disk` check; apps without one, the default, are not measured at all.
 
-Alerts reach you where you actually look. Email works out of the box (`cipi smtp configure`); chat channels take one command and apply to **every** Cipi notification — deploys, backups, scans, logins, monitor alerts:
+Alerts reach you where you actually look. **`cipi notification`** manages where every Cipi notification goes — deploys, backups, scans, logins, monitor alerts, PHP and FrankenPHP patches — and each trigger reaches every enabled channel:
 
 ```bash
-cipi notifications channel add slack ops --url=https://hooks.slack.com/services/…
-cipi notifications channel add discord ops --url=https://discord.com/api/webhooks/…
-cipi notifications channel add telegram ops --token=<bot-token> --chat-id=<id>
-cipi notifications channel add ntfy phone --url=https://ntfy.sh/my-topic --priority=high
+cipi notification                                   # every channel and how many triggers are on
+cipi notification add smtp --host=smtp.example.com --user=… --password=… --from=… --to=…
+cipi notification add resend mail --api-key=re_… --from="Cipi <alerts@example.com>" --to=ops@example.com
+cipi notification add ses aws --region=eu-west-1 --access-key=AKIA… --from=alerts@example.com --to=ops@example.com
+cipi notification add slack ops --url=https://hooks.slack.com/services/…
+cipi notification add discord ops --url=https://discord.com/api/webhooks/…
+cipi notification add mattermost ops --url=https://chat.example.com/hooks/…
+cipi notification add googlechat ops --url=https://chat.googleapis.com/v1/spaces/…
+cipi notification add telegram ops --token=<bot-token> --chat-id=<id>
+cipi notification add ntfy phone --url=https://ntfy.sh/my-topic --priority=high
+cipi notification add pushover phone --token=<app token> --user=<user key>
+cipi notification add webhook siem --url=https://example.com/cipi --secret=…   # X-Cipi-Signature: sha256=…
+cipi notification test all
+cipi notification triggers                          # which events notify (enable|disable <trigger>)
 ```
+
+Email goes through your SMTP server, the [Resend](https://resend.com) API or [Amazon SES](https://aws.amazon.com/ses/) (API v2, requests signed with AWS Signature Version 4 — the IAM user needs only `ses:SendEmail`). Leave a secret out of the command (`--password`, `--api-key`, `--secret-key`, `--token`) and it is asked for on the terminal without echo; secrets are kept in Cipi's vault and never printed back (`--json` says `*_set: true`). The SMTP configuration is the one `cipi smtp configure` always wrote: `cipi smtp …` and `cipi notifications …` keep working.
 
 ### 💽 Disk Usage, Server and Per App
 

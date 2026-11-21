@@ -66,7 +66,7 @@ _help_topic_header() {
 _help_topics_list() {
     cat <<'EOF'
 app  use  node  domains  www  redirect  proxy  deploy  worker  schedule  health  monitor  db  search  service  ssl
-php  package  auth  basicauth  ssh  firewall  ban  crowdsec  zt  scan  compliance  backup  sync
+php  frankenphp  package  auth  basicauth  ssh  firewall  ban  crowdsec  zt  scan  compliance  backup  sync
 git  ini  yml  nginx  api  gui  smtp  notifications  reset  credentials  server  updates  valkey  completion
 EOF
 }
@@ -127,6 +127,7 @@ show_help() {
     echo ""
     echo -e "  ${BOLD}Ops${NC}"
     _help_cmd "cipi php / ini"                   "PHP versions and php.ini settings"
+    _help_cmd "cipi frankenphp ..."              "FrankenPHP builds of Octane apps  ${DIM}status|upgrade|use|import${NC}"
     _help_cmd "cipi package ..."                 "Optional tools  ${DIM}ffmpeg, image optimisers, pdftotext${NC}"
     _help_cmd "cipi backup ..."                  "Backup profiles, schedules, retention"
     _help_cmd "cipi yml ..."                     "Apply a project's cipi.yml"
@@ -168,7 +169,8 @@ show_help_topic() {
             _help_cmd "cipi reboot now [--yes]"        "Restart the server in one minute"
             _help_cmd "cipi reboot auto on [--at=HH:MM]" "Restart at night, only when one is required  ${DIM}(default 04:45)${NC}"
             _help_cmd "cipi reboot auto off"           "Back to a reboot by hand"
-            _help_note "names: nginx mariadb pgsql valkey node composer — patch releases only, 04:20 every night."
+            _help_note "names: nginx mariadb pgsql valkey node composer frankenphp — patch releases only, 04:20 every night."
+            _help_note "frankenphp: an Octane app moves only within its PHP minor and FrankenPHP major (cipi help frankenphp)."
             _help_note "A database is left for the next night while a dump or a deploy is running."
             _help_note "PHP has its own job (cipi php upgrade, 03:30); Ubuntu's security updates are unattended-upgrades."
             _help_note "pending is checked every morning and mailed when the list changes (trigger pending_report)."
@@ -242,6 +244,8 @@ show_help_topic() {
             _help_cmd "cipi app reverb …"              "Reverb WebSockets  ${DIM}enable|disable|status${NC}"
             _help_note "enable [--restart-supervisor] — lifts Supervisor's open-file limit now (restarts every worker)"
             _help_cmd "cipi app limits <app>"          "Resource limits  ${DIM}[--fpm-max-children=] [--disk=<GB>|none]${NC}"
+            _help_cmd "cipi app jit <app> [on|off]"    "PHP JIT for one app  ${DIM}[--mode=tracing|function] [--buffer=128M] [--json]${NC}"
+            _help_note "PHP-FPM or Octane; checked before and after, the previous setting comes back if the app does not start."
             _help_cmd "cipi app delete <app>"          "Delete app"
             _help_cmd "cipi app suspend <app>"         "Take offline (503)"
             _help_cmd "cipi app unsuspend <app>"       "Bring back online"
@@ -698,6 +702,25 @@ show_help_topic() {
             _help_note "A branch that is new in the repository can lack redis, memcached or imagick"
             _help_note "for a while: it is installed without them, and cipi php upgrade adds them"
             _help_note "when they are published (cipi pending lists what is missing)."
+            _help_note "Octane apps run the PHP inside their FrankenPHP build: cipi help frankenphp."
+            echo ""
+            ;;
+
+        frankenphp|franken|octane)
+            _help_topic_header "FrankenPHP (Octane apps)"
+            echo ""
+            _help_cmd "cipi frankenphp [status] [--json]"   "Each Octane app's build, its PHP, patched or not"
+            _help_cmd "cipi frankenphp upgrade <app>|--all" "Newest build on the app's PHP minor  ${DIM}[--to=<build>] [--no-fetch] [--yes]${NC}"
+            _help_cmd "cipi frankenphp use <app> <build>"   "Pin a build  ${DIM}[--no-restart] [--force]${NC}"
+            _help_cmd "cipi frankenphp fetch [<version>]"   "Download a release from GitHub (latest by default)"
+            _help_cmd "cipi frankenphp import <binary>"     "Add a build made elsewhere — another PHP minor"
+            _help_cmd "cipi frankenphp adopt <app>"         "Pin the binary Octane downloaded into the release"
+            _help_cmd "cipi frankenphp remove <build>"      "Delete a build no app uses  ${DIM}· prune${NC}"
+            _help_note "A deploy links the pinned build into the release: Octane downloads nothing, and the"
+            _help_note "PHP an app answers on changes only when you say so. upgrade stays on the app's PHP"
+            _help_note "minor and FrankenPHP major; it restarts Octane, checks it answers, and goes back"
+            _help_note "to the previous build when it does not. Nightly: cipi autoupdate on|off frankenphp."
+            _help_note "GitHub's binaries carry one PHP minor; for another, build FrankenPHP and import it."
             echo ""
             ;;
 
@@ -1024,6 +1047,7 @@ show_help_all() {
     show_help_topic ssh
     show_help_topic ssl
     show_help_topic php
+    show_help_topic frankenphp
     show_help_topic package
     show_help_topic firewall
     show_help_topic ban
@@ -1151,6 +1175,7 @@ main() {
         node)       _maybe_cmd_help node "$@";       require_root; source "${CIPI_LIB}/node.sh";        node_command "$@" ;;
         ssl)        _maybe_cmd_help ssl "$@";        require_root; source "${CIPI_LIB}/ssl.sh";         ssl_command "$@" ;;
         php)        _maybe_cmd_help php "$@";        require_root; source "${CIPI_LIB}/php.sh";         php_command "$@" ;;
+        frankenphp|franken) _maybe_cmd_help frankenphp "$@"; require_root; source "${CIPI_LIB}/frankenphp.sh"; frankenphp_command "$@" ;;
         package|packages) _maybe_cmd_help package "$@"; require_root; source "${CIPI_LIB}/package.sh"; package_command "$@" ;;
         firewall)   _maybe_cmd_help firewall "$@";   require_root; source "${CIPI_LIB}/firewall.sh";    firewall_command "$@" ;;
         ban)        _maybe_cmd_help ban "$@";        require_root; source "${CIPI_LIB}/ban.sh";         ban_command "$@" ;;

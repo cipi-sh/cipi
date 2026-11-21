@@ -52,6 +52,9 @@ php_install|PHP|PHP version installed
 php_switch|PHP|System PHP switched
 php_remove|PHP|PHP version removed
 php_upgrade|PHP|PHP packages upgraded
+frankenphp_upgrade|PHP|FrankenPHP build of an Octane app changed or upgraded
+frankenphp_available|Updates|FrankenPHP release on another PHP minor or major, not applied
+app_jit|PHP|JIT turned on or off for an app
 nginx_upgrade|Services|Nginx packages upgraded
 mariadb_upgrade|Database|MariaDB packages upgraded
 pgsql_upgrade|Database|PostgreSQL packages upgraded

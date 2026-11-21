@@ -275,6 +275,15 @@ _deploy_run() {
         # succeeded" while the site returns 500 would be worse than silence.
         _deploy_apply_yml "$app"
         _deploy_horizon_detect "$app" || true
+        # An Octane app deployed without a pinned FrankenPHP build: Octane
+        # downloaded one at start. Pin those bytes, so the next deploy links
+        # them instead of downloading whatever GitHub has then.
+        if [[ "$(app_get "$app" octane)" == "frankenphp" ]]; then
+            declare -f fphp_adopt >/dev/null 2>&1 || source "${CIPI_LIB}/frankenphp.sh"
+            local _fb=""
+            _fb=$(fphp_adopt "$app" 2>/dev/null) || _fb=""
+            [[ -n "$_fb" ]] && info "FrankenPHP: pinned the binary Octane downloaded (${_fb}) — later deploys link it (cipi frankenphp status)"
+        fi
         local post_line post_rc=0
         post_line=$(_deploy_run_post_deploy "$app") || post_rc=$?
         local health_line; health_line=$(_deploy_health_check "$app")

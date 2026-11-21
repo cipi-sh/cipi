@@ -116,6 +116,8 @@ selfupdate_command() {
     [[ -f "${tmp}/lib/cipi-deploy-audit.sh" ]] && cp "${tmp}/lib/cipi-deploy-audit.sh" /usr/local/bin/cipi-deploy-audit && chmod 700 /usr/local/bin/cipi-deploy-audit
     [[ -f "${tmp}/lib/cipi-node-switch.sh" ]] && cp "${tmp}/lib/cipi-node-switch.sh" /usr/local/bin/cipi-node-switch && chmod 700 /usr/local/bin/cipi-node-switch
     [[ -f "${tmp}/lib/cipi-node-run.sh" ]] && cp "${tmp}/lib/cipi-node-run.sh" /usr/local/bin/cipi-node-run && chmod 755 /usr/local/bin/cipi-node-run
+    # Run by Deployer as the app user (Octane recipe): 755, root's.
+    [[ -f "${tmp}/lib/cipi-frankenphp-link.sh" ]] && cp "${tmp}/lib/cipi-frankenphp-link.sh" /usr/local/bin/cipi-frankenphp-link && chmod 755 /usr/local/bin/cipi-frankenphp-link
     if [[ -f "${tmp}/lib/cipi-webhook.php" ]]; then
         install -d -m 755 /usr/local/share/cipi && install -m 644 "${tmp}/lib/cipi-webhook.php" /usr/local/share/cipi/webhook.php
     fi
@@ -137,6 +139,7 @@ selfupdate_command() {
     [[ -f "${tmp}/lib/cipi-ssh-keys.sh" ]] && cp "${tmp}/lib/cipi-ssh-keys.sh" /usr/local/bin/cipi-ssh-keys && chown root:root /usr/local/bin/cipi-ssh-keys && chmod 755 /usr/local/bin/cipi-ssh-keys
     [[ -d "${tmp}/cipi-api" ]] && rm -rf /opt/cipi/cipi-api && cp -a "${tmp}/cipi-api" /opt/cipi/cipi-api
     chown -R root:root /usr/local/bin/cipi /opt/cipi
+    [[ -f /usr/local/bin/cipi-frankenphp-link ]] && chown root:root /usr/local/bin/cipi-frankenphp-link
 
     # Refresh shell completion from the just-copied lib (also backfills servers
     # that predate the feature). Best effort — never abort an update.

@@ -452,6 +452,12 @@ _ini_set() {
         app_exists "$app" || { error "App '${app}' not found"; exit 1; }
         [[ "$(app_get "$app" octane)" == "frankenphp" ]] \
             && warn "'${app}' runs on Octane/FrankenPHP — FPM pool settings do not apply to it."
+        case "$key" in
+            opcache.jit)
+                warn "For one app, JIT is: cipi app jit ${app} on|off — it also makes JIT startable on that PHP-FPM, which a pool line alone cannot (PHP 8.4+ starts with opcache.jit=disable)." ;;
+            opcache.jit_buffer_size)
+                warn "opcache.jit_buffer_size is sized by the PHP-FPM master for every pool: a per-app value is not written to the pool. Use cipi app jit ${app} on --buffer=<size>, or set it server-wide." ;;
+        esac
         [[ -z "$ver" ]] && ver=$(app_get "$app" php)
     else
         [[ -z "$ver" ]] && ver=$(_ini_installed_versions | tail -1)

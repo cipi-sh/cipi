@@ -1266,6 +1266,11 @@ install_cipi() {
     cp cipi-install/lib/cipi-worker.sh /usr/local/bin/cipi-worker
     chmod 700 /usr/local/bin/cipi-worker
 
+    # FrankenPHP link for Octane releases (Deployer, as the app user)
+    cp cipi-install/lib/cipi-frankenphp-link.sh /usr/local/bin/cipi-frankenphp-link
+    chmod 755 /usr/local/bin/cipi-frankenphp-link
+    install -d -m 755 /opt/cipi-frankenphp /opt/cipi-frankenphp/builds /opt/cipi-frankenphp/apps
+
     # Cron notification wrapper
     cp cipi-install/lib/cipi-cron-notify.sh /usr/local/bin/cipi-cron-notify
     chmod 700 /usr/local/bin/cipi-cron-notify
@@ -1344,7 +1349,7 @@ EOF
     # Templates (if any)
     cp cipi-install/templates/* /opt/cipi/templates/ 2>/dev/null || true
 
-    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /usr/local/bin/cipi-auth-notify /usr/local/bin/cipi-app-notify /usr/local/bin/cipi-app-deploy /usr/local/bin/cipi-app-post-deploy /usr/local/bin/cipi-deploy-audit /usr/local/bin/cipi-node-switch /usr/local/bin/cipi-node-run /usr/local/bin/cipi-read-app-logs /usr/local/bin/cipi-health-check /usr/local/bin/cipi-monitor /usr/local/bin/cipi-scan-manifest /usr/local/bin/cipi-crowdsec-rescue /usr/local/bin/cipi-crowdsec-rescue-hole /opt/cipi
+    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /usr/local/bin/cipi-auth-notify /usr/local/bin/cipi-app-notify /usr/local/bin/cipi-app-deploy /usr/local/bin/cipi-app-post-deploy /usr/local/bin/cipi-deploy-audit /usr/local/bin/cipi-node-switch /usr/local/bin/cipi-node-run /usr/local/bin/cipi-read-app-logs /usr/local/bin/cipi-health-check /usr/local/bin/cipi-monitor /usr/local/bin/cipi-scan-manifest /usr/local/bin/cipi-crowdsec-rescue /usr/local/bin/cipi-crowdsec-rescue-hole /usr/local/bin/cipi-frankenphp-link /opt/cipi /opt/cipi-frankenphp
 
     # Shell tab-completion — installed for every shell, no activation needed:
     # /etc/bash_completion.d/cipi, the zsh vendor file, and an /etc/profile.d
@@ -1494,8 +1499,8 @@ CRONEOF
     # The two jobs above live in /etc/cron.d, the same files lib/autoupdate.sh
     # and lib/pending.sh write (autoupdate_cron_write, pending_cron_write).
     cat > /etc/cron.d/cipi-autoupdate <<'EOF'
-# Cipi — nightly patch updates of nginx, MariaDB, PostgreSQL, Valkey, Node.js
-# and Composer (cipi autoupdate). Per component: cipi autoupdate off <name>.
+# Cipi — nightly patch updates of nginx, MariaDB, PostgreSQL, Valkey, Node.js,
+# Composer and FrankenPHP (cipi autoupdate). Per component: cipi autoupdate off <name>.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 20 4 * * * root /usr/local/bin/cipi-cron-notify autoupdate /usr/local/bin/cipi autoupdate run >> /var/log/cipi/autoupdate.log 2>&1
 EOF

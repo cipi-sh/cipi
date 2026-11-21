@@ -4,6 +4,59 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.10.0] — 2026-11-21
+
+An Octane app answers on the PHP built into its FrankenPHP binary, and until now that binary was nobody's: Laravel Octane downloads `releases/latest` of FrankenPHP into the project whenever it finds none there, `octane:install` puts `frankenphp` in `.gitignore`, and Deployer starts every release from a fresh checkout. So **every deploy of an Octane app downloaded whatever FrankenPHP GitHub had that minute** — a new PHP minor included, the day FrankenPHP's static builds move to it — and the deploy that did it could be a webhook at any hour. Nothing at night touched the binary; the deploys did. And the fix `cipi php upgrade` printed for a vulnerable build (`php artisan octane:install --server=frankenphp`, then a restart) did not work: `octane:install` keeps a binary that is already there.
+
+This release makes the binary Cipi's, and adds JIT per app.
+
+### Added
+
+- **FrankenPHP builds, pinned per Octane app** (`lib/frankenphp.sh`). Builds live in `/opt/cipi-frankenphp/builds/<id>/` (root's, `0755`, never rewritten), each with the FrankenPHP and PHP versions inside it, its SHA-256 and where it came from; an app's pin is the symlink `/opt/cipi-frankenphp/apps/<app>`. Outside `/opt/cipi` on purpose: `cipi self-update` copies that tree into a backup on every run, and a build is about 100 MB.
+  - `cipi frankenphp [status] [--json]` — each Octane app's build, the PHP inside, patched / vulnerable / not the app's PHP minor / not pinned, and whether the running binary is still an older one (restart pending).
+  - `cipi frankenphp upgrade <app>|--all [--to=<build>] [--no-fetch] [--yes]` — the newest build on **the app's own PHP minor** (apps.json `php`) and FrankenPHP major, downloaded first when GitHub has a newer release; the download is checked against the SHA-256 digest GitHub publishes for the asset and the binary is asked its versions as `nobody`. Octane is restarted, has to answer on its port within 30 seconds, and the previous build is put back when it does not.
+  - `cipi frankenphp use <app> <build> [--no-restart] [--force]` — refused, unless `--force`, for a build on another PHP minor than the app's, or below the FrankenPHP the live release's `laravel/octane` asks for (Octane would replace it with the latest download at start).
+  - `cipi frankenphp import <binary>` — a build made elsewhere. **The way to run several PHP minors:** GitHub's static binaries carry one PHP minor at a time (the newest); a build on another one comes from FrankenPHP's static builder (`PHP_VERSION=8.5`). Apps on 8.5 and on 8.6 then run different builds on the same server.
+  - `cipi frankenphp adopt <app>`, `fetch [<version>]`, `remove <build>`, `prune`.
+  - **A binary that comes out of an app's release is that app's only.** `adopt` copies it into the store (read as the app user, probed as the app user); it is never offered to, or `use`d for, another app: the app user could have put anything there.
+- **`cipi app jit <app> [on|off|status] [--mode=tracing|function] [--buffer=128M] [--json]`**, for PHP-FPM and Octane apps (not Node apps, not PHP before 8.0). Before anything is written, the PHP that will run the app is asked to start with JIT in that mode — its CLI for PHP-FPM, the FrankenPHP binary (`php-cli`) for Octane — so an extension that disables JIT (Xdebug, pcov) or a build without it is refused there. After the restart PHP-FPM has to be active, or Octane answering on its port; otherwise the previous setting is put back and restarted. Stored in apps.json as `jit`, so every later pool rewrite keeps it.
+  - **PHP-FPM:** one FPM per PHP version serves all its pools, and the JIT buffer is shared memory its master maps at start (`opcache.jit_buffer_size` is `PHP_INI_SYSTEM`); PHP 8.4 starts with `opcache.jit = disable`, which a pool cannot undo. So while an app on version X has JIT, X's FPM gets `conf.d/99-zz-cipi-jit.ini` — `opcache.jit = off` (startable, off) and the largest buffer asked for — and only that app's pool gets `php_admin_value[opcache.jit]`. Every other pool keeps JIT off. The file goes with the last app that turns JIT off. A value set with `cipi ini set` wins: an `opcache.jit` of its own is left alone, a larger buffer is kept, and `opcache.jit = disable` makes `cipi app jit … on` refuse with the command that undoes it. Turning JIT on or off restarts that PHP's FPM, as `cipi ini set` does.
+  - **Octane:** FrankenPHP is one process per app, so the app gets its own ini directory, `/etc/php/cipi-octane-apps/<app>/`, at the end of `PHP_INI_SCAN_DIR`, with both settings.
+  - `cipi app convert` turns JIT off (it was checked for the other runtime) and says so. `cipi app edit --php` and `cipi app delete` keep the server-wide file in step.
+  - What JIT gains depends on the app: CPU-bound PHP gains, a request that waits on the database or an API gains little. Measure it on yours.
+- **`cipi autoupdate` has a `frankenphp` component** (nightly, 04:20, on unless switched off: `cipi autoupdate off frankenphp`): `cipi frankenphp upgrade --all` within each app's PHP minor and FrankenPHP major, with the same check and the same way back. A release on another PHP minor, or a new FrankenPHP major, is announced once per app (trigger `frankenphp_available`) and never applied by itself. Skipped for the night while a deploy is running.
+- **Notification triggers** `frankenphp_upgrade`, `frankenphp_available`, `app_jit`.
+- **`cipi pending`** lists an Octane app whose build carries a PHP below the security floor (critical), a build not on the app's PHP minor, a binary Octane downloaded that is not pinned yet, and an Octane still running an older binary than its pin.
+- **Panel API sudoers:** `cipi app jit *`, `cipi frankenphp status [*]`, `cipi frankenphp upgrade *`. Not `import` (a path on the server) nor `use` (whose `--force` skips the PHP-minor check). The routes that use them come with cipi/api 1.40.0 (`GET|PUT /api/apps/{name}/jit`, `GET /api/frankenphp`, `POST /api/frankenphp/upgrade`, and the matching MCP tools).
+- `cipi help frankenphp`, tab-completion for `cipi frankenphp` and `cipi app jit`.
+
+### Changed
+
+- **The Octane recipe links the pinned build into each release** (`cipi:frankenphp`, the first task after `deploy:vendors`, run as the app user by `/usr/local/bin/cipi-frankenphp-link`): `<release>/frankenphp → /opt/cipi-frankenphp/apps/<app>/frankenphp`. Octane finds it and downloads nothing; every release — the live one and the ones a rollback goes back to — follows the pin, and releases no longer carry a 100 MB copy each. When the release's `laravel/octane` asks for a newer FrankenPHP than the pin, the deploy stops there, before the migrations and with the live release untouched, and says what to run. An app without a pin is deployed as before (Octane downloads), and `cipi deploy` then pins the binary Octane downloaded, the nightly run too.
+- **The Octane Supervisor program** puts the live release first on `PATH` (Octane looks for `frankenphp` on `PATH` before the project, so a FrankenPHP installed on the system would win over the pin) and adds the app's own ini directory to `PHP_INI_SCAN_DIR`. Written whenever the program is rewritten (`cipi frankenphp use|upgrade`, `cipi app jit`, `cipi app limits`, convert); the migration does not rewrite running programs.
+- **`cipi app create --octane` and `cipi app convert --to=octane`** pin the newest build on the app's PHP that the server already has (no download); `cipi app clone` gives the copy the source's build when that build may go to another app.
+- **`cipi app edit <octane app> --php=X.Y`** warns when the pinned build carries another PHP, with the command that moves it.
+- `cipi ini set opcache.jit … --app=` and `opcache.jit_buffer_size … --app=` point to `cipi app jit`: a pool line alone cannot make JIT startable, and a per-app buffer size is not written to the pool (it never had an effect there).
+
+### Fixed
+
+- **`cipi php upgrade` advised a fix that did nothing** for a vulnerable FrankenPHP build (`octane:install` keeps an existing binary). It now names `cipi frankenphp upgrade <app>`, shows the build each app is pinned to and a pending restart.
+
+### Migration 5.10.0
+
+1. Installs `/usr/local/bin/cipi-frankenphp-link` and creates `/opt/cipi-frankenphp` (the `cipi self-update` that runs the migration may be the old one, which does not know the helper).
+2. Pins, for each Octane app, the FrankenPHP binary in its live release: the one it runs now. Same bytes: **nothing restarts and no app changes PHP.** An app with no binary there gets one at its next deploy.
+3. Adds the `cipi:frankenphp` hook and task to each Octane app's `deploy.php` in place, the rest of the file as it is; a `deploy.php` without the lines of Cipi's recipe is left alone, with a warning.
+4. Rewrites the panel's sudoers where a panel is installed, checked with `visudo` and put back if refused.
+
+JIT stays off for every app.
+
+### Verification
+
+`tests/verify-5.10.0.sh` (122 checks) runs the real libraries, the link helper and the migration under `set -euo pipefail` against a fake root, with Supervisor, systemd, curl/GitHub, runuser, PHP and PHP-FPM as stubs that keep state and FrankenPHP binaries as scripts that answer `-v`, `build-info` and `php-cli` as the real one does. **Not verified on a real server before this release:** a real FrankenPHP static binary (its `-v` and `php-cli` output, JIT under its ZTS build), PHP's own acceptance of `opcache.jit` set per FPM pool after `opcache.jit = off` at startup, Supervisor's `update` on a rewritten program, and GitHub's asset digests. The verify scripts of 5.7.1 and 5.9.0 pin the old Octane `environment=` line and the old list of autoupdate components, and fail on those checks now.
+
+---
+
 ## [5.9.1] — 2026-11-19
 
 nginx 1.31.9 (18 November) is a security release with ten CVEs. On 19 November the PHP project released PHP 8.6.0, and security releases of every other supported branch with it: 8.2.36, 8.3.37, 8.4.28 and 8.5.13. This release is about all three.

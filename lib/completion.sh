@@ -55,8 +55,8 @@ _cipi_complete() {
         words=("${COMP_WORDS[@]}"); cword=$COMP_CWORD
     fi
 
-    local commands="status disk version self-update pending autoupdate reboot valkey service app use node alias domains www redirect proxy auth basicauth deploy worker schedule health monitor db search ssl php package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh smtp notifications reset credentials completion help"
-    local topics="app use node domains www redirect proxy deploy worker schedule health monitor db search service ssl php package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui smtp notifications reset credentials server updates valkey completion all"
+    local commands="status disk version self-update pending autoupdate reboot valkey service app use node alias domains www redirect proxy auth basicauth deploy worker schedule health monitor db search ssl php frankenphp package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh smtp notifications reset credentials completion help"
+    local topics="app use node domains www redirect proxy deploy worker schedule health monitor db search service ssl php frankenphp package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui smtp notifications reset credentials server updates valkey completion all"
 
     # skip a leading path/wrapper (e.g. `sudo cipi`, `/usr/local/bin/cipi`)
     local start=1 j
@@ -108,7 +108,7 @@ _cipi_complete() {
         autoupdate|autoupdates)
             case $pos in
                 1) sub="status on off run" ;;
-                2) case "$w1" in on|off|run) sub="nginx mariadb pgsql valkey node composer" ;; esac ;;
+                2) case "$w1" in on|off|run) sub="nginx mariadb pgsql valkey node composer frankenphp" ;; esac ;;
             esac ;;
         reboot)
             case $pos in
@@ -142,7 +142,7 @@ _cipi_complete() {
 
         app)
             case $pos in
-                1) sub="create list show edit convert clone reverb limits delete suspend unsuspend env logs tinker artisan run deploy-config reset-password reset-db-password fix-permissions" ;;
+                1) sub="create list show edit convert clone reverb limits jit delete suspend unsuspend env logs tinker artisan run deploy-config reset-password reset-db-password fix-permissions" ;;
                 2) case "$w1" in
                        create) sub="--custom --octane --engine= --valkey= --node= --framework= --node-version= --build= --start= --output= --health-path=" ;;
                        reverb) sub="enable disable status" ;;
@@ -154,6 +154,10 @@ _cipi_complete() {
                        convert) sub="--to=octane --to=fpm" ;;
                        reverb)  sub="$(_cipi_apps)" ;;
                        limits)  sub="--fpm-max-children= --memory-limit= --octane-workers= --worker-procs= --disk=" ;;
+                       jit)     sub="status on off --json" ;;
+                   esac ;;
+                4) case "$w1" in
+                       jit)     sub="--mode=tracing --mode=function --buffer=" ;;
                    esac ;;
             esac ;;
 
@@ -283,6 +287,22 @@ _cipi_complete() {
             esac ;;
 
         php)      [[ $pos -eq 1 ]] && sub="list install switch upgrade" ;;
+        frankenphp|franken)
+            case $pos in
+                1) sub="status upgrade use fetch import adopt remove prune" ;;
+                2) case "$w1" in
+                       upgrade)    sub="$(_cipi_apps) --all" ;;
+                       use|adopt)  sub="$(_cipi_apps)" ;;
+                       status)     sub="--json" ;;
+                       fetch)      sub="latest" ;;
+                   esac ;;
+                3) case "$w1" in
+                       upgrade) sub="--to= --no-fetch --yes" ;;
+                   esac ;;
+                *) case "$w1" in
+                       use) sub="--no-restart --force" ;;
+                   esac ;;
+            esac ;;
 
         package|packages)
             case $pos in

@@ -19,7 +19,14 @@
 #   cipi autoupdate on|off [component]   all of them, or one
 #   cipi autoupdate run [component]      now (what cron runs)
 #
-# Components: nginx mariadb pgsql valkey node composer
+# Components: nginx mariadb pgsql valkey node composer frankenphp
+#
+# frankenphp (5.10.0): the FrankenPHP build of each Octane app, moved to the
+# newest build on the app's own PHP minor and FrankenPHP major
+# (`cipi frankenphp upgrade --all --cron`). A release on another PHP minor or
+# a new major is announced once, never applied: the PHP an app answers on
+# changes only when someone asks for it. Octane restarts, is checked, and
+# goes back to the previous build when it does not answer.
 #############################################
 
 [[ -z "${AUTOUPDATE_CRON:-}" ]]  && readonly AUTOUPDATE_CRON="/etc/cron.d/cipi-autoupdate"
@@ -27,7 +34,7 @@
 [[ -z "${AUTOUPDATE_LOCK:-}" ]]  && readonly AUTOUPDATE_LOCK="/run/cipi-autoupdate.lock"
 # Cheapest and least disruptive first; the databases last, so a night in
 # which one of them fails has already patched everything else.
-[[ -z "${AUTOUPDATE_COMPONENTS:-}" ]] && readonly AUTOUPDATE_COMPONENTS="composer node nginx valkey pgsql mariadb"
+[[ -z "${AUTOUPDATE_COMPONENTS:-}" ]] && readonly AUTOUPDATE_COMPONENTS="composer node frankenphp nginx valkey pgsql mariadb"
 
 _autoupdate_normalize() {
     case "${1:-}" in
@@ -37,6 +44,7 @@ _autoupdate_normalize() {
         valkey|valkey-server|redis) echo valkey ;;
         node|nodejs) echo node ;;
         composer) echo composer ;;
+        frankenphp|franken|octane) echo frankenphp ;;
         *) return 1 ;;
     esac
 }
@@ -49,6 +57,7 @@ _autoupdate_label() {
         valkey) echo "Valkey" ;;
         node) echo "Node.js" ;;
         composer) echo "Composer" ;;
+        frankenphp) echo "FrankenPHP" ;;
         *) echo "${1:-unknown}" ;;
     esac
 }
@@ -74,6 +83,7 @@ autoupdate_installed() {
         nginx|mariadb|pgsql|valkey) _stack_upgrade_present "$1" ;;
         node)     [[ -x /usr/bin/node ]] || compgen -G "${NODE_ROOT}/[0-9]*" >/dev/null ;;
         composer) [[ -x /usr/local/bin/composer ]] ;;
+        frankenphp) vault_read apps.json 2>/dev/null | jq -e 'any(.[]; .octane == "frankenphp")' &>/dev/null ;;
         *) return 1 ;;
     esac
 }
@@ -83,8 +93,8 @@ autoupdate_installed() {
 autoupdate_cron_write() {
     [[ -d /etc/cron.d ]] || return 0
     cat > "$AUTOUPDATE_CRON" <<'EOF'
-# Cipi — nightly patch updates of nginx, MariaDB, PostgreSQL, Valkey, Node.js
-# and Composer (cipi autoupdate). Per component: cipi autoupdate off <name>.
+# Cipi — nightly patch updates of nginx, MariaDB, PostgreSQL, Valkey, Node.js,
+# Composer and FrankenPHP (cipi autoupdate). Per component: cipi autoupdate off <name>.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 20 4 * * * root /usr/local/bin/cipi-cron-notify autoupdate /usr/local/bin/cipi autoupdate run >> /var/log/cipi/autoupdate.log 2>&1
 EOF
@@ -240,6 +250,16 @@ _autoupdate_one() {
     case "$c" in
         composer) _autoupdate_composer ;;
         node)     _autoupdate_node ;;
+        frankenphp)
+            # A deploy in progress would link the old pin into its release
+            # and restart Octane under the upgrade: tomorrow night.
+            if pgrep -f '/usr/local/bin/dep (deploy|rollback) ' >/dev/null 2>&1; then
+                info "FrankenPHP: a deploy is running — left for the next run"
+                return 75
+            fi
+            declare -f frankenphp_command >/dev/null 2>&1 || source "${CIPI_LIB}/frankenphp.sh"
+            _fphp_upgrade --cron --yes
+            ;;
         nginx)    _stack_upgrade nginx --yes ;;
         valkey)   _stack_upgrade valkey --yes ;;
         mariadb|pgsql)
@@ -255,7 +275,7 @@ _autoupdate_one() {
 _autoupdate_run() {
     local only="" c rc st failed="" had_e
     if [[ -n "${1:-}" && "${1:-}" != --* ]]; then
-        only=$(_autoupdate_normalize "$1") || { error "Unknown component: $1 (nginx mariadb pgsql valkey node composer)"; return 1; }
+        only=$(_autoupdate_normalize "$1") || { error "Unknown component: $1 (nginx mariadb pgsql valkey node composer frankenphp)"; return 1; }
     fi
     exec 8>"$AUTOUPDATE_LOCK"
     if ! flock -n 8; then
@@ -301,7 +321,7 @@ _autoupdate_status() {
     local c label state st ts note when
     echo -e "\n${BOLD}Automatic updates${NC} ${DIM}(nightly, 04:20 — patch releases only)${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    for c in nginx mariadb pgsql valkey node composer; do
+    for c in nginx mariadb pgsql valkey node composer frankenphp; do
         label=$(_autoupdate_label "$c")
         if ! autoupdate_installed "$c"; then
             printf "  ${DIM}○${NC} %-12s ${DIM}not installed${NC}\n" "$label"
@@ -326,7 +346,7 @@ _autoupdate_status() {
         echo -e "  ${YELLOW}The nightly job is missing (${AUTOUPDATE_CRON}) — cipi autoupdate on${NC}"
     fi
     echo ""
-    echo -e "  ${CYAN}cipi autoupdate on|off [nginx|mariadb|pgsql|valkey|node|composer]${NC}"
+    echo -e "  ${CYAN}cipi autoupdate on|off [nginx|mariadb|pgsql|valkey|node|composer|frankenphp]${NC}"
     echo -e "  ${CYAN}cipi autoupdate run [component]${NC}"
     echo ""
 }
@@ -335,7 +355,7 @@ _autoupdate_switch() {   # <on|off> [component]
     local to="$1" raw="${2:-}" c val list
     [[ "$to" == "on" ]] && val=true || val=false
     if [[ -n "$raw" ]]; then
-        c=$(_autoupdate_normalize "$raw") || { error "Unknown component: ${raw} (nginx mariadb pgsql valkey node composer)"; return 1; }
+        c=$(_autoupdate_normalize "$raw") || { error "Unknown component: ${raw} (nginx mariadb pgsql valkey node composer frankenphp)"; return 1; }
         list="$c"
     else
         list="$AUTOUPDATE_COMPONENTS"
@@ -364,6 +384,6 @@ autoupdate_command() {
         on|enable)   _autoupdate_switch on "$@" ;;
         off|disable) _autoupdate_switch off "$@" ;;
         run)       _autoupdate_run "$@" ;;
-        *) error "Use: cipi autoupdate [status|on|off|run] [nginx|mariadb|pgsql|valkey|node|composer]"; return 1 ;;
+        *) error "Use: cipi autoupdate [status|on|off|run] [nginx|mariadb|pgsql|valkey|node|composer|frankenphp]"; return 1 ;;
     esac
 }

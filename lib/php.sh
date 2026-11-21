@@ -154,37 +154,41 @@ _php_security_report() {
     return "$bad"
 }
 
-# Octane apps answer requests from the FrankenPHP binary Octane downloads
-# into the release, and that binary carries a PHP of its own: apt never
-# patches it. One line per Octane app with the PHP inside the binary. The
-# binary belongs to the app user, so it runs as that user, never as root.
-# Returns 1 when a binary embeds a PHP below php_security_floor.
+# Octane apps answer requests from a FrankenPHP binary, and that binary
+# carries a PHP of its own: apt never patches it. One line per Octane app
+# with the build it is pinned to (lib/frankenphp.sh) and the PHP inside. A
+# binary that came from the app's own release runs as that app user, never as
+# root. Returns 1 when one is below php_security_floor. Patching it is
+# `cipi frankenphp upgrade`, or the nightly `cipi autoupdate` (frankenphp).
 _php_frankenphp_report() {
     [[ -f "${CIPI_CONFIG}/apps.json" ]] || return 0
-    local app bin out full floor bad=0
+    declare -f fphp_app_state >/dev/null 2>&1 || source "${CIPI_LIB}/frankenphp.sh"
+    local app st id pv rs floor bad=0 extra
     while IFS= read -r app; do
         [[ -n "$app" ]] || continue
-        bin="/home/${app}/current/frankenphp"
-        if [[ ! -x "$bin" ]] || ! id "$app" &>/dev/null; then
-            echo -e "  ${app}  ${YELLOW}no FrankenPHP binary in current/${NC} — check the PHP it runs on with: frankenphp -v"
-            continue
-        fi
-        # …and with no terminal: this is the app's own program, and with the
-        # admin's terminal as its own it could type into it (TIOCSTI).
-        out=$(runuser -u "$app" -- setsid -w timeout 10 "$bin" -v 2>/dev/null < /dev/null || true)
-        full=$(grep -oE 'PHP [0-9]+\.[0-9]+\.[0-9]+' <<< "$out" | head -1 | cut -d' ' -f2 || true)
-        if [[ -z "$full" ]]; then
-            echo -e "  ${app}  ${YELLOW}FrankenPHP did not report its PHP version${NC} — check: ${bin} -v"
-            continue
-        fi
-        floor=$(php_security_floor "${full%.*}")
-        if [[ -n "$floor" ]] && version_at_least "$full" "$floor"; then
-            echo -e "  ${app}  FrankenPHP on PHP ${GREEN}${full}${NC}  patched"
-        else
-            echo -e "  ${app}  FrankenPHP on PHP ${RED}${full}${NC}  ${RED}VULNERABLE${NC} — needs a FrankenPHP build on PHP ${floor:-8.3+}: run php artisan octane:install --server=frankenphp in /home/${app}/current as ${app}, then supervisorctl restart ${app}-octane"
-            bad=1
-        fi
-    done < <(vault_read apps.json 2>/dev/null | jq -r 'to_entries[] | select(.value.octane == "frankenphp") | .key' 2>/dev/null || true)
+        read -r st id pv rs <<< "$(fphp_app_state "$app")"
+        extra=""; [[ "$rs" == yes ]] && extra="  ${YELLOW}restart pending${NC} — supervisorctl restart ${app}-octane"
+        case "$st" in
+            ok)
+                echo -e "  ${app}  FrankenPHP $(fphp_meta "$id" frankenphp) on PHP ${GREEN}${pv}${NC}  patched${extra}" ;;
+            vulnerable)
+                floor=$(php_security_floor "$(fphp_minor "$pv")")
+                echo -e "  ${app}  FrankenPHP $(fphp_meta "$id" frankenphp) on PHP ${RED}${pv}${NC}  ${RED}VULNERABLE${NC} — needs a build on PHP ${floor:-8.3+}: cipi frankenphp upgrade ${app}${extra}"
+                bad=1 ;;
+            mismatch)
+                echo -e "  ${app}  FrankenPHP $(fphp_meta "$id" frankenphp) on PHP ${YELLOW}${pv}${NC} — the app is on PHP $(app_get "$app" php): cipi frankenphp upgrade ${app}${extra}" ;;
+            unpinned)
+                floor=$(php_security_floor "$(fphp_minor "$pv")")
+                if [[ -n "$floor" ]] && version_at_least "$pv" "$floor"; then
+                    echo -e "  ${app}  FrankenPHP on PHP ${GREEN}${pv}${NC}  patched  ${YELLOW}not pinned${NC} — cipi frankenphp adopt ${app}"
+                else
+                    echo -e "  ${app}  FrankenPHP on PHP ${RED}${pv}${NC}  ${RED}VULNERABLE${NC}, not pinned — cipi frankenphp upgrade ${app}"
+                    bad=1
+                fi ;;
+            *)
+                echo -e "  ${app}  ${YELLOW}no FrankenPHP binary yet${NC} — it gets one at its first deploy (cipi frankenphp status)" ;;
+        esac
+    done < <(fphp_octane_apps)
     return "$bad"
 }
 

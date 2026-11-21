@@ -5,6 +5,11 @@
 # sudo-rs (Ubuntu 25.10+) allows '*' only as the final argument token.
 # Use "db restore *" (not "db restore * *") for multi-arg commands.
 #
+# 5.10.0 adds `app jit` (JIT per app) and `frankenphp status|upgrade` (the
+# FrankenPHP build of Octane apps). Not here: `frankenphp import` (a path on
+# the server, for whoever is at its shell) and `frankenphp use`, whose
+# --force skips the PHP-minor check.
+#
 # 5.9.0 adds what the panel's Node, backup and database pages run: Node
 # runtimes (install, default, upgrade, remove), the link between a database
 # and an app, and the backup profiles — status and archive listings as JSON,
@@ -50,6 +55,7 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi app clone *, \
                                /usr/local/bin/cipi app reverb *, \
                                /usr/local/bin/cipi app limits *, \
+                               /usr/local/bin/cipi app jit *, \
                                /usr/local/bin/cipi app logs read *, \
                                /usr/local/bin/cipi app env *, \
                                /usr/local/bin/cipi app artisan *, \
@@ -142,6 +148,9 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi php install *, \
                                /usr/local/bin/cipi php remove *, \
                                /usr/local/bin/cipi php switch *, \
+                               /usr/local/bin/cipi frankenphp status, \
+                               /usr/local/bin/cipi frankenphp status *, \
+                               /usr/local/bin/cipi frankenphp upgrade *, \
                                /usr/local/bin/cipi ssh list, \
                                /usr/local/bin/cipi ssh list *, \
                                /usr/local/bin/cipi ssh add *, \

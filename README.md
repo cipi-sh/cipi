@@ -171,7 +171,7 @@ cipi scan enable        # nightly: release integrity + ClamAV on uploads
 
 Ubuntu security updates land daily via `unattended-upgrades`. PHP patch releases are applied every night at 03:30 by `cipi php upgrade`, which restarts PHP-FPM after an upgrade and reports each version's security patch level. The mitigations of the 2026-10-21 PHP advisory (`session.upload_progress.enabled`, `fatal_error_backtraces`) are in every FPM pool, in each version's `fpm/conf.d/99-cipi.ini` and in the ini Octane apps load. **Nginx, MariaDB, PostgreSQL and Valkey are left alone until you ask** — restarting a database at 04:00 is not a surprise Cipi will create:
 
-The rest of the stack — nginx (nginx.org), MariaDB, PostgreSQL, Valkey, the Node.js runtimes and Composer — is patched every night at 04:20 by `cipi autoupdate`: patch releases only (`apt --only-upgrade` of what is already installed), Cipi's configuration kept, nginx tested before it is reloaded — and restarted when the binary from before the upgrade is still the one in memory —, one component after the other and the databases last. A database is left for the next night while a dump or a deploy is running. Each upgrade is mailed like any other event.
+The rest of the stack — nginx (nginx.org), MariaDB, PostgreSQL, Valkey, the Node.js runtimes, Composer and the FrankenPHP builds of Octane apps — is patched every night at 04:20 by `cipi autoupdate`: patch releases only (`apt --only-upgrade` of what is already installed), Cipi's configuration kept, nginx tested before it is reloaded — and restarted when the binary from before the upgrade is still the one in memory —, one component after the other and the databases last. A database is left for the next night while a dump or a deploy is running. Each upgrade is mailed like any other event.
 
 ```bash
 cipi autoupdate                    # what is on, how the last run went
@@ -370,6 +370,30 @@ cipi app convert myapp --to=octane   # or --to=fpm
 ```
 
 Nginx proxies to a localhost Octane port; Supervisor runs `${app}-octane`. Requires `laravel/octane` in the app repo (starts after the first successful deploy). FrankenPHP gets the same PHP hardening as the FPM pools (`session.upload_progress.enabled` and `fatal_error_backtraces` off), from `/etc/php/cipi-octane.d` through `PHP_INI_SCAN_DIR`.
+
+**The FrankenPHP binary is Cipi's, not a download at every deploy.** An Octane app answers on the PHP built into its FrankenPHP binary, which apt never patches. Cipi keeps the builds in `/opt/cipi-frankenphp` (root's, read-only to the apps) and pins one per app; each deploy links the pinned build into the new release, so Octane downloads nothing and the PHP an app answers on changes only when you say so. Different apps can run builds on different PHP minors side by side — 8.5 and 8.6 on the same server.
+
+```bash
+cipi frankenphp                       # each app's build, the PHP inside, patched or not
+cipi frankenphp upgrade myapp         # newest build on myapp's PHP minor; restart, check, back if it does not answer
+cipi frankenphp upgrade --all
+cipi frankenphp use myapp <build>     # pin a given build
+cipi frankenphp import ./frankenphp   # a build made elsewhere: another PHP minor than GitHub's
+cipi autoupdate off frankenphp        # no nightly patch builds
+```
+
+`upgrade` (and the nightly `cipi autoupdate`) never moves an app to another PHP minor or FrankenPHP major: a release on PHP 8.6 is announced to an app on 8.5, once, and applied when you move the app (`cipi app edit myapp --php=8.6`, then `cipi frankenphp upgrade myapp`). GitHub publishes static binaries for one PHP minor at a time; to keep an app on an older minor with its patches, build FrankenPHP on it ([static builder](https://frankenphp.dev/docs/static/)) and `import` it. A deploy whose `laravel/octane` asks for a newer FrankenPHP than the pinned build stops before the release goes live, instead of letting Octane replace the binary. `cipi php upgrade` and `cipi pending` report the PHP inside each build.
+
+### 🔥 JIT, per app
+
+```bash
+cipi app jit myapp on                       # tracing, 128M buffer
+cipi app jit myapp on --mode=function --buffer=256M
+cipi app jit myapp off
+cipi app jit myapp --json
+```
+
+PHP-FPM or Octane. Before anything is written, the PHP that will run the app is asked to start with JIT the same way (an extension such as Xdebug or pcov turns it off); after the restart the app's runtime has to be up, or the previous setting is put back. On PHP-FPM the JIT buffer is shared memory of the FPM of that PHP version: while an app on it has JIT, Cipi makes JIT *startable* there (`conf.d/99-zz-cipi-jit.ini`, `opcache.jit = off`, the largest buffer asked for) and turns it on in that app's pool only. JIT speeds up CPU-bound PHP; a request that waits on the database gains little — measure your app.
 
 ### 📡 Reverb, Horizon & Scheduler
 

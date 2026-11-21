@@ -123,6 +123,34 @@ _pending_php() {
 # ── nginx ────────────────────────────────────────────────────
 # Below the release with the latest security fixes, from a repository that
 # backports instead of releasing, or upgraded on disk and not in memory.
+# Octane apps: the PHP inside their FrankenPHP build (lib/frankenphp.sh).
+_pending_frankenphp() {
+    [[ -f "${CIPI_LIB}/frankenphp.sh" ]] || return 0
+    declare -f fphp_app_state >/dev/null || source "${CIPI_LIB}/frankenphp.sh"
+    local app st id pv rs floor
+    for app in $(fphp_octane_apps); do
+        read -r st id pv rs <<< "$(fphp_app_state "$app")"
+        case "$st" in
+            vulnerable)
+                floor=$(php_security_floor "$(fphp_minor "$pv")")
+                _pending_add critical "frankenphp-${app}" "${app} (Octane) answers on PHP ${pv}, inside FrankenPHP build ${id}: below ${floor:-a supported branch}" "cipi frankenphp upgrade ${app}" ;;
+            mismatch)
+                _pending_add warning "frankenphp-${app}-php" "${app} is on PHP $(app_get "$app" php), but Octane answers on PHP ${pv} (FrankenPHP build ${id})" "cipi frankenphp upgrade ${app}" ;;
+            unpinned)
+                floor=$(php_security_floor "$(fphp_minor "$pv")")
+                if [[ -n "$floor" ]] && version_at_least "$pv" "$floor"; then
+                    _pending_add note "frankenphp-${app}-pin" "${app} runs a FrankenPHP binary Octane downloaded (PHP ${pv}); the next deploy may download another" "cipi frankenphp adopt ${app}"
+                else
+                    _pending_add critical "frankenphp-${app}" "${app} (Octane) answers on PHP ${pv}, below ${floor:-a supported branch}" "cipi frankenphp upgrade ${app}"
+                fi ;;
+        esac
+        if [[ "$rs" == yes ]]; then
+            _pending_add warning "frankenphp-${app}-restart" "${app}: Octane still runs the FrankenPHP binary it started with, not the pinned build ${id}" "supervisorctl restart ${app}-octane"
+        fi
+    done
+    return 0
+}
+
 _pending_nginx() {
     command -v nginx >/dev/null 2>&1 || return 0
     declare -f nginx_security_state >/dev/null || source "${CIPI_LIB}/nginx.sh"
@@ -318,6 +346,7 @@ pending_collect() {
     _pending_load_libs
     _pending_reboot
     _pending_php
+    _pending_frankenphp
     _pending_nginx
     _pending_stack
     _pending_composer

@@ -49,7 +49,7 @@ echo "=== Cipi 5.10.0 regression checks ==="
 [[ "$(tr -d '[:space:]' < "${ROOT}/version.md")" == "5.10.0" ]] && pass "version.md is 5.10.0" || fail "version.md"
 grep -q '^## \[5.10.0\]' "${ROOT}/CHANGELOG.md" && pass "CHANGELOG has a 5.10.0 entry" || fail "CHANGELOG 5.10.0"
 for f in common.sh app.sh frankenphp.sh php.sh ini.sh pending.sh autoupdate.sh deploy.sh completion.sh notifications.sh alerts.sh smtp.sh compliance.sh monitor.sh \
-         cipi-api-sudoers.sh cipi-frankenphp-link.sh self-update.sh migrations/5.10.0.sh; do
+         cipi-api-sudoers.sh cipi-frankenphp-link.sh self-update.sh deployer-install.sh gui.sh migrations/5.10.0.sh; do
     bash -n "${LIB}/${f}" && pass "${f} parses" || fail "${f} does not parse"
 done
 bash -n "${ROOT}/cipi" && pass "cipi parses" || fail "cipi does not parse"
@@ -555,6 +555,7 @@ grep -q 'cipi:frankenphp' "${FAKE}/home/shop/.deployer/deploy.php" && fail "test
 MIG() {
     PATH="${BIN}:${PATH}" STATE="$STATE" FAKE="$FAKE" CIPI_LIB="$LIBT" CIPI_CONFIG="$CFG" CIPI_LOG="${FAKE}/var/log/cipi" \
         FRANKENPHP_ROOT="$FROOT" FRANKENPHP_PROC="${STATE}/proc" CIPI_FRANKENPHP_LINK_BIN="${TMP}/installed-link" \
+        CIPI_DEP_BIN="${TMP}/mig-dep" CIPI_GUI_VHOST="${TMP}/mig-gui" \
         bash "${LIBT}/migrations/5.10.0.sh" 2>&1
 }
 out=$(MIG); rc=$?
@@ -686,6 +687,104 @@ out=$(N 'notifications_command channel add discord legacy --url=https://discord.
 grep -q 'notification|notifications) _maybe_cmd_help notification' "${ROOT}/cipi" && grep -q '        smtp)       _maybe_cmd_help smtp' "${ROOT}/cipi" \
     && pass "dispatch: cipi notification, cipi notifications, cipi smtp" || fail "dispatch notification"
 grep -q '/usr/local/bin/cipi smtp configure \*' "${LIB}/cipi-api-sudoers.sh" && pass "the panel's SMTP commands are unchanged" || fail "smtp sudoers"
+
+# ── 11. Deployer 8 (#519), the panel vhost (#520) ────────────
+echo "--- Deployer 8, the panel's vhost"
+! grep -q 'deployer.org/deployer.phar -o' "${ROOT}/setup.sh" && pass "setup.sh no longer downloads deployer.org/deployer.phar" || fail "deployer.org still used"
+grep -q 'cipi_deployer_install /usr/local/bin/dep' "${ROOT}/setup.sh" && grep -A3 'if ! cipi_deployer_install /usr/local/bin/dep' "${ROOT}/setup.sh" | grep -q 'exit 1' \
+    && pass "setup.sh installs the pinned Deployer and stops when it cannot" || fail "setup install_deployer"
+grep -q 'refs/heads/${BRANCH}/lib/deployer-install.sh' "${ROOT}/setup.sh" && pass "setup.sh fetches the helper before /opt/cipi exists" || fail "helper bootstrap"
+grep -qx 'CIPI_DEPLOYER_VERSION="8.0.5"' "${LIB}/deployer-install.sh" \
+    && grep -q 'https://github.com/deployphp/deployer/releases/download/v${CIPI_DEPLOYER_VERSION}/deployer.phar' "${LIB}/deployer-install.sh" \
+    && [[ "$(sed -n 's/^CIPI_DEPLOYER_SHA256="\([0-9a-f]*\)"$/\1/p' "${LIB}/deployer-install.sh" | tr -d '\n' | wc -c)" == 64 ]] \
+    && pass "Deployer 8.0.5 from GitHub, with a SHA-256" || fail "pin"
+tpl=$(sed -n '/^_gui_create_nginx_vhost() {/,/^}/p' "${LIB}/gui.sh")
+! grep -q 'include snippets/fastcgi-php.conf' <<< "$tpl" && grep -q 'try_files \\$uri =404;' <<< "$tpl" && grep -q 'include fastcgi_params;' <<< "$tpl" \
+    && pass "the panel vhost: no snippets/fastcgi-php.conf; try_files \$uri =404, fastcgi_params" || fail "gui vhost: $tpl"
+! grep -rqE '^[[:space:]]*include[[:space:]]+snippets/fastcgi-php' "${LIB}"/*.sh && pass "no vhost of Cipi includes it" || fail "another include"
+[[ ! -f "${LIB}/migrations/5.9.2.sh" ]] && grep -q 'cipi_deployer_migrate' "${LIB}/migrations/5.10.0.sh" && grep -q 'gui_vhost_drop_fastcgi_snippet' "${LIB}/migrations/5.10.0.sh" \
+    && pass "one migration: 5.10.0 carries both fixes" || fail "migration layout"
+
+DS="${TMP}/dep"; mkdir -p "${DS}/bin"
+cat > "${DS}/bin/php" <<'X'
+#!/bin/bash
+[ "${2:-}" = "--version" ] || exit 1
+v=$(head -n 1 "$1" 2>/dev/null); [ -n "$v" ] || exit 1
+echo "Deployer $v"
+X
+cat > "${DS}/bin/curl" <<'X'
+#!/bin/bash
+out=""; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && { out="$2"; shift; }; shift; done
+[ -f "$DS/dl" ] || exit 22
+cp "$DS/dl" "$out"
+X
+cat > "${DS}/bin/nginx" <<'X'
+#!/bin/bash
+[ -f "$DS/nginx.bad" ] && exit 1; exit 0
+X
+cat > "${DS}/bin/systemctl" <<'X'
+#!/bin/bash
+echo "systemctl $*" >> "$DS/systemctl.log"
+X
+chmod +x "${DS}"/bin/*
+DI() { PATH="${DS}/bin:${PATH}" DS="$DS" CIPI_LIB="$LIBT" CIPI_CONFIG="${DS}/cfg" CIPI_LOG="${DS}" \
+    bash -c 'set -euo pipefail; source "$CIPI_LIB/common.sh"; source "'"${LIB}"'/deployer-install.sh"; '"$1" 2>&1; }
+mkdir -p "${DS}/cfg"
+printf '8.0.5\nphar\n' > "${DS}/dl"; SUM=$(sha256sum "${DS}/dl" | awk '{print $1}')
+D="${DS}/dep.bin"; printf '6.8.0\n' > "$D"
+out=$(DI 'cipi_deployer_install '"$D"); rc=$?
+[[ $rc -ne 0 && "$(head -n 1 "$D")" == 6.8.0 ]] && grep -q 'does not match its SHA-256' <<< "$out" \
+    && pass "a download that is not the pinned phar is refused, dep untouched" || fail "checksum: $out"
+out=$(DI 'CIPI_DEPLOYER_SHA256='"$SUM"'; cipi_deployer_install '"$D"); rc=$?
+[[ $rc -eq 0 && "$(head -n 1 "$D")" == 8.0.5 && "$(stat -c %a "$D")" == 755 ]] && pass "the pinned phar is installed 0755" || fail "install: rc=$rc $out"
+printf '6.8.0\nphar\n' > "${DS}/dl"; SUM6=$(sha256sum "${DS}/dl" | awk '{print $1}')
+out=$(DI 'CIPI_DEPLOYER_SHA256='"$SUM6"'; cipi_deployer_install '"$D"); rc=$?
+[[ $rc -ne 0 && "$(head -n 1 "$D")" == 8.0.5 ]] && grep -q "reports version '6.8.0'" <<< "$out" \
+    && pass "a phar that is not Deployer 8 is refused, even with a matching checksum" || fail "major: $out"
+rm -f "${DS}/dl"
+out=$(DI 'cipi_deployer_install '"$D"); rc=$?
+[[ $rc -ne 0 ]] && grep -q 'download failed' <<< "$out" && pass "a failed download says so" || fail "download fail"
+out=$(bash -c 'set -euo pipefail
+    error() { echo "ERR $*"; }; warn() { echo "WARN $*"; }; log_action() { :; }
+    validate_php_version() { return 0; }; deployer_major_version() { echo 6; }
+    source "'"${LIB}"'/deploy.sh"; _deploy_assert_php_compat shop 8.5; echo passed' 2>&1)
+grep -q "ERR Deployer 6 is installed" <<< "$out" && ! grep -q passed <<< "$out" \
+    && pass "cipi deploy stops on Deployer 6 with what to run" || fail "deploy guard: $out"
+out=$(bash -c 'set -euo pipefail
+    error() { echo "ERR $*"; }; warn() { :; }; log_action() { :; }
+    validate_php_version() { return 0; }; deployer_major_version() { echo 8; }
+    source "'"${LIB}"'/deploy.sh"; _deploy_assert_php_compat shop 8.5; echo passed' 2>&1)
+grep -q passed <<< "$out" && pass "…and goes on with Deployer 8" || fail "deploy guard 8: $out"
+
+printf '8.0.5\nphar\n' > "${DS}/dl"
+echo '{"shop": {"php": "8.5"}, "legacy": {"php": "7.4"}, "spa": {"php": "7.4", "runtime": "node"}}' > "${DS}/cfg/apps.json"
+printf '6.8.0\n' > "$D"
+out=$(DI 'CIPI_DEPLOYER_SHA256='"$SUM"'; cipi_deployer_migrate '"$D")
+[[ "$(head -n 1 "$D")" == 8.0.5 ]] && grep -q 'Deployer 6.8.0 → 8.0.5' <<< "$out" && pass "migrate: Deployer 6.8.0 → 8.0.5" || fail "dep6: $out"
+out=$(DI 'cipi_deployer_migrate '"$D")
+grep -q 'Deployer 8.0.5 — nothing to do' <<< "$out" && pass "migrate: Deployer 8 left alone" || fail "dep8: $out"
+printf '7.3.3\n' > "$D"
+out=$(DI 'CIPI_DEPLOYER_SHA256='"$SUM"'; cipi_deployer_migrate '"$D")
+[[ "$(head -n 1 "$D")" == 7.3.3 ]] && grep -q 'Deployer 7.3.3 kept: Deployer 8 cannot run on the PHP of legacy (PHP 7.4)' <<< "$out" && ! grep -q spa <<< "$out" \
+    && pass "migrate: Deployer 7 kept while a PHP app is on PHP < 8.3, named (Node apps not counted)" || fail "legacy: $out"
+echo '{"shop": {"php": "8.5"}}' > "${DS}/cfg/apps.json"
+out=$(DI 'CIPI_DEPLOYER_SHA256='"$SUM"'; cipi_deployer_migrate '"$D")
+[[ "$(head -n 1 "$D")" == 8.0.5 ]] && pass "migrate: Deployer 7 → 8 when every app can run it" || fail "dep7: $out"
+printf '6.8.0\n' > "$D"
+out=$(DI 'CIPI_DEPLOYER_SHA256=0000; cipi_deployer_migrate '"$D"; echo "rc=$?")
+[[ "$(head -n 1 "$D")" == 6.8.0 ]] && grep -q 'WARNING: Deployer 8.0.5: the download does not match' <<< "$out" && grep -q 'rc=0' <<< "$out" \
+    && pass "migrate: a refused download warns, dep untouched, the migration goes on" || fail "bad sum: $out"
+
+VH="${DS}/cipi-gui"
+G() { PATH="${DS}/bin:${PATH}" DS="$DS" CIPI_CONFIG="${DS}/cfg" bash -c 'set -euo pipefail; source "'"${LIB}"'/gui.sh"; gui_vhost_drop_fastcgi_snippet "'"$VH"'"' 2>&1; }
+printf 'server {\n    location ~ \\.php$ {\n        include snippets/fastcgi-php.conf;\n        include fastcgi_params;\n    }\n}\n' > "$VH"
+out=$(G)
+grep -q '^        try_files \$uri =404;$' "$VH" && ! grep -q snippets "$VH" && grep -q 'systemctl reload nginx' "${DS}/systemctl.log" \
+    && pass "panel vhost: the snippet line replaced, nginx reloaded" || fail "vhost: $out $(cat "$VH")"
+out=$(G); grep -q 'nothing to do' <<< "$out" && pass "panel vhost: a second run changes nothing" || fail "vhost rerun: $out"
+printf 'server {\n        include snippets/fastcgi-php.conf;\n}\n' > "$VH"; cp "$VH" "${DS}/vh.orig"; touch "${DS}/nginx.bad"
+out=$(G)
+cmp -s "$VH" "${DS}/vh.orig" && grep -q 'previous one is back' <<< "$out" && pass "panel vhost: nginx -t refuses, the previous file is back" || fail "vhost revert: $out"
 
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="

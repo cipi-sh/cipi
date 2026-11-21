@@ -2,7 +2,8 @@
 #############################################
 # Cipi Migration 5.10.0
 #
-# FrankenPHP builds pinned per Octane app, and JIT per app.
+# FrankenPHP builds pinned per Octane app, JIT per app, and two fixes of a
+# fresh server: Deployer 8 (#519) and the panel's vhost (#520).
 #
 #  1. Installs /usr/local/bin/cipi-frankenphp-link (the Octane recipe runs it
 #     as the app user to link the pinned build into each new release) and
@@ -14,6 +15,13 @@
 #     place: what else is in the file stays as it is.
 #  4. Rewrites the panel's sudoers (app jit, frankenphp status|upgrade)
 #     where a panel is installed.
+#  5. Deployer (#519): setup.sh downloaded deployer.org/deployer.phar, which
+#     now serves Deployer 6.8.0 (no deploy:publish: every deploy failed). A
+#     dep that is not Deployer 8 gets 8.0.5 from its GitHub release, checked
+#     against its SHA-256 — except Deployer 7 where an app still runs PHP
+#     < 8.3, which Deployer 8 cannot run (cipi_deployer_migrate).
+#  6. The web panel's vhost (#520) loses snippets/fastcgi-php.conf, which
+#     nginx.org's packages do not ship (gui_vhost_drop_fastcgi_snippet).
 #
 # Nothing restarts. JIT stays off for every app until `cipi app jit <app> on`.
 # The nightly `cipi autoupdate` now includes frankenphp: patch builds on each
@@ -136,6 +144,20 @@ if [[ -f "${CIPI_LIB}/cipi-api-sudoers.sh" ]]; then
     else
         ensure_cipi_api_sudoers || true
     fi
+fi
+
+# ── 5. Deployer ──────────────────────────────────────────────
+if [[ -f "${CIPI_LIB}/deployer-install.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${CIPI_LIB}/deployer-install.sh"
+    cipi_deployer_migrate "${CIPI_DEP_BIN:-/usr/local/bin/dep}" || true
+fi
+
+# ── 6. the panel's vhost ─────────────────────────────────────
+if [[ -f "${CIPI_LIB}/gui.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${CIPI_LIB}/gui.sh"
+    gui_vhost_drop_fastcgi_snippet "${CIPI_GUI_VHOST:-/etc/nginx/sites-available/cipi-gui}" || true
 fi
 
 if [[ -n "$apps" ]]; then

@@ -93,11 +93,11 @@ Every app gets a fully isolated environment. **Laravel** (default): zero-downtim
 | ------------------ | ------------------------------------------------------------------------------------------------------------ |
 | **Web server**     | Nginx reverse proxy with per-app virtual hosts — PHP-FPM or Octane (`proxy_pass`), optimized for Laravel     |
 | **PHP & Composer** | Selectable per app — PHP 8.3 to 8.6, hot-swappable; a new server is installed with 8.6                       |
-| **Runtime**        | PHP-FPM pools by default; optional **Laravel Octane (FrankenPHP)** per app (`--octane`)                      |
+| **Runtime**        | PHP-FPM pools by default; optional **Laravel Octane (FrankenPHP)** per app (`--octane`), its FrankenPHP build pinned per app (`cipi frankenphp`); PHP JIT per app (`cipi app jit`) |
 | **Database**       | MariaDB (default) + optional PostgreSQL; dedicated DB and user per Laravel app                               |
 | **Search**         | Optional **Meilisearch** for Laravel Scout — native binary, loopback only, per-app scoped key + index prefix  |
 | **Queue workers**  | Supervisor with per-app pools — `queue:work` or **Horizon**; optional **Reverb** for WebSockets (wss:// + credentials + fd limits) |
-| **Deployments**    | Deployer — Laravel: atomic symlink, 5 releases, rollback, optional Node build; Custom: clone into htdocs     |
+| **Deployments**    | Deployer 8 (8.0.5, pinned from its GitHub release, SHA-256 checked) — Laravel: atomic symlink, 5 releases, rollback, optional Node build; Custom: clone into htdocs |
 | **SSL**            | Let's Encrypt via Certbot — HTTP-01 by default; optional **DNS-01 (Cloudflare)** + wildcards                 |
 | **Security**       | Fail2ban + UFW, optional CrowdSec (firewall bouncer), optional **Cloudflare Zero Trust** (`cipi zt`: tunnel, Access, origin dark), and nightly integrity/upload scan, per-app Linux user + PHP-FPM/Octane + SSH key |
 | **Healthchecks**   | HTTP probes every 5 minutes, plus a post-deploy check with optional automatic rollback of a broken release    |

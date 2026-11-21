@@ -1,16 +1,77 @@
 #!/bin/bash
 #############################################
-# Cipi — Alert channels (Slack, Discord, ntfy, generic webhook)
+# Cipi — Notification channels (cipi notification)
+#
+#   email:  resend (API), ses (Amazon SES API v2, SigV4-signed) — SMTP is
+#           smtp.json, lib/smtp.sh, and shows up here as the channel "smtp"
+#   chat:   slack, discord, mattermost, googlechat, telegram
+#   push:   ntfy, pushover
+#   other:  webhook (JSON, optionally HMAC-signed)
 #
 # Channels fan out from cipi_notify(): configure once and every trigger
-# (deploy, backup, scan, monitor, ...) reaches chat as well as email.
+# (deploy, backup, scan, monitor, ...) reaches every enabled channel.
+# Secrets (API keys, bot tokens, AWS keys) live in alerts.json, which the
+# vault encrypts, and are never printed back.
 # Delivery is best-effort and never blocks the caller — a slow webhook
 # must not slow down a deploy or a cron run.
 #############################################
 
 [[ -z "${ALERTS_CFG:-}" ]] && readonly ALERTS_CFG="${CIPI_CONFIG}/alerts.json"
 
-_alert_types() { echo "slack discord ntfy telegram webhook"; }
+_alert_types() { echo "slack discord mattermost googlechat telegram ntfy pushover webhook resend ses"; }
+
+# Email channels: they carry a sender and recipients.
+_alert_type_is_email() { [[ "${1:-}" == resend || "${1:-}" == ses ]]; }
+# Channels that are an incoming-webhook URL and nothing else.
+_alert_type_is_url() { [[ " slack discord mattermost googlechat ntfy webhook " == *" ${1:-} "* ]]; }
+
+# "a@x.com, b@y.com" → JSON array; fails on anything that is not an address.
+_alert_emails_json() {
+    local list="${1:-}" e out="[]"
+    IFS=',' read -r -a _ae <<< "$list"
+    for e in "${_ae[@]}"; do
+        e="${e// /}"
+        [[ -z "$e" ]] && continue
+        [[ "$e" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || return 1
+        out=$(jq -c --arg e "$e" '. + [$e]' <<< "$out")
+    done
+    [[ "$out" != "[]" ]] || return 1
+    echo "$out"
+}
+
+# ── Amazon SES (API v2, Signature Version 4) ──────────────────
+_alert_hmac() {   # <key|hexkey:...> <data> → hex
+    printf '%s' "$2" | openssl dgst -sha256 -mac HMAC -macopt "$1" 2>/dev/null | awk '{ print $NF }'
+}
+_alert_sha256() { printf '%s' "$1" | openssl dgst -sha256 2>/dev/null | awk '{ print $NF }'; }
+
+# _alert_ses_send <channel-json> <subject> <body>
+_alert_ses_send() {
+    local ch="$1" subject="$2" body="$3"
+    local region ak sk from to host payload amzdate day creq sts k sig scope
+    region=$(jq -r '.region // ""' <<<"$ch"); ak=$(jq -r '.access_key // ""' <<<"$ch")
+    sk=$(jq -r '.secret_key // ""' <<<"$ch"); from=$(jq -r '.from // ""' <<<"$ch")
+    to=$(jq -c '.to // []' <<<"$ch")
+    [[ -n "$region" && -n "$ak" && -n "$sk" && -n "$from" && "$to" != "[]" ]] || return 1
+    host="email.${region}.amazonaws.com"
+    payload=$(jq -nc --arg f "$from" --argjson t "$to" --arg s "$subject" --arg b "$body" \
+        '{FromEmailAddress: $f, Destination: {ToAddresses: $t},
+          Content: {Simple: {Subject: {Data: $s, Charset: "UTF-8"}, Body: {Text: {Data: $b, Charset: "UTF-8"}}}}}')
+    amzdate=$(date -u '+%Y%m%dT%H%M%SZ'); day="${amzdate:0:8}"
+    scope="${day}/${region}/ses/aws4_request"
+    creq="POST"$'\n'"/v2/email/outbound-emails"$'\n'""$'\n'"content-type:application/json"$'\n'"host:${host}"$'\n'"x-amz-date:${amzdate}"$'\n'""$'\n'"content-type;host;x-amz-date"$'\n'"$(_alert_sha256 "$payload")"
+    sts="AWS4-HMAC-SHA256"$'\n'"${amzdate}"$'\n'"${scope}"$'\n'"$(_alert_sha256 "$creq")"
+    k=$(_alert_hmac "key:AWS4${sk}" "$day")
+    k=$(_alert_hmac "hexkey:${k}" "$region")
+    k=$(_alert_hmac "hexkey:${k}" ses)
+    k=$(_alert_hmac "hexkey:${k}" aws4_request)
+    sig=$(_alert_hmac "hexkey:${k}" "$sts")
+    [[ -n "$sig" ]] || return 1
+    printf '%s' "$payload" | curl -fsS -o /dev/null --max-time 10 -X POST \
+        -H 'Content-Type: application/json' -H "X-Amz-Date: ${amzdate}" \
+        -H "Authorization: AWS4-HMAC-SHA256 Credential=${ak}/${scope}, SignedHeaders=content-type;host;x-amz-date, Signature=${sig}" \
+        --data-binary @- "https://${host}/v2/email/outbound-emails"
+}
 
 _alert_type_known() {
     local t="${1:-}"
@@ -52,15 +113,16 @@ _alert_deliver_channel() {
     # correct "default true" for an explicitly disabled channel.
     enabled=$(jq -r '.enabled != false' <<<"$ch")
     [[ "$enabled" == "true" ]] || return 0
-    # telegram carries bot token + chat_id instead of a webhook URL
-    [[ "$type" != "telegram" && -z "$url" ]] && return 0
+    # Only the URL channels need a URL; the others carry keys and tokens.
+    _alert_type_is_url "$type" && [[ -z "$url" ]] && return 0
 
     # cipi_notify bodies carry literal "\n" sequences (email renders them via
     # printf %b); chat channels need real newlines.
     body="${body//\\n/$'\n'}"
 
     case "$type" in
-        slack)
+        slack|mattermost)
+            # Mattermost's incoming webhooks take Slack's payload.
             local payload
             payload=$(jq -n --arg t "*${subject}*" --arg b "$body" '{text: ($t + "\n" + $b)}')
             curl -fsS -o /dev/null --max-time 5 -H 'Content-Type: application/json' \
@@ -106,15 +168,56 @@ _alert_deliver_channel() {
                 -d "$payload" "https://api.telegram.org/bot${token}/sendMessage" 2>/dev/null \
                 || { _alert_http_fail "$id" "$type"; return 0; }
             ;;
-        webhook)
+        googlechat)
             local payload
-            payload=$(jq -n \
+            payload=$(jq -n --arg t "*${subject}*" --arg b "$body" '{text: ($t + "\n" + $b)}')
+            curl -fsS -o /dev/null --max-time 5 -H 'Content-Type: application/json; charset=UTF-8' \
+                -d "$payload" "$url" 2>/dev/null || { _alert_http_fail "$id" "$type"; return 0; }
+            ;;
+        pushover)
+            local token user prio=0
+            token=$(jq -r '.token // ""' <<<"$ch"); user=$(jq -r '.user // ""' <<<"$ch")
+            [[ -z "$token" || -z "$user" ]] && return 0
+            _alert_trigger_urgent "$trigger" && prio=1
+            curl -fsS -o /dev/null --max-time 5 \
+                --form-string "token=${token}" --form-string "user=${user}" \
+                --form-string "title=${subject:0:250}" --form-string "message=${body:0:1020}" \
+                --form-string "priority=${prio}" \
+                https://api.pushover.net/1/messages.json 2>/dev/null || { _alert_http_fail "$id" "$type"; return 0; }
+            ;;
+        resend)
+            local key from to payload
+            key=$(jq -r '.api_key // ""' <<<"$ch"); from=$(jq -r '.from // ""' <<<"$ch"); to=$(jq -c '.to // []' <<<"$ch")
+            [[ -z "$key" || -z "$from" || "$to" == "[]" ]] && return 0
+            payload=$(jq -nc --arg f "$from" --argjson t "$to" --arg s "$subject" --arg b "$body" \
+                '{from: $f, to: $t, subject: $s, text: $b}')
+            # The key on stdin (-H @-): not in the process list.
+            printf 'Authorization: Bearer %s\n' "$key" | curl -fsS -o /dev/null --max-time 10 \
+                -H @- -H 'Content-Type: application/json' -d "$payload" https://api.resend.com/emails 2>/dev/null \
+                || { _alert_http_fail "$id" "$type"; return 0; }
+            ;;
+        ses)
+            _alert_ses_send "$ch" "$subject" "$body" 2>/dev/null || { _alert_http_fail "$id" "$type"; return 0; }
+            ;;
+        webhook)
+            # With a secret, the receiver can tell the request is ours:
+            # X-Cipi-Signature: sha256=<HMAC-SHA256 of the body, hex>.
+            local payload secret sig
+            payload=$(jq -nc \
                 --arg server "$(hostname)" --arg trigger "$trigger" \
                 --arg subject "$subject" --arg body "$body" \
                 --argjson ts "$(date +%s)" \
                 '{server:$server, trigger:$trigger, subject:$subject, body:$body, ts:$ts}')
-            curl -fsS -o /dev/null --max-time 5 -H 'Content-Type: application/json' \
-                -d "$payload" "$url" 2>/dev/null || { _alert_http_fail "$id" "$type"; return 0; }
+            secret=$(jq -r '.secret // ""' <<<"$ch")
+            if [[ -n "$secret" ]]; then
+                sig=$(_alert_hmac "key:${secret}" "$payload")
+                printf '%s' "$payload" | curl -fsS -o /dev/null --max-time 5 -H 'Content-Type: application/json' \
+                    -H "X-Cipi-Signature: sha256=${sig}" --data-binary @- "$url" 2>/dev/null \
+                    || { _alert_http_fail "$id" "$type"; return 0; }
+            else
+                printf '%s' "$payload" | curl -fsS -o /dev/null --max-time 5 -H 'Content-Type: application/json' \
+                    --data-binary @- "$url" 2>/dev/null || { _alert_http_fail "$id" "$type"; return 0; }
+            fi
             ;;
         *)
             return 0
@@ -158,57 +261,92 @@ _alert_url_mask() {
     fi
 }
 
+# A secret given on the command line, or asked for on a terminal (not echoed).
+_alert_secret() {   # <value from flag> <prompt>
+    local v="${1:-}"
+    if [[ -z "$v" && -t 0 ]]; then
+        read -r -s -p "  ${2}: " v; echo "" >&2
+    fi
+    printf '%s' "$v"
+}
+
 _alerts_add() {
     local type="${1:-}" id="${2:-}"; shift 2 || true
     parse_args "$@"
     if ! _alert_type_known "$type"; then
-        error "Unknown channel type: ${type:-<missing>} (valid: $(_alert_types))"
+        error "Unknown channel type: ${type:-<missing>} (valid: smtp $(_alert_types))"
         exit 1
     fi
-    if ! _alert_id_valid "$id"; then
-        error "Invalid channel id '${id}' — lowercase letters, digits, dashes"
+    if ! _alert_id_valid "$id" || [[ "$id" == smtp ]]; then
+        error "Invalid channel id '${id}' — lowercase letters, digits, dashes (smtp is the SMTP channel)"
         exit 1
     fi
-    local url="${ARG_url:-}" priority="${ARG_priority:-default}"
-    local token="${ARG_token:-}" chat_id="${ARG_chat_id:-}"
-    if [[ "$type" == "telegram" ]]; then
-        [[ "$token" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] \
-            || { error "--token must be the bot token from @BotFather (123456:ABC-DEF…)"; exit 1; }
-        [[ "$chat_id" =~ ^-?[0-9]+$ ]] \
-            || { error "--chat-id must be numeric (negative for groups); send /start to the bot, then check getUpdates"; exit 1; }
-    else
-        [[ "$url" =~ ^https?:// ]] || { error "--url must start with http:// or https://"; exit 1; }
-    fi
-    if [[ "$type" == "ntfy" ]]; then
-        [[ "$priority" =~ ^(min|low|default|high|urgent|[1-5])$ ]] \
-            || { error "--priority must be min|low|default|high|urgent (or 1-5)"; exit 1; }
-    fi
-
     _alerts_ensure_config
     if vault_read alerts.json | jq -e --arg id "$id" '.channels[] | select(.id == $id)' >/dev/null; then
-        error "Channel '${id}' already exists — remove it first: cipi notifications channel remove ${id}"
+        error "Channel '${id}' already exists — remove it first: cipi notification remove ${id}"
         exit 1
     fi
 
-    if [[ "$type" == "telegram" ]]; then
-        vault_read alerts.json | jq \
-            --arg id "$id" --arg type "$type" --arg token "$token" --arg chat_id "$chat_id" \
-            '.channels += [{id:$id, type:$type, token:$token, chat_id:$chat_id, enabled:true}]' \
-            | vault_write alerts.json
-    else
-        vault_read alerts.json | jq \
-            --arg id "$id" --arg type "$type" --arg url "$url" --arg priority "$priority" \
-            '.channels += [{id:$id, type:$type, url:$url, priority:$priority, enabled:true}]' \
-            | vault_write alerts.json
-    fi
+    local ch url="${ARG_url:-}" to_json
+    case "$type" in
+        telegram)
+            local token chat_id="${ARG_chat_id:-}"
+            token=$(_alert_secret "${ARG_token:-}" "Bot token (from @BotFather)")
+            [[ "$token" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] \
+                || { error "--token must be the bot token from @BotFather (123456:ABC-DEF…)"; exit 1; }
+            [[ "$chat_id" =~ ^-?[0-9]+$ ]] \
+                || { error "--chat-id must be numeric (negative for groups); send /start to the bot, then check getUpdates"; exit 1; }
+            ch=$(jq -nc --arg id "$id" --arg token "$token" --arg c "$chat_id" '{id:$id, type:"telegram", token:$token, chat_id:$c, enabled:true}')
+            ;;
+        pushover)
+            local token user="${ARG_user:-}"
+            token=$(_alert_secret "${ARG_token:-}" "Pushover application token")
+            [[ "$token" =~ ^[A-Za-z0-9]{30}$ ]] || { error "--token must be the 30-character application token of pushover.net"; exit 1; }
+            [[ "$user" =~ ^[A-Za-z0-9]{30}$ ]] || { error "--user must be the 30-character user (or group) key of pushover.net"; exit 1; }
+            ch=$(jq -nc --arg id "$id" --arg t "$token" --arg u "$user" '{id:$id, type:"pushover", token:$t, user:$u, enabled:true}')
+            ;;
+        resend)
+            local key
+            key=$(_alert_secret "${ARG_api_key:-}" "Resend API key (re_…)")
+            [[ "$key" =~ ^re_[A-Za-z0-9_]+$ ]] || { error "--api-key must be a Resend API key (re_…)"; exit 1; }
+            [[ "${ARG_from:-}" == *@* ]] || { error "--from: a sender on a domain verified in Resend (\"Cipi <alerts@example.com>\" or alerts@example.com)"; exit 1; }
+            to_json=$(_alert_emails_json "${ARG_to:-}") || { error "--to: one or more addresses, comma-separated"; exit 1; }
+            ch=$(jq -nc --arg id "$id" --arg k "$key" --arg f "${ARG_from}" --argjson t "$to_json" '{id:$id, type:"resend", api_key:$k, from:$f, to:$t, enabled:true}')
+            ;;
+        ses)
+            local region="${ARG_region:-}" ak="${ARG_access_key:-}" sk
+            [[ "$region" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || { error "--region: the AWS region of SES, e.g. eu-west-1"; exit 1; }
+            [[ "$ak" =~ ^(AKIA|ASIA)[A-Z0-9]{12,}$ ]] || { error "--access-key: an AWS access key id (AKIA…) of a user allowed ses:SendEmail"; exit 1; }
+            sk=$(_alert_secret "${ARG_secret_key:-}" "AWS secret access key")
+            [[ ${#sk} -ge 30 && "$sk" =~ ^[A-Za-z0-9/+=]+$ ]] || { error "--secret-key: the AWS secret access key"; exit 1; }
+            [[ "${ARG_from:-}" == *@* ]] || { error "--from: an identity verified in SES"; exit 1; }
+            to_json=$(_alert_emails_json "${ARG_to:-}") || { error "--to: one or more addresses, comma-separated (verified too, while SES is in its sandbox)"; exit 1; }
+            ch=$(jq -nc --arg id "$id" --arg r "$region" --arg a "$ak" --arg s "$sk" --arg f "${ARG_from}" --argjson t "$to_json" \
+                '{id:$id, type:"ses", region:$r, access_key:$a, secret_key:$s, from:$f, to:$t, enabled:true}')
+            ;;
+        *)
+            [[ "$url" =~ ^https:// || ( "$url" =~ ^http:// && ( "$type" == ntfy || "$type" == webhook ) ) ]] \
+                || { error "--url must start with https:// (http:// only for ntfy and webhook)"; exit 1; }
+            local priority="${ARG_priority:-default}" secret="${ARG_secret:-}"
+            if [[ "$type" == "ntfy" ]]; then
+                [[ "$priority" =~ ^(min|low|default|high|urgent|[1-5])$ ]] \
+                    || { error "--priority must be min|low|default|high|urgent (or 1-5)"; exit 1; }
+            fi
+            if [[ -n "$secret" && "$type" != webhook ]]; then error "--secret is for webhook channels"; exit 1; fi
+            ch=$(jq -nc --arg id "$id" --arg type "$type" --arg url "$url" --arg p "$priority" --arg s "$secret" \
+                '{id:$id, type:$type, url:$url, priority:$p, enabled:true} + (if $s == "" then {} else {secret:$s} end)')
+            ;;
+    esac
+
+    vault_read alerts.json | jq --argjson ch "$ch" '.channels += [$ch]' | vault_write alerts.json
     log_action "ALERT CHANNEL ADD: ${id} (${type})"
     success "Channel '${id}' (${type}) added — every notification trigger now reaches it"
-    info "Test it with: cipi notifications channel test ${id}"
+    info "Test it with: cipi notification test ${id}"
 }
 
 _alerts_remove() {
     local id="${1:-}"
-    [[ -z "$id" ]] && { error "Usage: cipi notifications channel remove <id>"; exit 1; }
+    [[ -z "$id" ]] && { error "Usage: cipi notification remove <id>"; exit 1; }
     _alerts_ensure_config
     if ! vault_read alerts.json | jq -e --arg id "$id" '.channels[] | select(.id == $id)' >/dev/null; then
         error "Channel '${id}' not found"
@@ -241,7 +379,11 @@ _alerts_list() {
     local cfg; cfg=$(vault_read alerts.json)
 
     if [[ "${ARG_json:-}" == "true" ]]; then
-        echo "$cfg" | jq '{channels: .channels}'
+        # Secrets never leave the vault: a key is reported as set, not shown.
+        echo "$cfg" | jq '{channels: [.channels[] | with_entries(
+            if (.key | IN("token", "api_key", "secret_key", "secret")) then .value = (.value != "") | .key = (.key + "_set")
+            elif .key == "url" then .value = (.value | sub("^(?<a>https?://[^/]+/)(.*)$"; "\(.a)***"))
+            else . end)]}'
         return 0
     fi
 
@@ -249,13 +391,15 @@ _alerts_list() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     local n; n=$(echo "$cfg" | jq '.channels | length')
     if [[ "$n" == "0" ]]; then
-        echo -e "  ${DIM}No channels. Alerts go by email only (if SMTP is configured).${NC}"
+        echo -e "  ${DIM}No channels besides SMTP (cipi notification add smtp).${NC}"
         echo ""
         echo -e "  Add one:"
-        echo -e "    ${CYAN}cipi notifications channel add slack ops --url=https://hooks.slack.com/services/…${NC}"
-        echo -e "    ${CYAN}cipi notifications channel add discord ops --url=https://discord.com/api/webhooks/…${NC}"
-        echo -e "    ${CYAN}cipi notifications channel add telegram ops --token=<bot-token> --chat-id=<id>${NC}"
-        echo -e "    ${CYAN}cipi notifications channel add ntfy phone --url=https://ntfy.sh/<topic> --priority=high${NC}"
+        echo -e "    ${CYAN}cipi notification add slack ops --url=https://hooks.slack.com/services/…${NC}"
+        echo -e "    ${CYAN}cipi notification add discord ops --url=https://discord.com/api/webhooks/…${NC}"
+        echo -e "    ${CYAN}cipi notification add telegram ops --token=<bot-token> --chat-id=<id>${NC}"
+        echo -e "    ${CYAN}cipi notification add ntfy phone --url=https://ntfy.sh/<topic> --priority=high${NC}"
+        echo -e "    ${CYAN}cipi notification add resend mail --api-key=re_… --from=alerts@example.com --to=ops@example.com${NC}"
+        echo -e "    ${CYAN}cipi notification add ses mail --region=eu-west-1 --access-key=AKIA… --from=… --to=…${NC}"
         echo ""
         return 0
     fi
@@ -266,12 +410,16 @@ _alerts_list() {
         id=$(jq -r '.id' <<<"$ch"); type=$(jq -r '.type' <<<"$ch")
         enabled=$(jq -r '.enabled != false' <<<"$ch")
         priority=$(jq -r '.priority // ""' <<<"$ch")
-        if [[ "$type" == "telegram" ]]; then
-            # Show the bot token prefix only — it is a full-access secret.
-            target="bot $(jq -r '.token // ""' <<<"$ch" | cut -c1-8)… → chat $(jq -r '.chat_id // "?"' <<<"$ch")"
-        else
-            target=$(_alert_url_mask "$(jq -r '.url // ""' <<<"$ch")")
-        fi
+        case "$type" in
+            telegram)
+                # Show the bot token prefix only — it is a full-access secret.
+                target="bot $(jq -r '.token // ""' <<<"$ch" | cut -c1-8)… → chat $(jq -r '.chat_id // "?"' <<<"$ch")" ;;
+            pushover) target="user $(jq -r '.user // ""' <<<"$ch" | cut -c1-6)…" ;;
+            resend)   target="$(jq -r '.from' <<<"$ch") → $(jq -r '.to | join(", ")' <<<"$ch")" ;;
+            ses)      target="$(jq -r '.region' <<<"$ch"): $(jq -r '.from' <<<"$ch") → $(jq -r '.to | join(", ")' <<<"$ch")" ;;
+            *)        target=$(_alert_url_mask "$(jq -r '.url // ""' <<<"$ch")")
+                      [[ "$type" == webhook && -n "$(jq -r '.secret // ""' <<<"$ch")" ]] && target="${target}  ${DIM}signed${NC}" ;;
+        esac
         local extra=""
         [[ "$type" == "ntfy" && -n "$priority" && "$priority" != "default" ]] && extra="  ${DIM}priority=${priority}${NC}"
         if [[ "$enabled" == "true" ]]; then
@@ -282,13 +430,13 @@ _alerts_list() {
     done < <(echo "$cfg" | jq -c '.channels[]')
     tbl_print
     echo ""
-    echo -e "  ${DIM}Manage: cipi notifications channel add|remove|enable|disable|test${NC}"
+    echo -e "  ${DIM}Manage: cipi notification add|remove|enable|disable|test${NC}"
     echo ""
 }
 
 _alerts_test() {
     local id="${1:-}"
-    [[ -z "$id" ]] && { error "Usage: cipi notifications channel test <id|all>"; exit 1; }
+    [[ -z "$id" ]] && { error "Usage: cipi notification test <id|all>"; exit 1; }
     _alerts_ensure_config
     local cfg; cfg=$(vault_read alerts.json)
     local subject="Cipi test alert on $(hostname)"
@@ -317,10 +465,10 @@ alerts_channel_command() {
         remove|rm)      _alerts_remove "$@" ;;
         list|ls|"")     _alerts_list "$@" ;;
         test)           _alerts_test "${1:-}" ;;
-        enable)         [[ -n "${1:-}" ]] && _alerts_set_enabled "$1" true  || { error "Usage: cipi notifications channel enable <id>"; exit 1; } ;;
-        disable)        [[ -n "${1:-}" ]] && _alerts_set_enabled "$1" false || { error "Usage: cipi notifications channel disable <id>"; exit 1; } ;;
+        enable)         [[ -n "${1:-}" ]] && _alerts_set_enabled "$1" true  || { error "Usage: cipi notification enable <id>"; exit 1; } ;;
+        disable)        [[ -n "${1:-}" ]] && _alerts_set_enabled "$1" false || { error "Usage: cipi notification disable <id>"; exit 1; } ;;
         *)
-            error "Use: channel add <slack|discord|ntfy|telegram|webhook> <id> --url= [--priority=] | telegram: --token= --chat-id= | remove|list|test|enable|disable"
+            error "Use: add <type> <id> … | remove|list|test|enable|disable <id>  (types: smtp $(_alert_types); cipi help notification)"
             exit 1
             ;;
     esac

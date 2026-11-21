@@ -548,6 +548,129 @@ octane_php_ini_ensure() {
     chmod 644 "$tmp" && mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
 }
 
+# ── JIT, per app (cipi app jit) ──────────────────────────────
+#
+# apps.json .jit = {"mode": "tracing"|"function", "buffer": "128M"}; absent = off.
+#
+# PHP-FPM: one FPM per PHP version serves every pool of that version, and the
+# JIT buffer is shared memory the FPM master maps when it starts — a pool can
+# not size it (opcache.jit_buffer_size is PHP_INI_SYSTEM). What a pool can do
+# is turn JIT on, provided it was *startable*: buffer > 0 and opcache.jit not
+# "disable" (PHP 8.4's default, which cannot be changed later; "off" can). So
+# while an app on version X has JIT, X's FPM gets jit_fpm_global_file (JIT
+# startable, off) and the app's pool php_admin_value[opcache.jit]. Every other
+# pool keeps JIT off. The file goes when the last app on X turns JIT off.
+#
+# Octane: FrankenPHP is one process per app, so its own ini directory
+# (PHP_INI_SCAN_DIR, _create_supervisor_octane) carries both settings.
+OCTANE_APP_INI_ROOT="/etc/php/cipi-octane-apps"
+JIT_DEFAULT_BUFFER="128M"
+
+app_jit_mode()   { vault_read apps.json 2>/dev/null | jq -r --arg a "$1" '.[$a].jit.mode // empty' 2>/dev/null || true; }
+app_jit_buffer() { vault_read apps.json 2>/dev/null | jq -r --arg a "$1" '.[$a].jit.buffer // empty' 2>/dev/null || true; }
+
+# "128M" → bytes; nothing for what is not a size.
+jit_size_bytes() {
+    [[ "${1:-}" =~ ^([0-9]+)([KkMmGg]?)$ ]] || return 1
+    local n="${BASH_REMATCH[1]}"
+    case "${BASH_REMATCH[2]}" in
+        K|k) echo $(( n * 1024 )) ;;
+        M|m) echo $(( n * 1024 * 1024 )) ;;
+        G|g) echo $(( n * 1024 * 1024 * 1024 )) ;;
+        *)   echo "$n" ;;
+    esac
+}
+
+# The pool line of an app with JIT (nothing otherwise). PHP 8.0 has JIT.
+fpm_pool_jit_line() {   # <app> <php version>
+    local m; m=$(app_jit_mode "$1")
+    if [[ -n "$m" ]] && version_at_least "$2" 8.0; then
+        echo "php_admin_value[opcache.jit] = ${m}"
+    fi
+    return 0
+}
+
+# Loaded after 99-cipi.ini (conf.d is read in name order), so it wins over a
+# default, never over a choice: an opcache.jit set with `cipi ini set` stays
+# (JIT on for every pool is already startable; "disable" means no JIT, and
+# cipi app jit refuses then), and the buffer is never made smaller than the
+# one set there.
+jit_fpm_global_file() { echo "/etc/php/${1}/fpm/conf.d/99-zz-cipi-jit.ini"; }
+
+# Writes or removes the file for PHP <v>, from apps.json. <with> counts an app
+# whose "php" is about to become <v> (cipi app edit --php), <without> leaves
+# one out (cipi app delete). Prints "changed" when the file changed: that
+# FPM has to restart, which the callers do anyway after a pool change.
+jit_fpm_global_sync() {   # <php version> [with app] [without app]
+    local v="$1" with="${2:-}" without="${3:-}" f a b max=0 bytes g_jit g_buf tmp before=""
+    f=$(jit_fpm_global_file "$v")
+    [[ -d "/etc/php/${v}/fpm/conf.d" ]] || return 0
+    version_at_least "$v" 8.0 || { rm -f "$f"; return 0; }
+    [[ -f "$f" ]] && before=$(cat "$f")
+    local any=false
+    while IFS=$'\t' read -r a b; do
+        [[ -n "$a" ]] || continue
+        [[ -n "$without" && "$a" == "$without" ]] && continue
+        any=true
+        bytes=$(jit_size_bytes "${b:-$JIT_DEFAULT_BUFFER}" 2>/dev/null || jit_size_bytes "$JIT_DEFAULT_BUFFER")
+        (( bytes > max )) && max=$bytes
+    done < <(vault_read apps.json 2>/dev/null | jq -r --arg v "$v" --arg w "$with" '
+        to_entries[]
+        | select((.value.php == $v or .key == $w) and ((.value.octane // "") == "")
+                 and ((.value.runtime // "") != "node") and ((.value.jit.mode // "") != ""))
+        | "\(.key)\t\(.value.jit.buffer // "")"' 2>/dev/null || true)
+    if [[ "$any" != true ]]; then
+        rm -f "$f"
+        [[ -n "$before" ]] && echo changed
+        return 0
+    fi
+    g_jit=$(sed -n 's/^[[:space:]]*opcache\.jit[[:space:]]*=[[:space:]]*//p' "/etc/php/${v}/fpm/conf.d/99-cipi.ini" 2>/dev/null | tail -n 1 | tr -d '[:space:]' || true)
+    g_buf=$(sed -n 's/^[[:space:]]*opcache\.jit_buffer_size[[:space:]]*=[[:space:]]*//p' "/etc/php/${v}/fpm/conf.d/99-cipi.ini" 2>/dev/null | tail -n 1 | tr -d '[:space:]' || true)
+    if [[ -n "$g_buf" ]] && bytes=$(jit_size_bytes "$g_buf" 2>/dev/null) && (( bytes > max )); then max=$bytes; fi
+    tmp=$(mktemp "/etc/php/${v}/fpm/conf.d/.cipi-jit.XXXXXX") || return 1
+    {
+        echo "; Written by Cipi (cipi app jit); rewritten when an app on PHP ${v} turns JIT on"
+        echo "; or off, removed when none has it. It only makes JIT startable: opcache.jit"
+        echo "; stays off in every pool but those of the apps that turn it on"
+        echo "; (php_admin_value[opcache.jit]). The buffer is shared by every pool of"
+        echo "; this PHP-FPM and taken from memory only as JIT code is written into it."
+        [[ -z "$g_jit" ]] && echo "opcache.jit = off"
+        echo "opcache.jit_buffer_size = $(( max / 1024 / 1024 ))M"
+    } > "$tmp"
+    chmod 644 "$tmp"
+    mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
+    [[ "$(cat "$f")" != "$before" ]] && echo changed
+    return 0
+}
+
+# The server-wide opcache.jit set with `cipi ini set`, when it is "disable".
+jit_fpm_global_disabled() {   # <php version>
+    local g
+    g=$(sed -n 's/^[[:space:]]*opcache\.jit[[:space:]]*=[[:space:]]*//p' "/etc/php/${1}/fpm/conf.d/99-cipi.ini" 2>/dev/null | tail -n 1 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' || true)
+    [[ "$g" == disable ]]
+}
+
+# The app's own Octane ini directory, with its JIT file or without it.
+jit_octane_ini_sync() {   # <app>
+    local app="$1" d m b f tmp
+    d="${OCTANE_APP_INI_ROOT}/${app}"
+    mkdir -p "$d" && chmod 755 "$OCTANE_APP_INI_ROOT" "$d" || return 1
+    f="${d}/50-cipi-jit.ini"
+    m=$(app_jit_mode "$app")
+    if [[ -z "$m" ]]; then
+        rm -f "$f"
+        return 0
+    fi
+    b=$(app_jit_buffer "$app"); b="${b:-$JIT_DEFAULT_BUFFER}"
+    tmp=$(mktemp "${d}/.jit.XXXXXX") || return 1
+    {
+        echo "; Written by Cipi (cipi app jit ${app}); rewritten on every change."
+        echo "opcache.jit = ${m}"
+        echo "opcache.jit_buffer_size = ${b}"
+    } > "$tmp"
+    chmod 644 "$tmp" && mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
+}
+
 # CIPI_DEPLOY_BRANCH in a Laravel app's shared/.env. The webhook of cipi/agent
 # deploys a push to that branch and answers "skipped" to every other one;
 # without the key every push deployed. Written at create, kept in step by
@@ -2253,17 +2376,24 @@ _reverb_allocate_port() {
 
 # Supervisor program for Laravel Octane (FrankenPHP). Same conf file as queue workers
 # so cipi-worker stop/restart covers Octane on deploy.
+#
+# PHP_INI_SCAN_DIR: the compiled-in directory (leading ':'), the hardening
+# every Octane app loads, then the app's own directory (cipi app jit).
+# PATH starts with the live release: Octane looks for `frankenphp` on PATH
+# before it looks in the project, so a frankenphp installed on the system
+# would otherwise win over the build Cipi pinned (lib/frankenphp.sh).
 _create_supervisor_octane() {
     local app="$1" v="$2" port="$3"
     local workers
     workers=$(_app_limit "$app" octane_workers 2 16)
     octane_php_ini_ensure || warn "Could not write ${OCTANE_INI_DIR} — '${app}' runs Octane without the PHP hardening"
+    jit_octane_ini_sync "$app" || warn "Could not write ${OCTANE_APP_INI_ROOT}/${app} — '${app}' runs Octane without its JIT setting"
     _supervisor_log_ready "$app" octane.log
     cat >> "/etc/supervisor/conf.d/${app}.conf" <<EOF
 [program:${app}-octane]
 process_name=%(program_name)s
 command=/usr/bin/php${v} /home/${app}/current/artisan octane:start --server=frankenphp --host=127.0.0.1 --port=${port} --workers=${workers} --max-requests=500
-environment=PHP_INI_SCAN_DIR=":${OCTANE_INI_DIR}"
+environment=PHP_INI_SCAN_DIR=":${OCTANE_INI_DIR}:${OCTANE_APP_INI_ROOT}/${app}",PATH="/home/${app}/current:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 autostart=true
 autorestart=true
 startretries=10

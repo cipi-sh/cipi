@@ -983,9 +983,9 @@ _cmp_check_monitoring() {
         > "$(_cmp_ev alert-channels.json)" 2>/dev/null || true
     if [[ "$smtp" != "true" && "$channels" -eq 0 ]]; then
         status=fail
-        _cmp_add detail "No alert delivery: SMTP not configured and no chat/webhook channel (cipi smtp configure / cipi notifications channel add)"
+        _cmp_add detail "No alert delivery: SMTP not configured and no other notification channel (cipi notification add …)"
     else
-        _cmp_add detail "Alert delivery: email=${smtp}, channels=${channels}"
+        _cmp_add detail "Alert delivery: smtp=${smtp}, other channels=${channels}"
     fi
     local muted
     muted=$(vault_read notifications.json 2>/dev/null | jq -r '[.triggers // {} | to_entries[] | select(.value == false) | .key] | join(", ")' 2>/dev/null)

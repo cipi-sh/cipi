@@ -1,7 +1,15 @@
 #!/bin/bash
 #############################################
-# Cipi — Notification triggers
-# Controls which events send email when SMTP is configured.
+# Cipi — Notifications (cipi notification)
+#
+# Where they go — channels: SMTP (smtp.json, lib/smtp.sh, unchanged since
+# before 5.10.0 and shown here as the channel "smtp"), and the channels of
+# lib/alerts.sh (Resend, Amazon SES, Slack, Discord, Mattermost, Google
+# Chat, Telegram, ntfy, Pushover, webhook).
+# What sends them — triggers: this file. Every trigger reaches every
+# enabled channel.
+#
+# `cipi notifications` (the older name) and `cipi smtp` keep working.
 #############################################
 
 [[ -z "${NOTIFICATIONS_CFG:-}" ]] && readonly NOTIFICATIONS_CFG="${CIPI_CONFIG}/notifications.json"
@@ -52,6 +60,9 @@ php_install|PHP|PHP version installed
 php_switch|PHP|System PHP switched
 php_remove|PHP|PHP version removed
 php_upgrade|PHP|PHP packages upgraded
+frankenphp_upgrade|PHP|FrankenPHP build of an Octane app changed or upgraded
+frankenphp_available|Updates|FrankenPHP release on another PHP minor or major, not applied
+app_jit|PHP|JIT turned on or off for an app
 nginx_upgrade|Services|Nginx packages upgraded
 mariadb_upgrade|Database|MariaDB packages upgraded
 pgsql_upgrade|Database|PostgreSQL packages upgraded
@@ -167,13 +178,13 @@ _notify_list() {
     local cfg; cfg=$(vault_read notifications.json)
     local smtp_hint=""
     if declare -f _smtp_is_enabled &>/dev/null && ! _smtp_is_enabled 2>/dev/null; then
-        smtp_hint="${DIM}  (SMTP not configured — run: cipi smtp configure)${NC}"
+        smtp_hint="${DIM}  (SMTP not configured — cipi notification add smtp …, or another channel)${NC}"
     fi
 
     echo -e "\n${BOLD}Notification triggers${NC}${smtp_hint}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo -e "${DIM}  Email is sent only when SMTP is enabled and the trigger is on.${NC}"
-    echo -e "${DIM}  Chat channels (Slack/Discord/ntfy/webhook) follow the same triggers.${NC}"
+    echo -e "${DIM}  A trigger that is on reaches every enabled channel: SMTP, Resend, SES, Slack,${NC}"
+    echo -e "${DIM}  Discord, Mattermost, Google Chat, Telegram, ntfy, Pushover, webhook (cipi notification).${NC}"
     echo -e "${DIM}  Events are always logged to /var/log/cipi/events.log.${NC}\n"
 
     local cur_cat="" line id cat label on
@@ -193,7 +204,7 @@ _notify_list() {
         fi
     done < <(_notify_trigger_catalog)
     echo ""
-    echo -e "  ${DIM}Toggle: cipi notifications enable|disable <trigger>${NC}"
+    echo -e "  ${DIM}Toggle: cipi notification triggers enable|disable <trigger>${NC}"
     echo ""
 }
 
@@ -214,31 +225,136 @@ _notify_reset() {
     info "Triggers reset to defaults (all enabled)"
 }
 
-notifications_command() {
+_notify_is_channel() {   # <id>: smtp, or an id in alerts.json
+    [[ "${1:-}" == smtp ]] && return 0
+    [[ -f "${ALERTS_CFG:-/nonexistent}" ]] || return 1
+    vault_read alerts.json 2>/dev/null | jq -e --arg id "$1" '.channels[]? | select(.id == $id)' >/dev/null 2>&1
+}
+
+# The SMTP channel, as a row of the channel list.
+_notify_smtp_row() {
+    if [[ ! -f "$SMTP_CFG" ]]; then
+        return 1
+    fi
+    local _sj; _sj=$(vault_read smtp.json)
+    jq -c '{id: "smtp", type: "smtp", enabled: (.enabled // false), from: (.from // null),
+            to: ((.to // "") | split(",") | map(gsub(" "; "")) | map(select(. != ""))),
+            host: (.host // null), port: ((.port // "587") | tostring), tls: (.tls != false)}' <<< "$_sj"
+}
+
+# cipi notification [status] [--json]: every channel, SMTP included, and the triggers.
+_notify_status() {
+    parse_args "$@"
+    declare -f _alerts_list >/dev/null 2>&1 || source "${CIPI_LIB}/alerts.sh"
+    declare -f _smtp_status >/dev/null 2>&1 || source "${CIPI_LIB}/smtp.sh"
+    _notify_ensure_config
+    local on total
+    total=$(_notify_trigger_catalog | grep -c '|' || true)
+    on=$(vault_read notifications.json | jq --argjson d "$(_notify_default_triggers_json)" '[($d + .triggers) | to_entries[] | select(.value != false)] | length')
+    if [[ "${ARG_json:-}" == true ]]; then
+        local smtp chans
+        smtp=$(_notify_smtp_row || echo null)
+        chans=$(_alerts_list --json | jq -c '.channels')
+        jq -n --argjson s "$smtp" --argjson c "$chans" --argjson on "$on" --argjson t "$total" \
+            '{channels: ((if $s == null then [] else [$s] end) + $c), triggers: {enabled: $on, total: $t}}'
+        return 0
+    fi
+    echo -e "\n${BOLD}Notifications${NC} ${DIM}— every enabled trigger reaches every enabled channel${NC}"
+    echo -e "\n${BOLD}SMTP${NC}"
+    if [[ -f "$SMTP_CFG" ]]; then
+        local _sj; _sj=$(vault_read smtp.json)
+        local st="${YELLOW}disabled${NC}"; [[ "$(jq -r '.enabled // false' <<< "$_sj")" == true ]] && st="${GREEN}enabled${NC}"
+        echo -e "  ${st}  $(jq -r '.host' <<< "$_sj"):$(jq -r '.port // 587' <<< "$_sj")  $(jq -r '.from // ""' <<< "$_sj") → $(jq -r '.to // ""' <<< "$_sj")"
+    else
+        echo -e "  ${DIM}not configured — cipi notification add smtp --host= --user= --password= --from= --to=${NC}"
+    fi
+    _alerts_list
+    echo -e "${BOLD}Triggers${NC}  ${on}/${total} on  ${DIM}— cipi notification triggers${NC}\n"
+}
+
+# Which one an `enable|disable <name>` means: a trigger (the older form) or a channel.
+_notify_toggle() {   # <on|off> <name>
+    local to="$1" name="${2:-}" is_t=false is_c=false
+    [[ -z "$name" ]] && { error "Usage: cipi notification enable|disable <channel id|trigger>"; exit 1; }
+    _notify_trigger_known "$name" && is_t=true
+    _notify_is_channel "$name" && is_c=true
+    if [[ "$is_t" == true && "$is_c" == true ]]; then
+        error "'${name}' is a trigger and a channel: cipi notification triggers ${to/on/enable} ${name}, or rename the channel"
+        exit 1
+    fi
+    if [[ "$is_c" == true ]]; then
+        if [[ "$name" == smtp ]]; then
+            [[ "$to" == on ]] && _smtp_enable || _smtp_disable
+        else
+            _alerts_set_enabled "$name" "$( [[ "$to" == on ]] && echo true || echo false)"
+        fi
+        return 0
+    fi
+    if [[ "$is_t" == true ]]; then
+        _notify_set_trigger "$name" "$( [[ "$to" == on ]] && echo true || echo false)"
+        success "$( [[ "$to" == on ]] && echo Enabled || echo Disabled ): ${name} ($(_notify_trigger_label "$name"))"
+        return 0
+    fi
+    error "No channel or trigger '${name}' (cipi notification · cipi notification triggers)"
+    exit 1
+}
+
+_notify_triggers_command() {
     local sub="${1:-list}"; shift || true
     case "$sub" in
         list|ls|"") _notify_list ;;
-        channel|channels)
-            declare -f alerts_channel_command &>/dev/null || source "${CIPI_LIB}/alerts.sh"
+        enable|disable)
+            local trigger="${1:-}"
+            [[ -z "$trigger" ]] && { error "Usage: cipi notification triggers ${sub} <trigger>"; exit 1; }
+            _notify_set_trigger "$trigger" "$( [[ "$sub" == enable ]] && echo true || echo false)"
+            success "$( [[ "$sub" == enable ]] && echo Enabled || echo Disabled ): ${trigger} ($(_notify_trigger_label "$trigger"))"
+            ;;
+        enable-all|all-on)   _notify_enable_all ;;
+        disable-all|all-off) _notify_disable_all ;;
+        reset) _notify_reset ;;
+        *) error "Use: cipi notification triggers [list|enable <t>|disable <t>|enable-all|disable-all|reset]"; exit 1 ;;
+    esac
+}
+
+notifications_command() {
+    local sub="${1:-status}"; shift || true
+    declare -f alerts_channel_command &>/dev/null || source "${CIPI_LIB}/alerts.sh"
+    declare -f smtp_command &>/dev/null || source "${CIPI_LIB}/smtp.sh"
+    case "$sub" in
+        status|show) _notify_status "$@" ;;
+        channels)    _notify_status "$@" ;;
+        add)
+            if [[ "${1:-}" == smtp ]]; then
+                shift
+                # An id after the type is accepted and ignored: SMTP is one channel.
+                [[ -n "${1:-}" && "${1:-}" != --* ]] && shift
+                _smtp_configure "$@"
+            else
+                _alerts_add "$@"
+            fi ;;
+        remove|rm|delete)
+            if [[ "${1:-}" == smtp ]]; then shift; _smtp_delete "$@"; else _alerts_remove "$@"; fi ;;
+        test)
+            case "${1:-}" in
+                smtp) _smtp_test ;;
+                all)  _smtp_is_enabled && { _smtp_test || true; }; _alerts_test all ;;
+                *)    _alerts_test "${1:-}" ;;
+            esac ;;
+        enable)  _notify_toggle on "${1:-}" ;;
+        disable) _notify_toggle off "${1:-}" ;;
+        smtp)    smtp_command "$@" ;;
+        triggers|trigger) _notify_triggers_command "$@" ;;
+        # The forms of `cipi notifications` before 5.10.0.
+        list|ls) _notify_list ;;
+        channel)
             alerts_channel_command "$@"
-            ;;
-        enable)
-            local trigger="${1:-}"
-            [[ -z "$trigger" ]] && { error "Usage: cipi notifications enable <trigger>"; exit 1; }
-            _notify_set_trigger "$trigger" true
-            success "Enabled: ${trigger} ($(_notify_trigger_label "$trigger"))"
-            ;;
-        disable)
-            local trigger="${1:-}"
-            [[ -z "$trigger" ]] && { error "Usage: cipi notifications disable <trigger>"; exit 1; }
-            _notify_set_trigger "$trigger" false
-            success "Disabled: ${trigger} ($(_notify_trigger_label "$trigger"))"
             ;;
         enable-all|all-on)  _notify_enable_all ;;
         disable-all|all-off) _notify_disable_all ;;
         reset) _notify_reset ;;
         *)
-            error "Use: list enable disable enable-all disable-all reset channel"
+            error "Use: cipi notification [status] | add <type> <id> … | remove|test|enable|disable <id> | triggers … | smtp …"
+            echo "      types: smtp $(_alert_types)"
             exit 1
             ;;
     esac

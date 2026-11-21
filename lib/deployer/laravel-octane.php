@@ -28,6 +28,10 @@ host('localhost')
     ->set('deploy_path', '__CIPI_DEPLOY_PATH__')
     ->set('ssh_arguments', ['-o StrictHostKeyChecking=accept-new', '-i __CIPI_DEPLOY_PATH__/.ssh/id_ed25519']);
 
+// The FrankenPHP build Cipi pinned for this app (cipi frankenphp), linked into
+// the release before it goes live: Octane finds it and downloads nothing. First
+// after the vendors, so a release it refuses has run no migration.
+after('deploy:vendors', 'cipi:frankenphp');
 after('deploy:vendors', 'cipi:node_build');
 __CIPI_HOOK_STORAGE_LINK__
 __CIPI_HOOK_MIGRATE__
@@ -51,6 +55,11 @@ task('cipi:chmod_storage_logs_dir', function () {
 // Optional frontend build (script written by cipi when node_build is set).
 task('cipi:node_build', function () {
     run('test ! -x {{deploy_path}}/.deployer/node-build.sh || {{deploy_path}}/.deployer/node-build.sh {{release_path}}');
+});
+
+// Without the helper (a server not updated yet) nothing is linked.
+task('cipi:frankenphp', function () {
+    run('[ ! -x /usr/local/bin/cipi-frankenphp-link ] || /usr/local/bin/cipi-frankenphp-link {{release_path}}');
 });
 
 task('workers:stop', function () {

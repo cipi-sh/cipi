@@ -602,6 +602,8 @@ JSON
     if [[ "$app_type" == "laravel" ]]; then
         _create_supervisor_worker "$app_user" "$php_ver" "default"
         if [[ -n "$octane_server" ]]; then
+            declare -f fphp_pin_default >/dev/null 2>&1 || source "${CIPI_LIB}/frankenphp.sh"
+            fphp_pin_default "$app_user"
             _create_supervisor_octane "$app_user" "$php_ver" "$octane_port"
             reload_supervisor
             success "Worker + Octane (:${octane_port})"
@@ -1198,6 +1200,18 @@ app_edit() {
             fi
             app_sed "$app" "/home/${app}/shared/.env" "s|^CIPI_PHP_VERSION=.*|CIPI_PHP_VERSION=${np}|"
             app_set "$app" php "$np"; success "PHP → $np"; changed=true
+            if [[ -n "$(app_get "$app" octane)" ]]; then
+                # The PHP that answers requests is the one inside the FrankenPHP
+                # build: say so when it is not the one the app just moved to.
+                declare -f fphp_app_build >/dev/null 2>&1 || source "${CIPI_LIB}/frankenphp.sh"
+                local fb; fb=$(fphp_app_build "$app")
+                if [[ -n "$fb" && "$(fphp_minor "$(fphp_meta "$fb" php)")" != "$np" ]]; then
+                    warn "Octane still answers on PHP $(fphp_meta "$fb" php) (FrankenPHP build ${fb}). Move it to a build on ${np}: cipi frankenphp upgrade ${app}"
+                fi
+            elif [[ -n "$(app_jit_mode "$app")" && "$(app_get "$app" runtime)" != "node" ]]; then
+                # The old version's FPM no longer serves an app with JIT.
+                if [[ -n "$(jit_fpm_global_sync "$cur_php")" ]]; then reload_php_fpm "$cur_php" || true; fi
+            fi
         fi
     fi
     if [[ -n "${ARG_branch:-}" ]]; then
@@ -1412,7 +1426,12 @@ app_delete() {
     fi
     step "Workers...";     supervisorctl stop "${app}-worker-"* 2>/dev/null||true; supervisorctl stop "${app}-octane" 2>/dev/null||true; supervisorctl stop "${app}-reverb" 2>/dev/null||true; supervisorctl stop "${app}-horizon" 2>/dev/null||true; rm -f "/etc/supervisor/conf.d/${app}.conf"; reload_supervisor
     step "Nginx...";       rm -f "/etc/nginx/sites-enabled/${app}" "/etc/nginx/sites-available/${app}"; reload_nginx
-    step "PHP-FPM...";     rm -f "/etc/php/${p}/fpm/pool.d/${app}.conf"; reload_php_fpm "$p" 2>/dev/null||true
+    step "PHP-FPM...";     rm -f "/etc/php/${p}/fpm/pool.d/${app}.conf"; jit_fpm_global_sync "$p" "" "$app" >/dev/null 2>&1 || true; reload_php_fpm "$p" 2>/dev/null||true
+    if [[ -n "$(app_get "$app" octane)" ]]; then
+        rm -rf "${OCTANE_APP_INI_ROOT:?}/${app}"
+        declare -f fphp_app_unset >/dev/null 2>&1 || source "${CIPI_LIB}/frankenphp.sh"
+        fphp_app_unset "$app"
+    fi
     # Databases linked to the app (cipi db link) are not the app's to take
     # with it: they stay, and the link goes with the app's entry.
     local kept_dbs
@@ -2443,9 +2462,15 @@ _create_fpm_pool() {
     if [[ -n "$memory_limit" ]]; then
         overrides="${overrides}php_admin_value[memory_limit] = ${memory_limit}"$'\n'
     fi
+    local jit_line
+    jit_line=$(fpm_pool_jit_line "$app" "$v")
     while IFS=$'\t' read -r k val; do
         [[ -n "$k" ]] || continue
         [[ "$k" == "memory_limit" && -n "$memory_limit" ]] && continue
+        # cipi app jit owns JIT for the app; a pool-level buffer size does
+        # nothing (PHP_INI_SYSTEM: the FPM master sizes it at start).
+        [[ "$k" == "opcache.jit" && -n "$jit_line" ]] && continue
+        [[ "$k" == "opcache.jit_buffer_size" ]] && continue
         if grep -qx -- "$k" <<< "$flags"; then
             overrides="${overrides}php_admin_flag[${k}] = ${val}"$'\n'
         else
@@ -2480,6 +2505,12 @@ EOF
     if [[ -n "$overrides" ]]; then
         printf '%s' "$overrides" >> "/etc/php/${v}/fpm/pool.d/${app}.conf"
     fi
+    if [[ -n "$jit_line" ]]; then
+        printf '%s\n' "$jit_line" >> "/etc/php/${v}/fpm/pool.d/${app}.conf"
+    fi
+    # JIT startable on this FPM while an app on it has JIT (cipi app jit).
+    # The caller restarts this FPM after the pool change, which loads it.
+    jit_fpm_global_sync "$v" "$app" >/dev/null || warn "Could not update $(jit_fpm_global_file "$v")"
     return 0
 }
 
@@ -3896,8 +3927,14 @@ app_convert() {
             step "Converting '${app}' → Octane (FrankenPHP) :${port}..."
             app_set "$app" octane "frankenphp"
             app_set "$app" octane_port "$port"
+            # JIT was checked against PHP-FPM; on FrankenPHP it is turned on
+            # again by hand (cipi app jit checks that build).
+            _app_jit_drop_on_convert "$app"
             rm -f "/etc/php/${php_ver}/fpm/pool.d/${app}.conf"
+            jit_fpm_global_sync "$php_ver" >/dev/null || true
             reload_php_fpm "$php_ver" 2>/dev/null || true
+            declare -f fphp_pin_default >/dev/null 2>&1 || source "${CIPI_LIB}/frankenphp.sh"
+            fphp_pin_default "$app"
             _supervisor_remove_program "$app" "${app}-octane"
             _create_supervisor_octane "$app" "$php_ver" "$port"
             reload_supervisor
@@ -3923,6 +3960,10 @@ app_convert() {
             reload_supervisor
             app_unset "$app" octane
             app_unset "$app" octane_port
+            _app_jit_drop_on_convert "$app"
+            declare -f fphp_app_unset >/dev/null 2>&1 || source "${CIPI_LIB}/frankenphp.sh"
+            fphp_app_unset "$app"
+            rm -rf "${OCTANE_APP_INI_ROOT:?}/${app}"
             _create_fpm_pool "$app" "$php_ver"
             reload_php_fpm "$php_ver" || exit 1
             _create_nginx_vhost "$app" "$domain" "$php_ver"
@@ -4393,6 +4434,206 @@ app_limits() {
     success "Limits updated for '${app}'"
 }
 
+# ── JIT (cipi app jit) ────────────────────────────────────────
+#
+#   cipi app jit <app> [status] [--json]
+#   cipi app jit <app> on [--mode=tracing|function] [--buffer=128M]
+#   cipi app jit <app> off
+#
+# Per app, PHP-FPM or Octane (see "JIT, per app" in common.sh for where the
+# settings go). Before anything is written the PHP that will run the app is
+# asked to start with JIT the same way (its CLI for PHP-FPM, the FrankenPHP
+# binary for Octane): a build without JIT, or an extension that turns it off
+# (Xdebug, pcov), refuses here instead of in production. After the restart
+# the app's runtime has to be up — PHP-FPM active, Octane answering on its
+# port — or the previous setting is put back and restarted.
+#
+# What JIT does for a Laravel app depends on the app: it compiles PHP code,
+# so CPU-bound work (heavy computation, large collections, templating) gains,
+# and a request that waits on the database or an API gains little. Measure it.
+
+_app_jit_valid_mode()   { [[ "${1:-}" == tracing || "${1:-}" == function ]]; }
+_app_jit_valid_buffer() {
+    local b; b=$(jit_size_bytes "${1:-}" 2>/dev/null) || return 1
+    (( b >= 16 * 1024 * 1024 && b <= 1024 * 1024 * 1024 ))
+}
+
+# convert: the setting was checked against the other runtime.
+_app_jit_drop_on_convert() {
+    if [[ -n "$(app_jit_mode "$1")" ]]; then
+        app_unset "$1" jit
+        info "JIT turned off by the conversion — turn it on again for the new runtime: cipi app jit $1 on"
+    fi
+    return 0
+}
+
+# The binary an Octane app starts (pin, or the release's own); nothing if none.
+# frankenphp.sh is sourced by app_jit: here it would be in a $( ) subshell.
+_app_jit_octane_bin() {
+    fphp_app_binary "$1"
+}
+
+# Asks a PHP to start with JIT in <mode>. Prints why not, returns 1.
+_app_jit_preflight() {   # <app> <runtime fpm|octane> <php version or binary> <mode>
+    local app="$1" rt="$2" target="$3" mode="$4" out code
+    code='$s = function_exists("opcache_get_status") ? opcache_get_status(false) : false;
+          echo (is_array($s) && !empty($s["jit"]["enabled"]) && !empty($s["jit"]["on"])) ? "jit-ok" : "jit-no";'
+    if [[ "$rt" == fpm ]]; then
+        out=$(timeout 20 "php${target}" -d opcache.enable_cli=1 -d opcache.jit_buffer_size=32M -d "opcache.jit=${mode}" -r "$code" 2>&1 < /dev/null || true)
+    else
+        # `frankenphp php-cli` runs a script file; the settings come the way
+        # Octane's come, through PHP_INI_SCAN_DIR. As the app user, without a
+        # terminal (see _php_frankenphp_report).
+        local d; d=$(mktemp -d) || return 1
+        chmod 755 "$d"
+        printf 'opcache.enable_cli = 1\nopcache.jit_buffer_size = 32M\nopcache.jit = %s\n' "$mode" > "${d}/jit.ini"
+        printf '<?php\n%s\n' "$code" > "${d}/check.php"
+        chmod 644 "${d}/jit.ini" "${d}/check.php"
+        out=$(runuser -u "$app" -- setsid -w timeout 20 env "PHP_INI_SCAN_DIR=:${d}" "$target" php-cli "${d}/check.php" 2>&1 < /dev/null || true)
+        rm -rf "$d"
+    fi
+    grep -q 'jit-ok' <<< "$out" && return 0
+    echo "$(grep -v '^[[:space:]]*$' <<< "$out" | grep -v 'jit-no' | head -n 3 | tr '\n' ' ')"
+    return 1
+}
+
+_app_jit_status() {   # <app>
+    local app="$1" rt="fpm" mode buf php bin probe="" note="" supported=true
+    [[ -n "$(app_get "$app" octane)" ]] && rt="octane"
+    mode=$(app_jit_mode "$app"); buf=$(app_jit_buffer "$app")
+    php=$(app_get "$app" php)
+    if [[ "$rt" == octane ]]; then
+        bin=$(_app_jit_octane_bin "$app")
+        if [[ -n "$bin" ]] && probe=$(fphp_probe "$bin" "$app"); then php="${probe#* }"; else note="no FrankenPHP binary yet"; fi
+    else
+        version_at_least "$php" 8.0 || { supported=false; note="PHP ${php} has no JIT"; }
+        jit_fpm_global_disabled "$php" && { supported=false; note="opcache.jit=disable server-wide (cipi ini unset opcache.jit)"; }
+    fi
+    if [[ "${ARG_json:-}" == true ]]; then
+        jq -n --arg a "$app" --arg rt "$rt" --arg php "$php" --arg m "$mode" --arg b "${buf:-$JIT_DEFAULT_BUFFER}"               --argjson sup "$supported" --arg n "$note"             '{app: $a, runtime: $rt, php: $php, enabled: ($m != ""), mode: (if $m == "" then null else $m end),
+              buffer: (if $m == "" then null else $b end), supported: $sup, note: (if $n == "" then null else $n end)}'
+        return 0
+    fi
+    echo -e "\n${BOLD}JIT — ${app}${NC} ${DIM}(${rt}, PHP ${php})${NC}"
+    if [[ -n "$mode" ]]; then
+        echo -e "  State   ${GREEN}on${NC}  mode=${mode}  buffer=${buf:-$JIT_DEFAULT_BUFFER}"
+    else
+        echo -e "  State   ${DIM}off${NC}"
+    fi
+    [[ -n "$note" ]] && echo -e "  ${YELLOW}${note}${NC}"
+    echo -e "  ${DIM}cipi app jit ${app} on [--mode=tracing|function] [--buffer=128M]  ·  cipi app jit ${app} off${NC}"
+    echo ""
+    return 0
+}
+
+# Applies the app's current .jit to its runtime and checks it came up.
+_app_jit_apply() {   # <app>
+    local app="$1" v rc=0
+    v=$(app_get "$app" php)
+    if [[ -n "$(app_get "$app" octane)" ]]; then
+        declare -f fphp_octane_restart >/dev/null 2>&1 || source "${CIPI_LIB}/frankenphp.sh"
+        fphp_octane_restart "$app" || rc=$?
+        [[ "$rc" -eq 2 ]] && { info "${app}-octane is not running — the setting applies at its next start"; return 0; }
+        fphp_octane_verify "$app"
+        return
+    fi
+    _create_fpm_pool "$app" "$v"
+    if ! "php-fpm${v}" -t &>/dev/null && ! "/usr/sbin/php-fpm${v}" -t &>/dev/null; then
+        error "php-fpm${v} -t refuses the configuration"
+        return 1
+    fi
+    step "Restarting php${v}-fpm (every app on PHP ${v} is interrupted for a moment)..."
+    systemctl restart "php${v}-fpm" 2>/dev/null || return 1
+    sleep 1
+    systemctl is-active --quiet "php${v}-fpm"
+}
+
+app_jit() {
+    local app="${1:-}"; shift || true
+    local usage="Usage: cipi app jit <app> [status|on|off] [--mode=tracing|function] [--buffer=128M] [--json]"
+    [[ -n "$app" && "$app" != --* ]] || { error "$usage"; exit 1; }
+    app_exists "$app" || { error "App '${app}' not found"; exit 1; }
+    local action="status"
+    case "${1:-}" in
+        on|enable)   action=on; shift ;;
+        off|disable) action=off; shift ;;
+        status)      shift ;;
+        ""|--*)      ;;
+        *) error "$usage"; exit 1 ;;
+    esac
+    parse_args "$@"
+    declare -f fphp_app_binary >/dev/null 2>&1 || source "${CIPI_LIB}/frankenphp.sh"
+    if [[ "$(app_get "$app" runtime)" == "node" ]]; then
+        error "'${app}' is a Node app: its requests are not answered by PHP"
+        exit 1
+    fi
+    [[ "$action" == status ]] && { _app_jit_status "$app"; return 0; }
+
+    local rt="fpm" v prev mode buf target reason
+    [[ -n "$(app_get "$app" octane)" ]] && rt="octane"
+    v=$(app_get "$app" php)
+    prev=$(vault_read apps.json | jq -c --arg a "$app" '.[$a].jit // empty')
+
+    if [[ "$action" == off ]]; then
+        [[ -z "$prev" ]] && { info "JIT is already off for '${app}'"; return 0; }
+        app_unset "$app" jit
+        if ! _app_jit_apply "$app"; then
+            error "'${app}' did not come back after JIT was turned off — check its logs"
+            exit 1
+        fi
+        log_action "APP JIT: ${app} off"
+        cipi_notify "Cipi JIT off: ${app} on $(hostname)"             "JIT was turned off for an app.\n\nServer: $(hostname)\nApp: ${app}\nRuntime: ${rt}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" app_jit
+        success "JIT off for '${app}'"
+        return 0
+    fi
+
+    mode="${ARG_mode:-tracing}"; buf="${ARG_buffer:-$JIT_DEFAULT_BUFFER}"
+    _app_jit_valid_mode "$mode" || { error "--mode: tracing or function"; exit 1; }
+    _app_jit_valid_buffer "$buf" || { error "--buffer: a size from 16M to 1G (e.g. 128M)"; exit 1; }
+    buf=$(echo "$buf" | tr '[:lower:]' '[:upper:]')
+    if [[ "$prev" == "$(jq -nc --arg m "$mode" --arg b "$buf" '{mode: $m, buffer: $b}')" ]]; then
+        info "JIT is already on for '${app}' (mode=${mode}, buffer=${buf})"
+        return 0
+    fi
+
+    if [[ "$rt" == fpm ]]; then
+        version_at_least "$v" 8.0 || { error "PHP ${v} has no JIT (8.0 and later)"; exit 1; }
+        if jit_fpm_global_disabled "$v"; then
+            error "opcache.jit = disable is set server-wide for PHP ${v} (cipi ini). Remove it first: cipi ini unset opcache.jit"
+            exit 1
+        fi
+        target="$v"
+    else
+        target=$(_app_jit_octane_bin "$app")
+        [[ -n "$target" ]] || { error "'${app}' has no FrankenPHP binary yet — deploy it (or cipi frankenphp upgrade ${app}) first"; exit 1; }
+    fi
+    step "Checking that PHP starts with JIT (${mode})..."
+    if ! reason=$(_app_jit_preflight "$app" "$rt" "$target" "$mode"); then
+        error "JIT does not start on this PHP${reason:+: ${reason}}"
+        error "Usual causes: an extension that replaces the executor (Xdebug, pcov), or a PHP built without JIT."
+        exit 1
+    fi
+    if [[ "$rt" == fpm ]]; then
+        local ov; ov=$(vault_read apps.json | jq -r --arg a "$app" '.[$a].ini["opcache.enable"] // empty')
+        [[ "$(printf '%s' "$ov" | tr '[:upper:]' '[:lower:]')" =~ ^(off|0|false|no)$ ]] \
+            && warn "OPcache is off for '${app}' (cipi ini) — JIT needs it: cipi ini unset opcache.enable --app=${app}"
+    fi
+
+    app_set_json "$app" jit "$(jq -nc --arg m "$mode" --arg b "$buf" '{mode: $m, buffer: $b}')"
+    if ! _app_jit_apply "$app"; then
+        warn "'${app}' did not come up with JIT — putting the previous setting back"
+        if [[ -n "$prev" ]]; then app_set_json "$app" jit "$prev"; else app_unset "$app" jit; fi
+        _app_jit_apply "$app" || warn "'${app}' does not answer with the previous setting either — check its logs"
+        exit 1
+    fi
+    log_action "APP JIT: ${app} on mode=${mode} buffer=${buf}"
+    cipi_notify "Cipi JIT on: ${app} on $(hostname)" \
+        "JIT was turned on for an app.\n\nServer: $(hostname)\nApp: ${app}\nRuntime: ${rt}\nMode: ${mode}\nBuffer: ${buf}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" app_jit
+    success "JIT on for '${app}' (mode=${mode}, buffer=${buf})"
+    [[ "$rt" == fpm ]] && echo -e "  ${DIM}The buffer is shared by every app on PHP ${v} with JIT; the largest asked for is used.${NC}"
+    return 0
+}
+
 # ── CLONE / STAGING ───────────────────────────────────────────
 
 # stdin: the source app's .env. Carries its non-secret keys into the clone's
@@ -4531,6 +4772,16 @@ app_clone() {
     local lim
     lim=$(vault_read apps.json | jq -c --arg a "$src" '.[$a].limits // empty')
     [[ -n "$lim" && "$lim" != "null" ]] && app_set_json "$name" limits "$lim"
+    # A staging copy answers on the FrankenPHP build production runs — when
+    # that build may be given to another app (not one adopted from the
+    # source's own release).
+    if [[ -n "$(app_get "$src" octane)" ]]; then
+        declare -f fphp_app_build >/dev/null 2>&1 || source "${CIPI_LIB}/frankenphp.sh"
+        local sb; sb=$(fphp_app_build "$src")
+        if [[ -n "$sb" ]] && fphp_build_trusted_for "$sb" "$name"; then
+            fphp_app_set "$name" "$sb" && info "FrankenPHP: '${name}' pinned to ${sb}, as '${src}'"
+        fi
+    fi
 
     log_action "APP CLONE: $src → $name domain=$domain"
     success "Cloned '${src}' → '${name}'. Deploy when ready: cipi deploy ${name}"
@@ -4611,6 +4862,7 @@ app_command() {
         clone)   app_clone "$@" ;;
         reverb)  app_reverb "$@" ;;
         limits)  app_limits "$@" ;;
+        jit)     app_jit "$@" ;;
         env)     app_env "$@" ;;
         webhook)
             if [[ "${1:-}" == "recreate" ]]; then
@@ -4638,7 +4890,7 @@ app_command() {
         reset-password)    app_reset_password "$@" ;;
         reset-db-password) app_reset_db_password "$@" ;;
         fix-permissions|fixperms) app_fix_permissions "$@" ;;
-        *) error "Unknown: $sub"; echo "Use: create list show edit delete convert clone reverb limits env webhook logs tinker artisan run deploy-config suspend unsuspend reset-password reset-db-password fix-permissions"; echo "      webhook recreate <app> [--rotate-secret]"; echo "      logs read <app> [--type=T] [--page=N] [--per-page=N]  (API snapshot)"; echo "      run --commands [--json]  (list whitelisted binaries)"; exit 1 ;;
+        *) error "Unknown: $sub"; echo "Use: create list show edit delete convert clone reverb limits jit env webhook logs tinker artisan run deploy-config suspend unsuspend reset-password reset-db-password fix-permissions"; echo "      webhook recreate <app> [--rotate-secret]"; echo "      logs read <app> [--type=T] [--page=N] [--per-page=N]  (API snapshot)"; echo "      run --commands [--json]  (list whitelisted binaries)"; exit 1 ;;
     esac
 }
 

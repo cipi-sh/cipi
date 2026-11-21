@@ -66,8 +66,8 @@ _help_topic_header() {
 _help_topics_list() {
     cat <<'EOF'
 app  use  node  domains  www  redirect  proxy  deploy  worker  schedule  health  monitor  db  search  service  ssl
-php  package  auth  basicauth  ssh  firewall  ban  crowdsec  zt  scan  compliance  backup  sync
-git  ini  yml  nginx  api  gui  smtp  notifications  reset  credentials  server  updates  valkey  completion
+php  frankenphp  package  auth  basicauth  ssh  firewall  ban  crowdsec  zt  scan  compliance  backup  sync
+git  ini  yml  nginx  api  gui  notification  smtp  reset  credentials  server  updates  valkey  completion
 EOF
 }
 
@@ -127,11 +127,12 @@ show_help() {
     echo ""
     echo -e "  ${BOLD}Ops${NC}"
     _help_cmd "cipi php / ini"                   "PHP versions and php.ini settings"
+    _help_cmd "cipi frankenphp ..."              "FrankenPHP builds of Octane apps  ${DIM}status|upgrade|use|import${NC}"
     _help_cmd "cipi package ..."                 "Optional tools  ${DIM}ffmpeg, image optimisers, pdftotext${NC}"
     _help_cmd "cipi backup ..."                  "Backup profiles, schedules, retention"
     _help_cmd "cipi yml ..."                     "Apply a project's cipi.yml"
     _help_cmd "cipi nginx / sync / git"          "Default server, migrate apps, Git tokens"
-    _help_cmd "cipi smtp / notifications"        "Email alerts & triggers"
+    _help_cmd "cipi notification ..."            "Alerts: SMTP, Resend, SES, Slack, Telegram, webhook, …  ${DIM}add|test|triggers${NC}"
     echo ""
     echo -e "  ${DIM}Detailed help:${NC}  ${CYAN}cipi help <topic>${NC}"
     echo -e "  ${DIM}Topics:${NC}         $(_help_topics_list | tr '\n' ' ' | sed 's/  */ /g')"
@@ -168,7 +169,8 @@ show_help_topic() {
             _help_cmd "cipi reboot now [--yes]"        "Restart the server in one minute"
             _help_cmd "cipi reboot auto on [--at=HH:MM]" "Restart at night, only when one is required  ${DIM}(default 04:45)${NC}"
             _help_cmd "cipi reboot auto off"           "Back to a reboot by hand"
-            _help_note "names: nginx mariadb pgsql valkey node composer — patch releases only, 04:20 every night."
+            _help_note "names: nginx mariadb pgsql valkey node composer frankenphp — patch releases only, 04:20 every night."
+            _help_note "frankenphp: an Octane app moves only within its PHP minor and FrankenPHP major (cipi help frankenphp)."
             _help_note "A database is left for the next night while a dump or a deploy is running."
             _help_note "PHP has its own job (cipi php upgrade, 03:30); Ubuntu's security updates are unattended-upgrades."
             _help_note "pending is checked every morning and mailed when the list changes (trigger pending_report)."
@@ -242,6 +244,8 @@ show_help_topic() {
             _help_cmd "cipi app reverb …"              "Reverb WebSockets  ${DIM}enable|disable|status${NC}"
             _help_note "enable [--restart-supervisor] — lifts Supervisor's open-file limit now (restarts every worker)"
             _help_cmd "cipi app limits <app>"          "Resource limits  ${DIM}[--fpm-max-children=] [--disk=<GB>|none]${NC}"
+            _help_cmd "cipi app jit <app> [on|off]"    "PHP JIT for one app  ${DIM}[--mode=tracing|function] [--buffer=128M] [--json]${NC}"
+            _help_note "PHP-FPM or Octane; checked before and after, the previous setting comes back if the app does not start."
             _help_cmd "cipi app delete <app>"          "Delete app"
             _help_cmd "cipi app suspend <app>"         "Take offline (503)"
             _help_cmd "cipi app unsuspend <app>"       "Bring back online"
@@ -698,6 +702,25 @@ show_help_topic() {
             _help_note "A branch that is new in the repository can lack redis, memcached or imagick"
             _help_note "for a while: it is installed without them, and cipi php upgrade adds them"
             _help_note "when they are published (cipi pending lists what is missing)."
+            _help_note "Octane apps run the PHP inside their FrankenPHP build: cipi help frankenphp."
+            echo ""
+            ;;
+
+        frankenphp|franken|octane)
+            _help_topic_header "FrankenPHP (Octane apps)"
+            echo ""
+            _help_cmd "cipi frankenphp [status] [--json]"   "Each Octane app's build, its PHP, patched or not"
+            _help_cmd "cipi frankenphp upgrade <app>|--all" "Newest build on the app's PHP minor  ${DIM}[--to=<build>] [--no-fetch] [--yes]${NC}"
+            _help_cmd "cipi frankenphp use <app> <build>"   "Pin a build  ${DIM}[--no-restart] [--force]${NC}"
+            _help_cmd "cipi frankenphp fetch [<version>]"   "Download a release from GitHub (latest by default)"
+            _help_cmd "cipi frankenphp import <binary>"     "Add a build made elsewhere — another PHP minor"
+            _help_cmd "cipi frankenphp adopt <app>"         "Pin the binary Octane downloaded into the release"
+            _help_cmd "cipi frankenphp remove <build>"      "Delete a build no app uses  ${DIM}· prune${NC}"
+            _help_note "A deploy links the pinned build into the release: Octane downloads nothing, and the"
+            _help_note "PHP an app answers on changes only when you say so. upgrade stays on the app's PHP"
+            _help_note "minor and FrankenPHP major; it restarts Octane, checks it answers, and goes back"
+            _help_note "to the previous build when it does not. Nightly: cipi autoupdate on|off frankenphp."
+            _help_note "GitHub's binaries carry one PHP minor; for another, build FrankenPHP and import it."
             echo ""
             ;;
 
@@ -934,27 +957,34 @@ show_help_topic() {
             ;;
 
         smtp|mail|email)
-            _help_topic_header "SMTP"
+            _help_topic_header "SMTP (a notification channel)"
             echo ""
-            _help_cmd "cipi smtp configure"            "Configure email alerts"
-            _help_cmd "cipi smtp status"               "SMTP status"
-            _help_cmd "cipi smtp test"                 "Send test email"
-            _help_cmd "cipi smtp disable|enable|delete" "Toggle or remove"
-            _help_note "See also: cipi help notifications"
+            _help_cmd "cipi notification add smtp --host= --user= --password= --from= --to=" "Configure  ${DIM}[--port=587] [--tls=on|off] [--no-test]${NC}"
+            _help_cmd "cipi notification test|enable|disable|remove smtp" "Test, toggle, remove"
+            _help_cmd "cipi smtp configure|status|test|enable|disable|delete" "The same, as before 5.10.0  ${DIM}(status --json)${NC}"
+            _help_note "The configuration in /etc/cipi/smtp.json is the same one: nothing to redo. See: cipi help notification"
             echo ""
             ;;
 
-        notifications|notify|triggers)
+        notification|notifications|notify|triggers|channels)
             _help_topic_header "Notifications"
             echo ""
-            _help_cmd "cipi notifications list"        "List triggers"
-            _help_cmd "cipi notifications enable|disable <t>" "Toggle a trigger"
-            _help_cmd "cipi notifications enable-all|disable-all|reset" "Bulk toggle / reset"
-            _help_cmd "cipi notifications channel add <type> <id> --url=" "Slack, Discord, ntfy, Telegram, webhook"
-            _help_cmd "  telegram: --token=<bot-token> --chat-id=<id>" "Bot token from @BotFather"
-            _help_cmd "cipi notifications channel list|test|remove" "Manage channels"
-            _help_note "All triggers on by default; email needs SMTP, chat needs a channel"
-            _help_note "See also: cipi help smtp, cipi help monitor"
+            _help_cmd "cipi notification [--json]"          "Every channel (SMTP included) and how many triggers are on"
+            _help_cmd "cipi notification add <type> <id> …" "Add a channel"
+            _help_cmd "  smtp --host= --user= --password= --from= --to=" "Email through an SMTP server (one per server)"
+            _help_cmd "  resend <id> --api-key=re_… --from= --to=a,b"   "Email through the Resend API"
+            _help_cmd "  ses <id> --region= --access-key= --secret-key= --from= --to=" "Email through Amazon SES (API v2)"
+            _help_cmd "  slack|discord|mattermost|googlechat <id> --url=" "Incoming webhook of the chat"
+            _help_cmd "  telegram <id> --token=<bot-token> --chat-id=<id>" "Bot from @BotFather"
+            _help_cmd "  ntfy <id> --url=https://ntfy.sh/<topic> [--priority=]" "Push to a phone"
+            _help_cmd "  pushover <id> --token=<app> --user=<user key>"   "Push to a phone"
+            _help_cmd "  webhook <id> --url= [--secret=]"                 "JSON POST; with a secret, X-Cipi-Signature: sha256=…"
+            _help_cmd "cipi notification test <id>|all"     "Send a test"
+            _help_cmd "cipi notification enable|disable|remove <id>" "Toggle or remove a channel"
+            _help_cmd "cipi notification triggers"          "Which events notify  ${DIM}enable|disable <t> · enable-all · disable-all · reset${NC}"
+            _help_note "A secret left out of the command line is asked for on a terminal, not echoed. Secrets are kept in the vault."
+            _help_note "cipi notifications (the older name), its channel … subcommands and cipi smtp keep working."
+            _help_note "See also: cipi help monitor"
             echo ""
             ;;
 
@@ -1024,6 +1054,7 @@ show_help_all() {
     show_help_topic ssh
     show_help_topic ssl
     show_help_topic php
+    show_help_topic frankenphp
     show_help_topic package
     show_help_topic firewall
     show_help_topic ban
@@ -1036,7 +1067,7 @@ show_help_all() {
     show_help_topic yml
     show_help_topic nginx
     show_help_topic smtp
-    show_help_topic notifications
+    show_help_topic notification
     show_help_topic valkey
     show_help_topic reset
     show_help_topic completion
@@ -1151,6 +1182,7 @@ main() {
         node)       _maybe_cmd_help node "$@";       require_root; source "${CIPI_LIB}/node.sh";        node_command "$@" ;;
         ssl)        _maybe_cmd_help ssl "$@";        require_root; source "${CIPI_LIB}/ssl.sh";         ssl_command "$@" ;;
         php)        _maybe_cmd_help php "$@";        require_root; source "${CIPI_LIB}/php.sh";         php_command "$@" ;;
+        frankenphp|franken) _maybe_cmd_help frankenphp "$@"; require_root; source "${CIPI_LIB}/frankenphp.sh"; frankenphp_command "$@" ;;
         package|packages) _maybe_cmd_help package "$@"; require_root; source "${CIPI_LIB}/package.sh"; package_command "$@" ;;
         firewall)   _maybe_cmd_help firewall "$@";   require_root; source "${CIPI_LIB}/firewall.sh";    firewall_command "$@" ;;
         ban)        _maybe_cmd_help ban "$@";        require_root; source "${CIPI_LIB}/ban.sh";         ban_command "$@" ;;
@@ -1170,7 +1202,7 @@ main() {
         sync)       _maybe_cmd_help sync "$@";       require_root; source "${CIPI_LIB}/sync.sh";      sync_command "$@" ;;
         ssh)        _maybe_cmd_help ssh "$@";        require_root; source "${CIPI_LIB}/ssh.sh";       ssh_command "$@" ;;
         smtp)       _maybe_cmd_help smtp "$@";       require_root; source "${CIPI_LIB}/smtp.sh";      smtp_command "$@" ;;
-        notifications) _maybe_cmd_help notifications "$@"; require_root; source "${CIPI_LIB}/notifications.sh"; notifications_command "$@" ;;
+        notification|notifications) _maybe_cmd_help notification "$@"; require_root; source "${CIPI_LIB}/notifications.sh"; notifications_command "$@" ;;
         reset)      _maybe_cmd_help reset "$@";      require_root; source "${CIPI_LIB}/reset.sh";     reset_command "$@" ;;
         credentials|creds) _maybe_cmd_help credentials "$@"; require_root; source "${CIPI_LIB}/credentials.sh"; credentials_command "$@" ;;
         *) error "Unknown command: $cmd"; echo "Run 'cipi help'"; exit 1 ;;

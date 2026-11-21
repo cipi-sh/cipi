@@ -518,6 +518,30 @@ EOF
     chown www-data:adm /var/log/cipi-gui-fpm-slow.log /var/log/cipi-gui-php-error.log 2>/dev/null || true
 }
 
+# A panel vhost written before 5.10.0 includes snippets/fastcgi-php.conf,
+# which nginx.org's packages do not ship (#520): on a server moved to them
+# the next reload fails. The include becomes the line the vhost has now;
+# nginx -t, reload, and the previous file back if nginx refuses it.
+gui_vhost_drop_fastcgi_snippet() {   # [vhost]
+    local vh="${1:-/etc/nginx/sites-available/cipi-gui}" bak
+    if [[ ! -f "$vh" ]] || ! grep -qE '^[[:space:]]*include[[:space:]]+snippets/fastcgi-php\.conf;' "$vh"; then
+        echo "  panel vhost: nothing to do"
+        return 0
+    fi
+    bak=$(mktemp) || return 0
+    cp -p "$vh" "$bak"
+    sed -i -E 's|^([[:space:]]*)include[[:space:]]+snippets/fastcgi-php\.conf;|\1try_files $uri =404;|' "$vh"
+    if nginx -t >/dev/null 2>&1; then
+        systemctl reload nginx >/dev/null 2>&1 || true
+        echo "  ${vh}: snippets/fastcgi-php.conf replaced — nginx reloaded"
+    else
+        cp -p "$bak" "$vh"
+        echo "  WARNING: nginx -t refused the new ${vh} — the previous one is back. Check: nginx -t"
+    fi
+    rm -f "$bak"
+    return 0
+}
+
 _gui_create_nginx_vhost() {
     local domain="$1"
     cat > /etc/nginx/sites-available/cipi-gui <<EOF
@@ -534,7 +558,9 @@ server {
     }
 
     location ~ \\.php\$ {
-        include snippets/fastcgi-php.conf;
+        # Not snippets/fastcgi-php.conf: Ubuntu's nginx ships it, nginx.org's
+        # (Cipi's since 5.9.1) does not (#520). Same lines as the app vhosts.
+        try_files \$uri =404;
         fastcgi_pass unix:/run/php/cipi-gui.sock;
         fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
         fastcgi_param HTTP_X_FORWARDED_PROTO \$scheme;

@@ -12,6 +12,16 @@ _deploy_assert_php_compat() {
     [[ -z "$php_ver" ]] && return 0
     local dep_major; dep_major=$(deployer_major_version 2>/dev/null || echo "")
     [[ -z "$dep_major" ]] && return 0
+    # Deployer 6 (what deployer.org/deployer.phar serves, which setup.sh
+    # downloaded up to 5.9.1) has no deploy:publish: every deploy would stop
+    # at "Task `deploy:publish` not found" (#519).
+    if (( dep_major < 7 )); then
+        error "Deployer ${dep_major} is installed at /usr/local/bin/dep; Cipi's recipes need Deployer 8."
+        warn  "Update Cipi (cipi self-update installs it), or by hand:"
+        warn  "  source /opt/cipi/lib/deployer-install.sh && cipi_deployer_install"
+        log_action "DEPLOY BLOCKED: $app dep=${dep_major}"
+        exit 1
+    fi
     if (( dep_major >= 8 )) && ! validate_php_version "$php_ver"; then
         error "App '${app}' uses PHP ${php_ver}, but Deployer ${dep_major} requires PHP >= 8.3."
         warn  "Upgrade the app first:  cipi app edit ${app}   (set PHP to 8.3, 8.4, 8.5 or 8.6)"
@@ -275,6 +285,15 @@ _deploy_run() {
         # succeeded" while the site returns 500 would be worse than silence.
         _deploy_apply_yml "$app"
         _deploy_horizon_detect "$app" || true
+        # An Octane app deployed without a pinned FrankenPHP build: Octane
+        # downloaded one at start. Pin those bytes, so the next deploy links
+        # them instead of downloading whatever GitHub has then.
+        if [[ "$(app_get "$app" octane)" == "frankenphp" ]]; then
+            declare -f fphp_adopt >/dev/null 2>&1 || source "${CIPI_LIB}/frankenphp.sh"
+            local _fb=""
+            _fb=$(fphp_adopt "$app" 2>/dev/null) || _fb=""
+            [[ -n "$_fb" ]] && info "FrankenPHP: pinned the binary Octane downloaded (${_fb}) — later deploys link it (cipi frankenphp status)"
+        fi
         local post_line post_rc=0
         post_line=$(_deploy_run_post_deploy "$app") || post_rc=$?
         local health_line; health_line=$(_deploy_health_check "$app")

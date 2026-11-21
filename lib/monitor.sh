@@ -707,7 +707,7 @@ _mon_test() {
         "Cipi monitor test on $(hostname)" \
         "This is how a monitor alert looks.\n\nServer: $(hostname)\nCheck: test\nSeverity: warn\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         ""
-    success "Test sent — email needs 'cipi smtp configure', chat needs 'cipi notifications channel add …'"
+    success "Test sent — to every enabled channel (cipi notification; add one: cipi notification add <type> …)"
 }
 
 monitor_command() {

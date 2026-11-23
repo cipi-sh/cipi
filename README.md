@@ -96,7 +96,6 @@ Works on Hetzner, DigitalOcean, AWS, Vultr, Linode, OVHcloud, Scaleway, Google C
 ### [Read the docs](https://cipi.sh/docs) · [Browse the guides](https://cipi.sh/guides) · [Report a bug](https://github.com/cipi-sh/cipi/issues)
 
 Open source since 2019, MIT licensed. Made in Italy by [Andrea Pollastri](https://web.ap.it).<br>
-Running Cipi somewhere? **[Send us a postcard](https://cipi.sh/postcards)** and tell us where.<br>
 If Cipi saves you time, a ⭐ helps other people find it.
 
 </div>

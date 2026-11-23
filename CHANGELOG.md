@@ -4,6 +4,13 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.11.1] — 2026-11-23
+
+### Fixed
+
+- **"sudo: I'm sorry www-data. I'm afraid I can't do that" in the panel's Metrics tab.** The panel's sudoers whitelist is rewritten by migrations only; a 5.11.0 migration that did not finish — the first 5.11.0 build could wait up to 15 minutes on a busy apt, and an update stopped there never reached the sudoers step — left the panel without `cipi metrics …`. `lib/migrations/5.11.1.sh` runs the 5.11.0 steps again (all idempotent: sqlite3, collector and cron, sudoers, basic auth vhosts).
+- **self-update now refreshes the panel sudoers on every update**, after the migrations, validated with `visudo` (the previous file is kept when the new one does not validate): the whitelist always matches the installed cipi.
+
 ## [5.11.0] — 2026-11-23
 
 `cipi health` and `cipi monitor` say *that* something is wrong, and alert when it happens. Neither kept a past: the 5xx spike at 03:10, the app whose memory crept up for a week, last month's uptime. This release keeps one — on the server, in SQLite, with nothing listening on a port — and puts it in the panel with charts.

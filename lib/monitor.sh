@@ -446,6 +446,14 @@ _mon_apply_state() {
     [[ "$prev" == "ok" || "$prev" == "warn" || "$prev" == "crit" ]] || prev="ok"
     echo "$status" > "$state_file" 2>/dev/null || true
 
+    # The history of `cipi metrics events` (and of the panel's timeline): every
+    # change of state, alerting or not. A first run that finds the check ok is
+    # not a change.
+    if [[ "$status" != "$prev" ]]; then
+        declare -f metrics_event >/dev/null 2>&1 || source "${CIPI_LIB}/metrics.sh" 2>/dev/null || true
+        declare -f metrics_event >/dev/null 2>&1 && metrics_event monitor "$id" "$status" "$summary"
+    fi
+
     [[ "$do_alert" != "true" ]] && return 0
     declare -f cipi_notify &>/dev/null || return 0
 

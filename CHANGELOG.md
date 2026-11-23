@@ -4,6 +4,58 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.11.0] — 2026-11-23
+
+`cipi health` and `cipi monitor` say *that* something is wrong, and alert when it happens. Neither kept a past: the 5xx spike at 03:10, the app whose memory crept up for a week, last month's uptime. This release keeps one — on the server, in SQLite, with nothing listening on a port — and puts it in the panel with charts.
+
+It also answers a long-standing annoyance: an app behind basic auth could not receive Git webhooks or MCP calls through cipi/agent, because neither can send the site's password. The agent's routes now stay reachable, and only those.
+
+### Added
+
+- **`cipi metrics` — metrics and health history** (`lib/metrics.sh`). A collector, `/usr/local/bin/cipi-metrics`, runs every minute from `/etc/cron.d/cipi-metrics` as root (one run at a time, `flock`; niced). One pass reads:
+  - **host:** CPU busy % (from `/proc/stat`, since the previous run), load 1m, memory % and MB in use (`MemAvailable`), swap %, root filesystem %, network bytes/s in and out (every interface but `lo`).
+  - **per app:** CPU % of one core and resident memory of the app user's processes — CPU from the ticks each PID gained since the previous run, so a process that started in between counts in full and one that ended stops counting (`ps %cpu` is a lifetime average); PHP-FPM children and `pm.max_children`, and how many times the pool **hit `pm.max_children`** in that minute (counted in `/var/log/php*-fpm.log`) — the warning that usually goes unread; **requests and 5xx per minute** from the app's nginx access log (read from where the previous run stopped, by inode and offset, so logrotate is followed); queue worker programs running and configured (Supervisor).
+  - **healthcheck:** the URL of every app that has one (`cipi health set`) is probed every minute — status, expected or not, and response time — 8 apps at a time, 10 seconds each at most. `cipi metrics probe off` stops it (the 5-minute check of `cipi health` is not affected).
+- **Storage: SQLite in `/var/lib/cipi-metrics/metrics.db`** (root, `0600`; the directory is `root:www-data 0750` for the OpenMetrics file). "Wide" tables — one row per scope (host, `app:<name>`) and minute, one column per metric — because one row per metric per minute meant about 180 MB a week for ten apps:
+  - `samples` every minute, kept **7 days** (`raw_days`);
+  - `rollups` average and maximum per **15 minutes** (`resolution_minutes`), kept **30 days** (`rollup_days`), with the number of minutes behind each, so uptime over a month is weighted correctly;
+  - `events` kept **90 days** (`events_days`): every change of state of a `cipi monitor` check, healthcheck incidents (opened at the third failure in a row, the debounce of `cipi health`; closed at the first success, with how long it lasted), every release put live (`deploy`, with the post-deploy verdict) and heartbeat failures.
+  - About 2 MB per app per week of raw data and a third of that per month of rollups: 20–30 MB for ten apps on the defaults. The hourly prune gives freed pages back (`auto_vacuum = INCREMENTAL`).
+  - A metric a later version adds becomes a column of an existing database (`ALTER TABLE … ADD COLUMN`) the first time it is opened.
+- **Retention is configurable:** `cipi metrics retention [--raw=7d] [--rollup=30d] [--resolution=15m] [--events=90d]` (raw 1–90 days, rollups up to 400 and never shorter than raw, resolution 5/10/15/30/60 minutes, events 7–730 days). Kept in the vault as `metrics.json`; a value out of range in a hand-edited file falls back to the default instead of deleting everything. `cipi metrics prune` applies it now, `cipi metrics reset --yes` deletes the history.
+- **Reading it:**
+  - `cipi metrics` — the server now, and per app CPU, memory, requests, 5xx, healthcheck and uptime over 24 hours, with the last hour as a sparkline; the last events. `--json` is the one call a dashboard needs (latest values, a 5-minute trend over the last hour per app, uptime 24h/7d/30d, events, collector state).
+  - `cipi metrics show [--app=<app>] [--metrics=cpu,mem] [--range=24h|7d|30d] [--from= --to=] [--json]` — about 240 points whatever the range: within the raw retention from the minutes, beyond it from the rollups plus the minutes not rolled up yet. Without `--json`: min, average, max and a sparkline per metric.
+  - `cipi metrics uptime [<app>] [--range=30d] [--json]` — uptime %, minutes down, average response time, incidents, and uptime per day.
+  - `cipi metrics events [--app=] [--source=monitor|health|deploy|heartbeat] [--range=7d] [--json]`.
+  - `cipi metrics status [--json]` — collector, last run and how long it took, database size and rows, retention, heartbeat, OpenMetrics. `--json` never carries a secret: the heartbeat URL is reported down to its host, the OpenMetrics token as `token_set`.
+- **Heartbeat** — `cipi metrics heartbeat set <url> [--every=1]`, `off`, `test`, `status`. Every N minutes the collector calls the URL (healthchecks.io, Uptime Kuma's push monitor, Better Stack, Boogle, …). When the server is down, or the cron is, the calls stop and the receiver alerts: the one failure a server cannot report about itself. A failed call is recorded as an event, once, and once when calls work again.
+- **OpenMetrics endpoint, off by default** — `cipi metrics openmetrics on --allow=<IP or CIDR>[,…] [--port=9273]`, `off`, `token [--show]` (rotates), `status`. The collector writes the latest values in Prometheus text format every minute (`cipi_host_cpu_percent`, `cipi_app_requests_per_minute{app="…"}`, `cipi_app_healthcheck_up`, …); this serves them with nginx on their own port, behind an IP allowlist (required; `0.0.0.0/0` refused), a bearer token, and UFW rules for the listed addresses only. Plain HTTP: the command says so and points to a private network or a tunnel. Not reachable through the panel's API: it opens a port.
+- **`cipi basicauth agent <app> [public|protected|status]`** — see Changed.
+- `cipi help metrics`, tab-completion for `cipi metrics` and `cipi basicauth agent`.
+- **Panel API sudoers:** `cipi metrics overview|status|show|uptime|events|retention|probe|enable|disable|heartbeat *` and `cipi basicauth agent *`. Not `openmetrics` (a port and firewall rules), `prune` or `reset`. The routes that use them come with cipi/api 1.41.0 (`GET /api/metrics`, `/api/metrics/series`, `/api/metrics/uptime`, `/api/metrics/events`, `GET|PUT /api/metrics/settings`, `PUT|DELETE /api/metrics/heartbeat`, `POST /api/metrics/heartbeat/test`, `GET /api/apps/{name}/metrics`, and six MCP tools), and the charts with cipi/gui 4.3.0.
+
+### Changed
+
+- **Basic auth leaves cipi/agent out.** With `cipi basicauth enable`, every route of the app asked for the site's password, the agent's included — so a Git provider's push webhook got `401` and no deploy started, and an MCP client could not connect. Those routes authenticate themselves (`CIPI_WEBHOOK_TOKEN`, `CIPI_HEALTH_TOKEN`, `CIPI_MCP_TOKEN`, `CIPI_ANONYMIZER_TOKEN`, signed download URLs). Now, while basic auth is on and **the live release has `vendor/cipi/agent`**, the vhost gives the agent prefix — `CIPI_ROUTE_PREFIX` from `shared/.env`, `cipi` by default — a location of its own without `auth_basic`: `location ^~ /cipi/`, trailing slash included, so `/cipi-admin` or `/cipix` stay protected. PHP-FPM apps hand it to the pool as `/index.php` inside that location (`rewrite … break`: no second location lookup, so the protected `\.php$` location never applies); Octane apps proxy it to Octane.
+  - **Checked after every deploy** (`deploy_post_release_verify`, as root): a release that adds the agent, removes it or changes `CIPI_ROUTE_PREFIX` rewrites the vhost; one that changes nothing leaves it alone. The vhost carries a marker comment (`cipi-agent-public:/cipi/`) that the check reads.
+  - Not for custom or Node apps, not when a `cipi proxy` already owns that prefix, not for a prefix that is not plain path segments.
+  - `cipi basicauth agent <app> protected` keeps the agent behind basic auth (apps.json `basic_auth_agent`); `public` is the default. `cipi basicauth status` and `enable` say what is left out.
+- `cipi health set` points to the history (`cipi metrics uptime <app>`).
+- `cipi monitor` records every change of state of a check as an event, alerting or not.
+
+### Migration
+
+`lib/migrations/5.11.0.sh`: installs the `sqlite3` CLI when missing (apt; a server where apt cannot gets a warning and collects nothing until it is installed), the collector, its directory and cron; rewrites the panel's sudoers (validated with `visudo`, the previous file put back otherwise); and, for each app with basic auth whose live release has cipi/agent, rewrites its vhost once so that the agent's routes are left out — saying so per app, with the command that undoes it. Nginx is reloaded only when a vhost changed. Nothing else restarts.
+
+### Notes
+
+- It records; it does not page. Alerts stay with `cipi monitor` and `cipi health`, and go where `cipi notification` sends them.
+- The collector costs about 0.2 s of CPU a minute on a server with a few apps (it reads `/proc`, one `ps`, the new bytes of each access log, one `supervisorctl status`, one SQLite transaction).
+- CPU of an app is the app user's processes. PHP-FPM masters run as root and are not counted; FrankenPHP (Octane) and Node processes are the app user's and are.
+- Memory of an app is the sum of the resident sets of its processes: pages that PHP-FPM children share are counted once per child, so it is an upper bound.
+- Requests and 5xx come from the access log Cipi gives the app's vhost; a request nginx answers itself (a redirect of `cipi redirect`, a `cipi proxy`) is counted too.
+
 ## [5.10.0] — 2026-11-22
 
 An Octane app answers on the PHP built into its FrankenPHP binary, and until now that binary was nobody's: Laravel Octane downloads `releases/latest` of FrankenPHP into the project whenever it finds none there, `octane:install` puts `frankenphp` in `.gitignore`, and Deployer starts every release from a fresh checkout. So **every deploy of an Octane app downloaded whatever FrankenPHP GitHub had that minute** — a new PHP minor included, the day FrankenPHP's static builds move to it — and the deploy that did it could be a webhook at any hour. Nothing at night touched the binary; the deploys did. And the fix `cipi php upgrade` printed for a vulnerable build (`php artisan octane:install --server=frankenphp`, then a restart) did not work: `octane:install` keeps a binary that is already there.

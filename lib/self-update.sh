@@ -205,14 +205,7 @@ selfupdate_command() {
         # shellcheck source=/dev/null
         source "${tmp}/lib/cipi-api-sudoers.sh"
         if _cipi_panel_installed; then
-            local sprev=""
-            [[ -f /etc/sudoers.d/cipi-api ]] && sprev=$(mktemp 2>/dev/null) && cat /etc/sudoers.d/cipi-api > "$sprev" 2>/dev/null
-            write_cipi_api_sudoers 2>/dev/null || true
-            if command -v visudo >/dev/null 2>&1 && ! visudo -cqf /etc/sudoers.d/cipi-api >/dev/null 2>&1; then
-                if [[ -n "$sprev" ]]; then install -m 0440 "$sprev" /etc/sudoers.d/cipi-api 2>/dev/null || true; fi
-                warn "The panel sudoers did not validate — the previous one is kept (visudo -cf /etc/sudoers.d/cipi-api)"
-            fi
-            [[ -n "$sprev" ]] && rm -f "$sprev"
+            write_cipi_api_sudoers || warn "The panel sudoers were not updated (see above) — the previous ones are kept"
         fi
     fi
 

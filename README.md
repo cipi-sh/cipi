@@ -48,7 +48,7 @@ About 15 minutes from a fresh server to a live app with HTTPS. **[Follow the 15-
 
 <br>
 
-## Why people switch to Cipi
+## Why use Cipi
 
 |                                   |                                                                                                    |
 | --------------------------------- | -------------------------------------------------------------------------------------------------- |

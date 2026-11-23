@@ -98,6 +98,7 @@ monitor_services|monitor_workers|monitor_fs|monitor_disk|monitor_http_5xx)
 
 _alert_http_fail() {
     local id="$1" type="$2"
+    _ALERT_LAST_FAIL="${id}"
     log_event "ALERT CHANNEL FAIL: ${id} (${type})"
     return 0
 }
@@ -283,10 +284,59 @@ _alerts_add() {
     fi
     _alerts_ensure_config
     if vault_read alerts.json | jq -e --arg id "$id" '.channels[] | select(.id == $id)' >/dev/null; then
-        error "Channel '${id}' already exists — remove it first: cipi notification remove ${id}"
+        error "Channel '${id}' already exists — change it with: cipi notification update ${id} …"
         exit 1
     fi
 
+    _alerts_build_channel "$type" "$id"
+    vault_read alerts.json | jq --argjson ch "$_ALERT_CH" '.channels += [$ch]' | vault_write alerts.json
+    log_action "ALERT CHANNEL ADD: ${id} (${type})"
+    success "Channel '${id}' (${type}) added — every notification trigger now reaches it"
+    info "Test it with: cipi notification test ${id}"
+}
+
+# cipi notification update <id> [flags] — change a channel in place. Flags
+# left out keep their value, secrets included, so a form that never shows a
+# token back can still change the recipients. --clear-secret drops the
+# signing secret of a webhook. The type of a channel does not change.
+_alerts_update() {
+    local id="${1:-}"; shift || true
+    [[ -z "$id" ]] && { error "Usage: cipi notification update <id> [--url= --token= …]"; exit 1; }
+    parse_args "$@"
+    _alerts_ensure_config
+    local cur
+    cur=$(vault_read alerts.json | jq -c --arg id "$id" '.channels[] | select(.id == $id)')
+    [[ -z "$cur" ]] && { error "Channel '${id}' not found"; exit 1; }
+    local type enabled
+    type=$(jq -r '.type' <<<"$cur")
+    enabled=$(jq -r '.enabled != false' <<<"$cur")
+    [[ -n "${ARG_type:-}" && "${ARG_type}" != "$type" ]] && { error "The type of '${id}' is ${type}; remove it and add a new channel to change it"; exit 1; }
+
+    # Every value not given keeps the stored one.
+    local k v
+    for k in url priority secret token chat_id user api_key from region access_key secret_key; do
+        local var="ARG_${k}"
+        if [[ -z "${!var:-}" ]]; then
+            v=$(jq -r --arg k "$k" '.[$k] // empty' <<<"$cur")
+            [[ -n "$v" ]] && printf -v "$var" '%s' "$v"
+        fi
+    done
+    [[ -z "${ARG_to:-}" ]] && ARG_to=$(jq -r '(.to // []) | if type == "array" then join(",") else . end' <<<"$cur")
+    [[ "${ARG_clear_secret:-}" == true ]] && ARG_secret=""
+
+    _alerts_build_channel "$type" "$id"
+    local ch
+    ch=$(jq -c --argjson e "$enabled" '.enabled = $e' <<<"$_ALERT_CH")
+    vault_read alerts.json | jq --arg id "$id" --argjson ch "$ch" \
+        '.channels |= map(if .id == $id then $ch else . end)' | vault_write alerts.json
+    log_action "ALERT CHANNEL UPDATE: ${id} (${type})"
+    success "Channel '${id}' (${type}) updated"
+}
+
+# Validates the ARG_* of a channel of <type> and leaves it, as JSON, in
+# _ALERT_CH. Not in a subshell: a refused value exits the command.
+_alerts_build_channel() {
+    local type="$1" id="$2"
     local ch url="${ARG_url:-}" to_json
     case "$type" in
         telegram)
@@ -337,11 +387,7 @@ _alerts_add() {
                 '{id:$id, type:$type, url:$url, priority:$p, enabled:true} + (if $s == "" then {} else {secret:$s} end)')
             ;;
     esac
-
-    vault_read alerts.json | jq --argjson ch "$ch" '.channels += [$ch]' | vault_write alerts.json
-    log_action "ALERT CHANNEL ADD: ${id} (${type})"
-    success "Channel '${id}' (${type}) added — every notification trigger now reaches it"
-    info "Test it with: cipi notification test ${id}"
+    _ALERT_CH="$ch"
 }
 
 _alerts_remove() {
@@ -453,15 +499,24 @@ _alerts_test() {
     local ch
     ch=$(echo "$cfg" | jq -c --arg id "$id" '.channels[] | select(.id == $id)')
     [[ -z "$ch" ]] && { error "Channel '${id}' not found"; exit 1; }
+    # A test reaches a disabled channel too: that is how you try it before
+    # turning it on.
+    ch=$(jq -c '.enabled = true' <<<"$ch")
     step "Sending test alert to '${id}'..."
+    _ALERT_LAST_FAIL=""
     _alert_deliver_channel "$ch" "$subject" "$body" ""
-    success "Test sent to '${id}' — check the channel; failures are logged in /var/log/cipi/events.log"
+    if [[ -n "${_ALERT_LAST_FAIL}" ]]; then
+        error "Test to '${id}' failed — the service refused the request or did not answer in time"
+        exit 1
+    fi
+    success "Test sent to '${id}' — check the channel"
 }
 
 alerts_channel_command() {
     local sub="${1:-list}"; shift || true
     case "$sub" in
         add)            _alerts_add "$@" ;;
+        update|edit)    _alerts_update "$@" ;;
         remove|rm)      _alerts_remove "$@" ;;
         list|ls|"")     _alerts_list "$@" ;;
         test)           _alerts_test "${1:-}" ;;

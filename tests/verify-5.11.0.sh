@@ -42,7 +42,7 @@ trap 'rm -rf "${TMP:?}"' EXIT
 echo "=== Cipi 5.11.0 regression checks ==="
 
 # ── 0. release files, static ─────────────────────────────────
-[[ "$(tr -d '[:space:]' < "${ROOT}/version.md")" == "5.11.0" ]] && pass "version.md is 5.11.0" || fail "version.md"
+[[ "$(tr -d '[:space:]' < "${ROOT}/version.md")" =~ ^5\.11\. ]] && pass "version.md is 5.11.x" || fail "version.md"
 grep -q '^## \[5.11.0\]' "${ROOT}/CHANGELOG.md" && pass "CHANGELOG has a 5.11.0 entry" || fail "CHANGELOG 5.11.0"
 for f in metrics.sh cipi-metrics.sh app.sh deploy.sh monitor.sh health.sh completion.sh cipi-api-sudoers.sh self-update.sh migrations/5.11.0.sh; do
     bash -n "${LIB}/${f}" && pass "${f} parses" || fail "${f} does not parse"

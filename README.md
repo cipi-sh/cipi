@@ -58,6 +58,7 @@ About 15 minutes from a fresh server to a live app with HTTPS. **[Follow the 15-
 | **Settings live in your repo**    | One [`cipi.yml`](https://cipi.sh/cipi-yml) for workers, cron, domains, redirects and backups.      |
 | **The whole Laravel stack**       | PHP 8.3 to 8.6, Octane, Horizon, Reverb, Scout with Meilisearch, MariaDB or PostgreSQL, Node frontends. |
 | **Backups and alerts built in**   | Encrypted backups to any S3 bucket; alerts on Slack, Telegram, email, Discord and more.             |
+| **Metrics with a memory**         | CPU, memory, requests, 5xx and uptime per app, kept 7 days by the minute and 30 days in [rollups](https://cipi.sh/docs/metrics), with charts in the GUI. A heartbeat for the day the server itself goes quiet, OpenMetrics for your Prometheus. |
 | **Ready for audits and GDPR**     | [`cipi compliance report`](https://cipi.sh/docs/compliance) collects evidence mapped to ISO 27001 and SOC 2, with a tamper-evident deploy log. GDPR-friendly log retention and [anonymized database dumps](https://cipi.sh/docs/anonymizer). |
 | **Move servers without drama**    | [`cipi sync`](https://cipi.sh/guides/migrate-server-cipi-sync) copies one app or a whole server to another Cipi box, encrypted in transit. |
 | **AI agent ready**                | An [MCP server](https://cipi.sh/mcp) lets Claude or Cursor read logs and deploy, with limits you set. |

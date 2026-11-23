@@ -2840,6 +2840,16 @@ EOF
 "
     fi
 
+    # cipi/agent behind basic auth (5.11.0): its routes (/cipi/webhook,
+    # /cipi/health, /cipi/mcp, /cipi/db…) answer with their own bearer tokens
+    # and signed URLs, and a Git provider or an MCP client cannot send the
+    # site's basic auth. So when the live release has the agent, its prefix gets
+    # a location of its own without auth_basic — and only that prefix.
+    local agent_prefix=""
+    if [[ -n "$auth_block" ]]; then
+        agent_prefix=$(_basicauth_agent_prefix "$app" 2>/dev/null || true)
+    fi
+
     # Path redirects and prefix proxies (cipi redirect add / cipi proxy add).
     local route_blocks="" redirect_blocks proxy_blocks
     redirect_blocks=$(_nginx_redirect_location_blocks "$app")
@@ -2949,6 +2959,17 @@ EOF
     reverb_block=$(_nginx_reverb_location_block "$app")
     cipi_yml_deny=$(_nginx_cipi_yml_deny_block)
 
+    # $(…) drops the trailing newline the next location needs.
+    local agent_block=""
+    if [[ -n "$agent_prefix" ]]; then
+        if [[ -n "$octane_server" && -n "$octane_port" ]]; then
+            agent_block=$(_basicauth_agent_location "$app" "$agent_prefix" octane "$octane_port")
+        else
+            agent_block=$(_basicauth_agent_location "$app" "$agent_prefix" fpm)
+        fi
+        agent_block+=$'\n'
+    fi
+
     if [[ "$vhost_type" == "custom" ]]; then
         cat > "/etc/nginx/sites-available/${app}" <<EOF
 ${www_redirect_block}server {
@@ -2994,7 +3015,7 @@ ${www_redirect_block}server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     client_max_body_size 256M;
-${reverb_block}${route_blocks}    location /index.php {
+${agent_block}${reverb_block}${route_blocks}    location /index.php {
 ${auth_block}        try_files /not_exists @octane;
     }
     location / {
@@ -3037,7 +3058,7 @@ ${www_redirect_block}server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     client_max_body_size 256M;
-${reverb_block}${route_blocks}    location / {
+${agent_block}${reverb_block}${route_blocks}    location / {
 ${auth_block}        try_files \$uri \$uri/ /index.php?\$query_string;
     }
     location ~ \.php$ {
@@ -3626,6 +3647,11 @@ basicauth_enable() {
     _create_nginx_vhost "$app" "$(app_get "$app" domain)" "$(app_get "$app" php)"
     _nginx_reapply_ssl "$app"
     success "Basic auth enabled"
+    local agent_p; agent_p=$(_basicauth_agent_in_vhost "$app")
+    if [[ -n "$agent_p" ]]; then
+        info "cipi/agent is installed: /${agent_p}/ stays reachable without basic auth (webhook, health, MCP check their own tokens)."
+        info "To protect it too: cipi basicauth agent ${app} protected"
+    fi
 
     log_action "BASICAUTH ENABLED: $app user=$user"
     cipi_notify \
@@ -3689,7 +3715,150 @@ basicauth_status() {
     if [[ -f "$file" ]]; then
         printf "  %-10s ${CYAN}%s${NC}\n" "Users" "$(cut -d: -f1 "$file" | paste -sd, -)"
     fi
+    local agent_p; agent_p=$(_basicauth_agent_in_vhost "$app")
+    if [[ -n "$agent_p" ]]; then
+        printf "  %-10s %s\n" "Agent" "/${agent_p}/ left out — cipi/agent checks its own tokens"
+    elif [[ "$(app_get "$app" basic_auth_agent)" == "protected" ]]; then
+        printf "  %-10s %s\n" "Agent" "behind basic auth (cipi basicauth agent ${app} public)"
+    fi
     echo ""
+}
+
+# ── cipi/agent behind basic auth (5.11.0) ─────────────────────
+#
+# The agent's routes authenticate themselves (CIPI_WEBHOOK_TOKEN,
+# CIPI_HEALTH_TOKEN, CIPI_MCP_TOKEN, CIPI_ANONYMIZER_TOKEN, signed download
+# URLs), and the clients that call them — a Git provider's webhook, an MCP
+# client, the panel — have no way to add the site's basic auth. So while basic
+# auth is on and the live release has cipi/agent, the agent prefix
+# (CIPI_ROUTE_PREFIX, default "cipi") is left out of it. Nothing else is:
+# /cipi-other or /cipix stay behind basic auth (the location is
+# "^~ /<prefix>/", trailing slash included).
+#
+# apps.json basic_auth_agent: "protected" keeps the agent behind basic auth
+# too (cipi basicauth agent <app> protected). Default: public.
+
+# The prefix to leave out, or nothing (exit 1) when there is none: no agent in
+# the live release, the app keeps it protected, not a PHP app, or a proxy
+# already owns that prefix.
+_basicauth_agent_prefix() {
+    local app="$1" home="/home/${1}" prefix
+    [[ "$(app_get "$app" basic_auth_agent)" == "protected" ]] && return 1
+    [[ "$(app_get "$app" custom)" == "true" || "$(app_get "$app" runtime)" == "node" ]] && return 1
+    [[ -f "${home}/current/vendor/cipi/agent/composer.json" ]] || return 1
+    prefix=$(grep -E '^[[:space:]]*CIPI_ROUTE_PREFIX[[:space:]]*=' "${home}/shared/.env" 2>/dev/null | tail -1 | cut -d= -f2- \
+        | tr -d "[:space:]\"'")
+    prefix="${prefix#/}"; prefix="${prefix%/}"
+    [[ -n "$prefix" ]] || prefix="cipi"
+    # Letters, digits, - and _ in /-separated segments only: it goes into the vhost.
+    [[ "$prefix" =~ ^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$ && ${#prefix} -le 64 ]] || return 1
+    if vault_read apps.json 2>/dev/null | jq -e --arg a "$app" --arg p "/${prefix}/" \
+        '(.[$a].proxies // []) | any(.prefix == $p)' >/dev/null 2>&1; then
+        return 1
+    fi
+    echo "$prefix"
+}
+
+# The location block, or nothing when there is no prefix. fpm: the request is
+# handed to the pool as /index.php inside this location (rewrite … break: no
+# second location lookup, so the auth_basic of another location never
+# applies); REQUEST_URI keeps the original path, which Laravel routes on.
+_basicauth_agent_location() {   # <app> <prefix> fpm|octane [port]
+    local app="$1" prefix="$2" kind="$3" port="${4:-}"
+    [[ -n "$prefix" ]] || return 0
+    if [[ "$kind" == octane ]]; then
+        cat <<EOF
+    # cipi-agent-public:/${prefix}/ — cipi/agent authenticates its own routes (cipi basicauth agent ${app})
+    location ^~ /${prefix}/ {
+        auth_basic off;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$http_host;
+        proxy_set_header Scheme \$scheme;
+        proxy_set_header SERVER_PORT \$server_port;
+        proxy_set_header REMOTE_ADDR \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_pass http://127.0.0.1:${port};
+        proxy_read_timeout 300;
+    }
+EOF
+    else
+        cat <<EOF
+    # cipi-agent-public:/${prefix}/ — cipi/agent authenticates its own routes (cipi basicauth agent ${app})
+    location ^~ /${prefix}/ {
+        auth_basic off;
+        rewrite ^ /index.php break;
+        fastcgi_pass unix:/run/php/${app}.sock;
+        fastcgi_param SCRIPT_FILENAME \$realpath_root/index.php;
+        include fastcgi_params;
+        fastcgi_hide_header X-Powered-By;
+        fastcgi_read_timeout 300;
+    }
+EOF
+    fi
+}
+
+# The prefix the vhost leaves public now (from its marker comment), or nothing.
+_basicauth_agent_in_vhost() {
+    grep -o 'cipi-agent-public:/[^ ]*/' "/etc/nginx/sites-available/${1}" 2>/dev/null | head -1 | sed 's|^cipi-agent-public:/||; s|/$||'
+}
+
+# Rewrite the vhost when what it leaves public is not what it should. Run as
+# root after every deploy (deploy_post_release_verify): a release can add the
+# agent, remove it or change CIPI_ROUTE_PREFIX. Quiet when already in step.
+basicauth_agent_sync() {
+    local app="$1" want="" have
+    have=$(_basicauth_agent_in_vhost "$app")
+    [[ "$(app_get "$app" basic_auth)" == "true" || -n "$have" ]] || return 0
+    [[ "$(app_get "$app" suspended)" == "true" ]] && return 0
+    [[ "$(app_get "$app" basic_auth)" == "true" ]] && want=$(_basicauth_agent_prefix "$app" 2>/dev/null || true)
+    [[ "$want" == "$have" ]] && return 0
+    _create_nginx_vhost "$app" "$(app_get "$app" domain)" "$(app_get "$app" php)" || return 1
+    if reload_nginx >/dev/null 2>&1; then
+        if [[ -n "$want" ]]; then
+            info "Basic auth: /${want}/ (cipi/agent) is reachable without it — the agent checks its own tokens"
+        else
+            info "Basic auth: the cipi/agent routes are behind basic auth again"
+        fi
+        log_action "BASICAUTH AGENT SYNC: ${app} public=${want:-none}"
+    fi
+    return 0
+}
+
+basicauth_agent() {
+    local app="${1:-}" mode="${2:-status}"
+    [[ -z "$app" ]] && { error "Usage: cipi basicauth agent <app> [public|protected|status]"; exit 1; }
+    app_exists "$app" || { error "App '$app' not found"; exit 1; }
+    local p
+    case "$mode" in
+        status)
+            p=$(_basicauth_agent_in_vhost "$app")
+            if [[ -n "$p" ]]; then
+                echo "cipi/agent routes (/${p}/): public — the agent checks its own tokens"
+            elif [[ "$(app_get "$app" basic_auth_agent)" == "protected" ]]; then
+                echo "cipi/agent routes: behind basic auth (cipi basicauth agent ${app} public to change)"
+            else
+                echo "cipi/agent routes: nothing left out (basic auth off, or no cipi/agent in the live release)"
+            fi ;;
+        public|protected)
+            if [[ "$mode" == public ]]; then app_unset "$app" basic_auth_agent; else app_set "$app" basic_auth_agent protected; fi
+            if [[ "$(app_get "$app" basic_auth)" == "true" ]]; then
+                _create_nginx_vhost "$app" "$(app_get "$app" domain)" "$(app_get "$app" php)"
+                _nginx_reapply_ssl "$app"
+            fi
+            log_action "BASICAUTH AGENT: ${app} ${mode}"
+            if [[ "$mode" == public ]]; then
+                p=$(_basicauth_agent_in_vhost "$app")
+                if [[ -n "$p" ]]; then
+                    success "cipi/agent routes (/${p}/) left out of basic auth"
+                else
+                    success "cipi/agent routes will be left out of basic auth when it is on and the live release has cipi/agent"
+                fi
+            else
+                success "cipi/agent routes stay behind basic auth — Git webhooks and MCP clients will get 401"
+            fi ;;
+        *) error "Usage: cipi basicauth agent <app> [public|protected|status]"; exit 1 ;;
+    esac
 }
 
 basicauth_command() {
@@ -3698,7 +3867,8 @@ basicauth_command() {
         enable)  basicauth_enable "$@" ;;
         disable) basicauth_disable "$@" ;;
         status)  basicauth_status "$@" ;;
-        *) error "Unknown: $sub"; echo "Use: enable disable status"; exit 1 ;;
+        agent)   basicauth_agent "$@" ;;
+        *) error "Unknown: $sub"; echo "Use: enable disable status agent"; exit 1 ;;
     esac
 }
 

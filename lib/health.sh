@@ -96,6 +96,7 @@ _health_set() {
     else
         info "Checked every 5 minutes, and right after every deploy."
     fi
+    info "History (status and response time every minute): cipi metrics uptime ${app}"
     if [[ "$(app_get "$app" health_rollback)" == "true" ]]; then
         warn "Auto-rollback is ON: an unhealthy release is rolled back automatically."
         warn "Database migrations are NOT undone — only the code symlink moves."

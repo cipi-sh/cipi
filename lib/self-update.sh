@@ -125,6 +125,7 @@ selfupdate_command() {
     # Refresh unconditionally: _mon_ensure_cron only installs the helper when it
     # is missing, so without this the 5.3.0 copy would never be updated again.
     [[ -f "${tmp}/lib/cipi-monitor.sh" ]] && cp "${tmp}/lib/cipi-monitor.sh" /usr/local/bin/cipi-monitor && chmod 755 /usr/local/bin/cipi-monitor
+    [[ -f "${tmp}/lib/cipi-metrics.sh" ]] && cp "${tmp}/lib/cipi-metrics.sh" /usr/local/bin/cipi-metrics && chmod 755 /usr/local/bin/cipi-metrics
     [[ -f "${tmp}/lib/cipi-scan-manifest.sh" ]] && cp "${tmp}/lib/cipi-scan-manifest.sh" /usr/local/bin/cipi-scan-manifest && chmod 755 /usr/local/bin/cipi-scan-manifest
     [[ -f "${tmp}/lib/cipi-crowdsec-rescue.py" ]] && cp "${tmp}/lib/cipi-crowdsec-rescue.py" /usr/local/bin/cipi-crowdsec-rescue && chmod 700 /usr/local/bin/cipi-crowdsec-rescue
     [[ -f "${tmp}/lib/cipi-crowdsec-rescue-hole.sh" ]] && cp "${tmp}/lib/cipi-crowdsec-rescue-hole.sh" /usr/local/bin/cipi-crowdsec-rescue-hole && chmod 700 /usr/local/bin/cipi-crowdsec-rescue-hole

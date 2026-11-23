@@ -65,7 +65,17 @@ About 15 minutes from a fresh server to a live app with HTTPS. **[Follow the 15-
 
 ## Coming from somewhere else?
 
-Honest comparisons with real migration steps: [Laravel Forge](https://cipi.sh/alternative-to-laravel-forge) · [Ploi](https://cipi.sh/alternative-to-ploi) · [Laravel Cloud](https://cipi.sh/alternative-to-laravel-cloud) · [Coolify](https://cipi.sh/alternative-to-coolify) · [cPanel](https://cipi.sh/alternative-to-cpanel) · [all comparisons](https://cipi.sh/alternatives)
+Every comparison is honest about when the other tool is the better pick, and ends with a step-by-step move to Cipi.
+
+| Coming from | What changes with Cipi | |
+| --- | --- | --- |
+| **Laravel Forge** | Same Laravel workflow, run from inside your server. No account fee, settings in Git. | [Compare and migrate](https://cipi.sh/alternative-to-laravel-forge) |
+| **Ploi** | Zero-downtime deploys, queues, SSL and backups, without paying per server. | [Compare and migrate](https://cipi.sh/alternative-to-ploi) |
+| **Laravel Cloud** | A fixed VPS bill instead of plans plus usage, with root access and nothing to lock you in. | [Compare and migrate](https://cipi.sh/alternative-to-laravel-cloud) |
+| **Coolify** | No containers for PHP: Laravel runs natively, with workers, Horizon, Reverb and Octane built in. | [Compare and migrate](https://cipi.sh/alternative-to-coolify) |
+| **cPanel / Plesk** | Your own apps only, isolated and deployed from Git, without the mail, DNS and reseller weight. | [cPanel](https://cipi.sh/alternative-to-cpanel) · [Plesk](https://cipi.sh/alternative-to-plesk) |
+
+<sub>Also compared: RunCloud, ServerPilot, CloudPanel, Kamal, Dokku, Vito Deploy and more, in <a href="https://cipi.sh/alternatives">all comparisons</a>.</sub>
 
 <br>
 

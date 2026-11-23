@@ -55,8 +55,8 @@ _cipi_complete() {
         words=("${COMP_WORDS[@]}"); cword=$COMP_CWORD
     fi
 
-    local commands="status disk version self-update pending autoupdate reboot valkey service app use node alias domains www redirect proxy auth basicauth deploy worker schedule health monitor db search ssl php frankenphp package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh notification smtp reset credentials completion help"
-    local topics="app use node domains www redirect proxy deploy worker schedule health monitor db search service ssl php frankenphp package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui notification smtp reset credentials server updates valkey completion all"
+    local commands="status disk version self-update pending autoupdate reboot valkey service app use node alias domains www redirect proxy auth basicauth deploy worker schedule health monitor metrics db search ssl php frankenphp package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh notification smtp reset credentials completion help"
+    local topics="app use node domains www redirect proxy deploy worker schedule health monitor metrics db search service ssl php frankenphp package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui notification smtp reset credentials server updates valkey completion all"
 
     # skip a leading path/wrapper (e.g. `sudo cipi`, `/usr/local/bin/cipi`)
     local start=1 j
@@ -202,8 +202,29 @@ _cipi_complete() {
 
         basicauth)
             case $pos in
-                1) sub="enable disable status" ;;
+                1) sub="enable disable status agent" ;;
                 2) sub="$(_cipi_apps)" ;;
+                3) [[ "$w1" == "agent" ]] && sub="public protected status" ;;
+            esac ;;
+
+        metrics)
+            case $pos in
+                1) sub="overview status show uptime events enable disable retention probe heartbeat openmetrics prune reset --json" ;;
+                2) case "$w1" in
+                       uptime)      sub="$(_cipi_apps) --range= --json" ;;
+                       show)        sub="--app= --metrics= --range= --from= --to= --json" ;;
+                       events)      sub="--app= --source= --range= --limit= --json" ;;
+                       retention)   sub="--raw= --rollup= --resolution= --events= --json" ;;
+                       probe)       sub="on off status" ;;
+                       heartbeat)   sub="status set off test" ;;
+                       openmetrics) sub="status on off token" ;;
+                       reset)       sub="--yes" ;;
+                   esac ;;
+                *) case "$w1" in
+                       heartbeat)   sub="--every= --json" ;;
+                       openmetrics) sub="--allow= --port= --show --json" ;;
+                       show)        sub="--app= --metrics= --range= --json" ;;
+                   esac ;;
             esac ;;
 
         deploy)

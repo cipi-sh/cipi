@@ -65,7 +65,7 @@ _help_topic_header() {
 
 _help_topics_list() {
     cat <<'EOF'
-app  use  node  domains  www  redirect  proxy  deploy  worker  schedule  health  monitor  db  search  service  ssl
+app  use  node  domains  www  redirect  proxy  deploy  worker  schedule  health  monitor  metrics  db  search  service  ssl
 php  frankenphp  package  auth  basicauth  ssh  firewall  ban  crowdsec  zt  scan  compliance  backup  sync
 git  ini  yml  nginx  api  gui  notification  smtp  reset  credentials  server  updates  valkey  completion
 EOF
@@ -107,6 +107,7 @@ show_help() {
     _help_cmd "cipi schedule ..."          "Laravel scheduler on/off"
     _help_cmd "cipi health ..."            "HTTP healthchecks, incl. post-deploy"
     _help_cmd "cipi monitor ..."           "Server checks: disk, app disk limits, ssl, services, workers, 5xx"
+    _help_cmd "cipi metrics ..."           "History: CPU, memory, requests, 5xx, uptime; heartbeat; OpenMetrics"
     _help_cmd "cipi db ..."                "Databases"
     _help_cmd "cipi search ..."            "Meilisearch for Scout (opt-in)  ${DIM}install|enable${NC}"
     echo ""
@@ -350,6 +351,12 @@ show_help_topic() {
             _help_cmd "cipi basicauth enable <app>"    "Protect app  ${DIM}[--user=N] [--password=P]${NC}"
             _help_cmd "cipi basicauth disable <app>"   "Remove HTTP basic auth"
             _help_cmd "cipi basicauth status <app>"    "Show basic auth status"
+            _help_cmd "cipi basicauth agent <app> [public|protected]" "cipi/agent routes behind basic auth or not"
+            echo ""
+            _help_note "With cipi/agent in the live release, its routes (/cipi/ or CIPI_ROUTE_PREFIX)"
+            _help_note "stay reachable without basic auth: webhook, health, MCP and the anonymizer"
+            _help_note "check their own tokens, and a Git provider cannot send the site's password."
+            _help_note "Checked again after every deploy. 'protected' keeps them behind it too."
             echo ""
             ;;
 
@@ -447,6 +454,31 @@ show_help_topic() {
             _help_note "It moves the release symlink back and re-checks, then sends one email"
             _help_note "saying what broke and whether the rollback fixed it. Database migrations"
             _help_note "are NOT undone — which is why this is off by default."
+            echo ""
+            ;;
+
+        metrics)
+            _help_topic_header "Metrics & health history"
+            echo ""
+            _help_cmd "cipi metrics"                    "Server and apps now, last-hour trend, uptime 24h  ${DIM}[--json]${NC}"
+            _help_cmd "cipi metrics show"               "A metric over time  ${DIM}[--app=] [--metrics=cpu,mem] [--range=24h|7d|30d] [--json]${NC}"
+            _help_cmd "cipi metrics uptime [<app>]"     "Healthcheck uptime, downtime, incidents, per day  ${DIM}[--range=30d] [--json]${NC}"
+            _help_cmd "cipi metrics events"             "Monitor, health, deploy and heartbeat transitions  ${DIM}[--app=] [--source=] [--range=7d]${NC}"
+            _help_cmd "cipi metrics status"             "Collector, database size, retention, heartbeat, OpenMetrics  ${DIM}[--json]${NC}"
+            _help_cmd "cipi metrics retention"          "History kept  ${DIM}[--raw=7d] [--rollup=30d] [--resolution=15m] [--events=90d]${NC}"
+            _help_cmd "cipi metrics probe on|off"       "Probe each app's healthcheck URL every minute (default on)"
+            _help_cmd "cipi metrics heartbeat set <url>" "Call a URL every N minutes: alerts elsewhere when the server stops  ${DIM}[--every=1]${NC}"
+            _help_cmd "cipi metrics heartbeat off|test" "Stop it, or call it once now"
+            _help_cmd "cipi metrics openmetrics on --allow=IP" "/metrics for your Prometheus  ${DIM}[--port=9273] · off · token${NC}"
+            _help_cmd "cipi metrics enable|disable"     "Collector on/off (the history is kept)"
+            _help_cmd "cipi metrics prune | reset --yes" "Apply the retention now | delete the history"
+            echo ""
+            _help_note "Every minute (/etc/cron.d/cipi-metrics): host CPU, memory, swap, disk, load,"
+            _help_note "network; per app CPU, memory, PHP-FPM children and max_children hits,"
+            _help_note "requests and 5xx per minute, queue workers, healthcheck status and time."
+            _help_note "SQLite in /var/lib/cipi-metrics: raw minutes 7 days, 15-minute rollups"
+            _help_note "30 days, events 90 days by default. It records; alerts stay with"
+            _help_note "cipi monitor and cipi health. Nothing listens on a port unless openmetrics is on."
             echo ""
             ;;
 
@@ -1044,6 +1076,7 @@ show_help_all() {
     show_help_topic schedule
     show_help_topic health
     show_help_topic monitor
+    show_help_topic metrics
     show_help_topic db
     show_help_topic search
     show_help_topic node
@@ -1177,6 +1210,7 @@ main() {
         schedule)   _maybe_cmd_help schedule "$@";   require_root; source "${CIPI_LIB}/app.sh";         schedule_command "$@" ;;
         health)     _maybe_cmd_help health "$@";     require_root; source "${CIPI_LIB}/health.sh";      health_command "$@" ;;
         monitor)    _maybe_cmd_help monitor "$@";    require_root; source "${CIPI_LIB}/monitor.sh";     monitor_command "$@" ;;
+        metrics)    _maybe_cmd_help metrics "$@";    require_root; source "${CIPI_LIB}/metrics.sh";     metrics_command "$@" ;;
         db)         _maybe_cmd_help db "$@";         require_root; source "${CIPI_LIB}/db.sh";          db_command "$@" ;;
         search)     _maybe_cmd_help search "$@";     require_root; source "${CIPI_LIB}/search.sh";      search_command "$@" ;;
         node)       _maybe_cmd_help node "$@";       require_root; source "${CIPI_LIB}/node.sh";        node_command "$@" ;;

@@ -70,6 +70,7 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi basicauth enable *, \
                                /usr/local/bin/cipi basicauth disable *, \
                                /usr/local/bin/cipi basicauth status *, \
+                               /usr/local/bin/cipi basicauth agent *, \
                                /usr/local/bin/cipi deploy *, \
                                /usr/local/bin/cipi worker horizon *, \
                                /usr/local/bin/cipi schedule *, \
@@ -163,6 +164,16 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi zt status *, \
                                /usr/local/bin/cipi monitor list, \
                                /usr/local/bin/cipi monitor list *, \
+                               /usr/local/bin/cipi metrics overview *, \
+                               /usr/local/bin/cipi metrics status *, \
+                               /usr/local/bin/cipi metrics show *, \
+                               /usr/local/bin/cipi metrics uptime *, \
+                               /usr/local/bin/cipi metrics events *, \
+                               /usr/local/bin/cipi metrics retention *, \
+                               /usr/local/bin/cipi metrics probe *, \
+                               /usr/local/bin/cipi metrics enable, \
+                               /usr/local/bin/cipi metrics disable, \
+                               /usr/local/bin/cipi metrics heartbeat *, \
                                /usr/local/bin/cipi disk, \
                                /usr/local/bin/cipi disk *, \
                                /usr/local/bin/cipi yml plan *, \

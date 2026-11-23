@@ -445,6 +445,31 @@ deploy_post_release_verify() {
     local app="$1" context="${2:-deploy}"
     declare -f health_post_deploy >/dev/null 2>&1 || source "${CIPI_LIB}/health.sh"
 
+    # Behind basic auth, the routes of cipi/agent stay public when the release
+    # has the agent (5.11.0): a release that adds or removes it rewrites the vhost.
+    declare -f basicauth_agent_sync >/dev/null 2>&1 || source "${CIPI_LIB}/app.sh" 2>/dev/null || true
+    declare -f basicauth_agent_sync >/dev/null 2>&1 && { basicauth_agent_sync "$app" || true; }
+
+    local rc=0
+    _deploy_post_release_verify_inner "$app" "$context" || rc=$?
+    _deploy_metrics_event "$app" "$context" "$rc"
+    return $rc
+}
+
+# One event per release put live, for `cipi metrics events` and the deploy
+# markers on the panel's charts. Never fails the deploy.
+_deploy_metrics_event() {
+    local app="$1" context="$2" rc="$3" status=ok release=""
+    declare -f metrics_event >/dev/null 2>&1 || source "${CIPI_LIB}/metrics.sh" 2>/dev/null || return 0
+    declare -f deploy_current_release >/dev/null 2>&1 && release=$(deploy_current_release "$app" 2>/dev/null || true)
+    [[ "$rc" == 1 ]] && status=crit
+    metrics_event deploy "$app" "$status" "${context}${release:+ — release ${release}}${DEPLOY_VERIFY_SUMMARY:+ — healthcheck ${DEPLOY_VERIFY_SUMMARY}}"
+    return 0
+}
+
+_deploy_post_release_verify_inner() {
+    local app="$1" context="${2:-deploy}"
+
     local want_rollback=false
     [[ "$(app_get "$app" health_rollback)" == "true" ]] && want_rollback=true
     [[ "${ARG_rollback_on_unhealthy:-}" == "true" ]] && want_rollback=true

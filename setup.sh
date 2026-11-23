@@ -206,7 +206,7 @@ install_basics() {
         zip unzip openssl expect apt-transport-https \
         ca-certificates gnupg lsb-release jq bc acl \
         logrotate cron htop ncdu bash-completion \
-        unattended-upgrades apt-listchanges
+        unattended-upgrades apt-listchanges sqlite3
 
     echo -e "${GREEN}✓ Base packages${NC}"
 }
@@ -254,13 +254,13 @@ EOF
     # MOTD
     cat > /etc/motd <<'EOF'
 
- ██████ ██ ██████  ██
-██      ██ ██   ██ ██
-██      ██ ██████  ██
-██      ██ ██      ██
- ██████ ██ ██      ██
+████ ████    ██████ ██ ██████  ██
+████ █>_█   ██      ██ ██   ██ ██
+            ██      ██ ██████  ██
+████ ████   ██      ██ ██      ██
+████ ████    ██████ ██ ██      ██
 
-Easy Laravel Deployments
+Ship Laravel. Own the server.
 
 EOF
 
@@ -1368,10 +1368,23 @@ EOF
         chmod 644 /etc/cron.d/cipi-monitor
     fi
 
+    # Metrics & health history (5.11.0): every minute, SQLite, nothing listening.
+    # `cipi metrics disable` stops it; the retention is `cipi metrics retention`.
+    cp cipi-install/lib/cipi-metrics.sh /usr/local/bin/cipi-metrics
+    chmod 755 /usr/local/bin/cipi-metrics
+    install -d -m 750 -o root -g www-data /var/lib/cipi-metrics
+    if [ ! -f /etc/cron.d/cipi-metrics ]; then
+        cat > /etc/cron.d/cipi-metrics <<'EOF'
+# Cipi metrics & health history (every minute) — cipi metrics
+* * * * * root /usr/local/bin/cipi-metrics >/dev/null 2>&1
+EOF
+        chmod 644 /etc/cron.d/cipi-metrics
+    fi
+
     # Templates (if any)
     cp cipi-install/templates/* /opt/cipi/templates/ 2>/dev/null || true
 
-    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /usr/local/bin/cipi-auth-notify /usr/local/bin/cipi-app-notify /usr/local/bin/cipi-app-deploy /usr/local/bin/cipi-app-post-deploy /usr/local/bin/cipi-deploy-audit /usr/local/bin/cipi-node-switch /usr/local/bin/cipi-node-run /usr/local/bin/cipi-read-app-logs /usr/local/bin/cipi-health-check /usr/local/bin/cipi-monitor /usr/local/bin/cipi-scan-manifest /usr/local/bin/cipi-crowdsec-rescue /usr/local/bin/cipi-crowdsec-rescue-hole /usr/local/bin/cipi-frankenphp-link /opt/cipi /opt/cipi-frankenphp
+    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /usr/local/bin/cipi-auth-notify /usr/local/bin/cipi-app-notify /usr/local/bin/cipi-app-deploy /usr/local/bin/cipi-app-post-deploy /usr/local/bin/cipi-deploy-audit /usr/local/bin/cipi-node-switch /usr/local/bin/cipi-node-run /usr/local/bin/cipi-read-app-logs /usr/local/bin/cipi-health-check /usr/local/bin/cipi-monitor /usr/local/bin/cipi-metrics /usr/local/bin/cipi-scan-manifest /usr/local/bin/cipi-crowdsec-rescue /usr/local/bin/cipi-crowdsec-rescue-hole /usr/local/bin/cipi-frankenphp-link /opt/cipi /opt/cipi-frankenphp
 
     # Shell tab-completion — installed for every shell, no activation needed:
     # /etc/bash_completion.d/cipi, the zsh vendor file, and an /etc/profile.d

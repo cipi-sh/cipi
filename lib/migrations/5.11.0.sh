@@ -40,14 +40,24 @@ source "${CIPI_LIB}/common.sh"
 source "${CIPI_LIB}/metrics.sh"
 
 # ── 1. sqlite3 ───────────────────────────────────────────────
+# Never wait on apt here: a server whose apt is busy (unattended-upgrades,
+# apt-daily) made this step sit silently for up to 15 minutes — the
+# global DPkg::Lock::Timeout of 300 s, twice, plus an update. When apt is
+# busy the step is skipped; the collector waits for sqlite3 quietly and
+# `cipi metrics status` says what to run.
+_mig_apt() { NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 DEBIAN_FRONTEND=noninteractive timeout 120 apt-get -o DPkg::Lock::Timeout=0 -y -qq "$@" </dev/null >/dev/null 2>&1; }
 if command -v sqlite3 >/dev/null 2>&1; then
     echo "  sqlite3 present"
-elif DEBIAN_FRONTEND=noninteractive timeout 300 apt-get install -y -qq sqlite3 >/dev/null 2>&1 \
-     || { DEBIAN_FRONTEND=noninteractive timeout 300 apt-get update -qq >/dev/null 2>&1 \
-          && DEBIAN_FRONTEND=noninteractive timeout 300 apt-get install -y -qq sqlite3 >/dev/null 2>&1; }; then
-    echo "  sqlite3 installed"
+elif command -v fuser >/dev/null 2>&1 && fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; then
+    echo "  WARNING: apt is busy (system updates running) — sqlite3 not installed now."
+    echo "           When they finish: apt-get install -y sqlite3   (metrics start within a minute)"
 else
-    echo "  WARNING: could not install sqlite3 — nothing is collected until: apt-get install -y sqlite3"
+    echo "  installing sqlite3 (apt)..."
+    if _mig_apt install sqlite3 || { _mig_apt update && _mig_apt install sqlite3; }; then
+        echo "  sqlite3 installed"
+    else
+        echo "  WARNING: could not install sqlite3 — nothing is collected until: apt-get install -y sqlite3"
+    fi
 fi
 
 # ── 2. collector ─────────────────────────────────────────────

@@ -16,7 +16,7 @@ TMP=$(mktemp -d) && [[ -n "$TMP" && -d "$TMP" ]] || exit 1
 trap 'rm -rf "${TMP:?}"' EXIT
 echo "=== Cipi 5.11.2 regression checks ==="
 
-[[ "$(tr -d '[:space:]' < "${ROOT}/version.md")" == "5.11.2" ]] && pass "version.md is 5.11.2" || fail "version.md"
+v=$(tr -d "[:space:]" < "${ROOT}/version.md"); [[ "$(printf "%s\n%s\n" 5.11.2 "$v" | sort -V | head -1)" == 5.11.2 ]] && pass "version.md >= 5.11.2" || fail "version.md"
 grep -q '^## \[5.11.2\]' "${ROOT}/CHANGELOG.md" && pass "CHANGELOG 5.11.2" || fail "CHANGELOG"
 bash -n "${LIB}/migrations/5.11.2.sh" && pass "migration parses" || fail "migration parse"
 grep -rn 'visudo -cqf' "${LIB}/cipi-api-sudoers.sh" "${LIB}/self-update.sh" "${LIB}/migrations/5.11.0.sh" >/dev/null \

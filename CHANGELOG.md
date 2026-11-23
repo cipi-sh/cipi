@@ -4,6 +4,28 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.12.0] — 2026-11-23
+
+The panel's server page had an SMTP tab and nothing else: Resend, SES, Slack, Discord, Mattermost, Google Chat, Telegram, ntfy, Pushover and webhooks, and the 100-odd triggers, were CLI only. This release gives the panel API what it needs to manage all of them (API 1.42, panel 4.4).
+
+### Added
+
+- **`cipi notification update <id> [flags]`** — change a channel in place. Every flag left out keeps its stored value, secrets included, so a form that never shows a token back can still change the recipients or the chat id. `--clear-secret` makes a webhook unsigned. The type of a channel does not change (remove it and add another). `update smtp` is `smtp configure` on top of the stored values, never interactive.
+- **`cipi notification triggers --json`** (also `triggers list --json`) — every trigger with its id, category, label and state, in catalog order, and how many are on.
+- **`cipi notification triggers set --on=a,b --off=c,d`** — many triggers at once, in one write; every name is checked first, an unknown one changes nothing.
+- `cipi notification status --json` lists the channel types (`types`, SMTP first).
+- The panel's sudoers whitelist allows `cipi notification status --json`, `triggers --json|set|enable-all|disable-all|reset`, `add`, `update`, `remove`, `test`, `enable`, `disable`. Secrets travel as flags, as `smtp configure` always did; the API runs these synchronously, so they never land in the panel's jobs table.
+
+### Changed
+
+- **`cipi notification test <id>` fails when the channel refuses the request** (HTTP error, timeout) with exit 1, instead of reporting "Test sent". A test now reaches a disabled channel too, so you can try it before turning it on. Delivery of real notifications is unchanged: best-effort, never blocking.
+- Adding a channel whose id exists points to `cipi notification update <id>`.
+
+### Upgrade
+
+- `lib/migrations/5.12.0.sh` rewrites the panel whitelist (only where a panel is installed; checked with `visudo` before it replaces the old one). Channels and triggers are untouched.
+- `tests/verify-5.12.0.sh`.
+
 ## [5.11.2] — 2026-11-23
 
 ### Fixed

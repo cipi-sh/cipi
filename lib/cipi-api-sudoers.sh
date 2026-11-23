@@ -5,6 +5,12 @@
 # sudo-rs (Ubuntu 25.10+) allows '*' only as the final argument token.
 # Use "db restore *" (not "db restore * *") for multi-arg commands.
 #
+# 5.12.0 adds `cipi notification`: every channel (SMTP, Resend, SES, Slack,
+# Discord, Mattermost, Google Chat, Telegram, ntfy, Pushover, webhook) and
+# the triggers, read and changed from the panel. Secrets are passed as flags,
+# like `smtp configure` always did; the API runs these synchronously, so they
+# never reach the panel's jobs table.
+#
 # 5.10.0 adds `app jit` (JIT per app) and `frankenphp status|upgrade` (the
 # FrankenPHP build of Octane apps). Not here: `frankenphp import` (a path on
 # the server, for whoever is at its shell) and `frankenphp use`, whose
@@ -96,6 +102,18 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi smtp test, \
                                /usr/local/bin/cipi smtp delete, \
                                /usr/local/bin/cipi smtp delete *, \
+                               /usr/local/bin/cipi notification status --json, \
+                               /usr/local/bin/cipi notification triggers --json, \
+                               /usr/local/bin/cipi notification triggers set *, \
+                               /usr/local/bin/cipi notification triggers enable-all, \
+                               /usr/local/bin/cipi notification triggers disable-all, \
+                               /usr/local/bin/cipi notification triggers reset, \
+                               /usr/local/bin/cipi notification add *, \
+                               /usr/local/bin/cipi notification update *, \
+                               /usr/local/bin/cipi notification remove *, \
+                               /usr/local/bin/cipi notification test *, \
+                               /usr/local/bin/cipi notification enable *, \
+                               /usr/local/bin/cipi notification disable *, \
                                /usr/local/bin/cipi alias add *, \
                                /usr/local/bin/cipi alias remove *, \
                                /usr/local/bin/cipi www add *, \

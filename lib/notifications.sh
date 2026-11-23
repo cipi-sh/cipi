@@ -256,7 +256,9 @@ _notify_status() {
         smtp=$(_notify_smtp_row || echo null)
         chans=$(_alerts_list --json | jq -c '.channels')
         jq -n --argjson s "$smtp" --argjson c "$chans" --argjson on "$on" --argjson t "$total" \
-            '{channels: ((if $s == null then [] else [$s] end) + $c), triggers: {enabled: $on, total: $t}}'
+            --arg types "smtp $(_alert_types)" \
+            '{channels: ((if $s == null then [] else [$s] end) + $c), triggers: {enabled: $on, total: $t},
+              types: ($types | split(" "))}'
         return 0
     fi
     echo -e "\n${BOLD}Notifications${NC} ${DIM}— every enabled trigger reaches every enabled channel${NC}"
@@ -299,10 +301,48 @@ _notify_toggle() {   # <on|off> <name>
     exit 1
 }
 
+# cipi notification triggers --json: every trigger with its category, label
+# and state, in catalog order.
+_notify_triggers_json() {
+    _notify_ensure_config
+    local cfg; cfg=$(vault_read notifications.json)
+    _notify_trigger_catalog | jq -R -s --argjson cfg "$cfg" '
+        [split("\n")[] | select(length > 0) | split("|")
+         | {id: .[0], category: .[1], label: (.[2:] | join("|")),
+            enabled: ($cfg.triggers[.[0]] != false)}]
+        | {triggers: ., enabled: (map(select(.enabled)) | length), total: length}'
+}
+
+# cipi notification triggers set [--on=a,b] [--off=c,d] — many at once, one
+# write. Every name is checked before anything changes.
+_notify_triggers_set() {
+    parse_args "$@"
+    local on="${ARG_on:-}" off="${ARG_off:-}" t
+    [[ -z "$on" && -z "$off" ]] && { error "Usage: cipi notification triggers set [--on=t1,t2] [--off=t3]"; exit 1; }
+    local -a ons=() offs=()
+    [[ -n "$on" ]] && IFS=',' read -r -a ons <<< "$on"
+    [[ -n "$off" ]] && IFS=',' read -r -a offs <<< "$off"
+    for t in "${ons[@]}" "${offs[@]}"; do
+        [[ -z "$t" ]] && continue
+        _notify_trigger_known "$t" || { error "Unknown trigger: ${t} (cipi notification triggers)"; exit 1; }
+    done
+    _notify_ensure_config
+    local patch
+    patch=$(jq -n --arg on "$on" --arg off "$off" '
+        ([$on | split(",")[] | select(length > 0) | {(.): true}] | add // {})
+        + ([$off | split(",")[] | select(length > 0) | {(.): false}] | add // {})')
+    vault_read notifications.json | jq --argjson p "$patch" '.triggers += $p' | vault_write notifications.json
+    log_action "NOTIFICATION TRIGGERS: on=${on:-none} off=${off:-none}"
+    success "Triggers updated: ${#ons[@]} on, ${#offs[@]} off"
+}
+
 _notify_triggers_command() {
     local sub="${1:-list}"; shift || true
+    if [[ "$sub" == --json ]]; then _notify_triggers_json; return 0; fi
     case "$sub" in
-        list|ls|"") _notify_list ;;
+        list|ls|"")
+            if [[ "${1:-}" == --json ]]; then _notify_triggers_json; else _notify_list; fi ;;
+        set) _notify_triggers_set "$@" ;;
         enable|disable)
             local trigger="${1:-}"
             [[ -z "$trigger" ]] && { error "Usage: cipi notification triggers ${sub} <trigger>"; exit 1; }
@@ -312,7 +352,7 @@ _notify_triggers_command() {
         enable-all|all-on)   _notify_enable_all ;;
         disable-all|all-off) _notify_disable_all ;;
         reset) _notify_reset ;;
-        *) error "Use: cipi notification triggers [list|enable <t>|disable <t>|enable-all|disable-all|reset]"; exit 1 ;;
+        *) error "Use: cipi notification triggers [list [--json]|enable <t>|disable <t>|set --on=… --off=…|enable-all|disable-all|reset]"; exit 1 ;;
     esac
 }
 
@@ -331,6 +371,16 @@ notifications_command() {
                 _smtp_configure "$@"
             else
                 _alerts_add "$@"
+            fi ;;
+        update|edit)
+            if [[ "${1:-}" == smtp ]]; then
+                shift
+                # Whatever is not given keeps its value; --host first makes the
+                # call non-interactive even when only --to or --tls changes.
+                [[ -f "$SMTP_CFG" ]] || { error "SMTP is not configured: cipi notification add smtp --host= …"; exit 1; }
+                _smtp_configure "--host=$(vault_read smtp.json | jq -r '.host // ""')" "$@"
+            else
+                _alerts_update "$@"
             fi ;;
         remove|rm|delete)
             if [[ "${1:-}" == smtp ]]; then shift; _smtp_delete "$@"; else _alerts_remove "$@"; fi ;;
@@ -353,7 +403,7 @@ notifications_command() {
         disable-all|all-off) _notify_disable_all ;;
         reset) _notify_reset ;;
         *)
-            error "Use: cipi notification [status] | add <type> <id> … | remove|test|enable|disable <id> | triggers … | smtp …"
+            error "Use: cipi notification [status] | add <type> <id> … | update <id> … | remove|test|enable|disable <id> | triggers … | smtp …"
             echo "      types: smtp $(_alert_types)"
             exit 1
             ;;

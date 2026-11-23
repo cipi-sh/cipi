@@ -93,23 +93,12 @@ if [[ -f "${CIPI_LIB}/cipi-api-sudoers.sh" ]]; then
     # shellcheck source=/dev/null
     source "${CIPI_LIB}/cipi-api-sudoers.sh"
     if _cipi_panel_installed; then
-        prev=""
-        if [[ -f /etc/sudoers.d/cipi-api ]]; then
-            prev=$(mktemp 2>/dev/null) && cat /etc/sudoers.d/cipi-api > "$prev" 2>/dev/null || prev=""
-        fi
-        write_cipi_api_sudoers 2>/dev/null || true
-        if ! command -v visudo >/dev/null 2>&1; then
-            echo "  wrote /etc/sudoers.d/cipi-api (visudo not available to check it)"
-        elif visudo -cqf /etc/sudoers.d/cipi-api >/dev/null 2>&1; then
+        # Checked before it is put in place (write_cipi_api_sudoers, 5.11.2).
+        if write_cipi_api_sudoers; then
             echo "  wrote /etc/sudoers.d/cipi-api — the panel may also run: metrics (read, retention, probe, heartbeat), basicauth agent"
-        elif [[ -n "$prev" ]]; then
-            install -m 0440 "$prev" /etc/sudoers.d/cipi-api 2>/dev/null || true
-            echo "  WARNING: the new /etc/sudoers.d/cipi-api did not validate — the previous file was put back. Check: visudo -cf /etc/sudoers.d/cipi-api"
         else
-            rm -f /etc/sudoers.d/cipi-api
-            echo "  WARNING: /etc/sudoers.d/cipi-api did not validate and was removed — the panel cannot run cipi until: cipi api update"
+            echo "  WARNING: /etc/sudoers.d/cipi-api kept as it was (see above) — the panel cannot read metrics until it is rewritten"
         fi
-        [[ -n "$prev" ]] && rm -f "$prev"
     else
         ensure_cipi_api_sudoers || true
     fi

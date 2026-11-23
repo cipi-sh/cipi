@@ -46,8 +46,21 @@ _cipi_panel_installed() {
     return 1
 }
 
+# visudo -c -f <file>: flags apart and without -q, the form both sudo and
+# sudo-rs accept. No visudo: nothing to check with.
+cipi_sudoers_check() {
+    command -v visudo >/dev/null 2>&1 || return 0
+    visudo -c -f "$1" >/dev/null 2>&1
+}
+
+# Written to a temporary file, checked, then put in place: an invalid
+# whitelist never reaches the sudoers directory (where it would break sudo for
+# everyone) and the previous one stays. On a refusal visudo's own message
+# goes to stderr and the function returns 1.
 write_cipi_api_sudoers() {
-    cat > /etc/sudoers.d/cipi-api <<'SUDOEOF'
+    local target="/etc/sudoers.d/cipi-api" tmp
+    tmp=$(mktemp "${TMPDIR:-/tmp}/cipi-api-sudoers.XXXXXX") || return 1
+    cat > "$tmp" <<'SUDOEOF'
 www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi app edit *, \
                                /usr/local/bin/cipi app delete *, \
@@ -187,7 +200,29 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi-read-app-logs *, \
                                /bin/cat /etc/cipi/apps.json
 SUDOEOF
-    chmod 440 /etc/sudoers.d/cipi-api 2>/dev/null || true
+    # One rule per 40 commands: sudo-rs (Ubuntu 26.04: 0.2.13) refuses a list
+    # of more than about 127 items ("too many items in list"), and the single
+    # rule passed that in 5.11.0. sudo reads several rules exactly as one.
+    awk -v per=40 '
+        { line = $0; sub(/^www-data ALL=\(root\) NOPASSWD: */, "", line); sub(/^[[:space:]]+/, "", line)
+          sub(/,[[:space:]]*\\[[:space:]]*$/, "", line); sub(/[[:space:]]+$/, "", line)
+          if (line != "") cmd[++n] = line }
+        END {
+            for (i = 1; i <= n; i++) {
+                first = ((i - 1) % per == 0); last = (i % per == 0 || i == n)
+                printf "%s%s%s\n", (first ? "www-data ALL=(root) NOPASSWD: " : "                               "), cmd[i], (last ? "" : ", \\")
+            }
+        }' "$tmp" > "${tmp}.rules" && mv -f "${tmp}.rules" "$tmp"
+    chmod 440 "$tmp" 2>/dev/null || true
+    if ! cipi_sudoers_check "$tmp"; then
+        echo "  ${target} not updated — visudo refused the new whitelist:" >&2
+        visudo -c -f "$tmp" 2>&1 | head -5 | sed 's/^/    /' >&2
+        rm -f "$tmp"
+        return 1
+    fi
+    install -m 0440 "$tmp" "$target" 2>/dev/null || { cat "$tmp" > "$target" && chmod 440 "$target"; } || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+    return 0
 }
 
 # Write the whitelist when a panel is installed, remove it when none is.

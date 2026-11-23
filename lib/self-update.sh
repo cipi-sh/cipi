@@ -197,6 +197,18 @@ selfupdate_command() {
         done
     fi
 
+    # The panel's sudoers whitelist follows the installed cipi on every
+    # update, not only when a migration rewrites it: a migration that was
+    # interrupted, or a release that adds a command without one, would leave
+    # the panel with "sudo: … can't do that" (5.11.1).
+    if [[ -f "${tmp}/lib/cipi-api-sudoers.sh" ]]; then
+        # shellcheck source=/dev/null
+        source "${tmp}/lib/cipi-api-sudoers.sh"
+        if _cipi_panel_installed; then
+            write_cipi_api_sudoers || warn "The panel sudoers were not updated (see above) — the previous ones are kept"
+        fi
+    fi
+
     # Record the new version before panel package updates. Composer/migrate for
     # cipi/api can take minutes or hang; core files and migrations are already done.
     if declare -f _cipi_ensure_config_writable >/dev/null 2>&1; then

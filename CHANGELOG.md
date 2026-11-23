@@ -4,6 +4,23 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.11.2] — 2026-11-23
+
+### Fixed
+
+- **The panel still got "sudo: I'm sorry www-data. I'm afraid I can't do that" for metrics after 5.11.1, on servers with sudo-rs** (the default sudo of Ubuntu 26.04, 0.2.13). The panel's whitelist was one rule listing every command, and with the 5.11.0 additions it reached about 138 items: sudo-rs refuses a list that long (`syntax error: too many items in list`, at item 128). The migrations saw the file fail `visudo`, put the previous one back with a warning easy to miss, and the panel was left without `cipi metrics …` and `cipi basicauth agent`. Classic sudo has no such limit, which is why it did not show elsewhere.
+- **The whitelist is now written as rules of at most 40 commands** — sudo reads them exactly as one — so it can grow again without meeting the limit.
+- `write_cipi_api_sudoers` writes to a temporary file, checks it with `visudo -c -f` and only then puts it in place: a whitelist that does not validate never reaches the sudoers directory, the previous one stays, and visudo's own message is printed instead of a generic warning. Migrations and `self-update` (which refreshes the whitelist on every update since 5.11.1) go through it.
+- `lib/migrations/5.11.2.sh` runs the 5.11.0 steps again (idempotent) with the new writer.
+- `tests/verify-5.11.2.sh`: a visudo with sudo-rs's limit, one that refuses the file, every command still present after the split, the real visudo when installed.
+
+## [5.11.1] — 2026-11-23
+
+### Fixed
+
+- **"sudo: I'm sorry www-data. I'm afraid I can't do that" in the panel's Metrics tab.** The panel's sudoers whitelist is rewritten by migrations only; a 5.11.0 migration that did not finish — the first 5.11.0 build could wait up to 15 minutes on a busy apt, and an update stopped there never reached the sudoers step — left the panel without `cipi metrics …`. `lib/migrations/5.11.1.sh` runs the 5.11.0 steps again (all idempotent: sqlite3, collector and cron, sudoers, basic auth vhosts).
+- **self-update now refreshes the panel sudoers on every update**, after the migrations, validated with `visudo` (the previous file is kept when the new one does not validate): the whitelist always matches the installed cipi.
+
 ## [5.11.0] — 2026-11-23
 
 `cipi health` and `cipi monitor` say *that* something is wrong, and alert when it happens. Neither kept a past: the 5xx spike at 03:10, the app whose memory crept up for a week, last month's uptime. This release keeps one — on the server, in SQLite, with nothing listening on a port — and puts it in the panel with charts.

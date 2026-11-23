@@ -41,11 +41,11 @@
 
 # Metrics per scope, in display order. Units: cpu %, mem % (host) or MB (app),
 # net bytes/s, req and 5xx per minute, http_ms milliseconds, http_ok 1|0.
-readonly METRICS_HOST_LIST="cpu load1 mem mem_used_mb swap disk net_rx net_tx"
-readonly METRICS_APP_LIST="cpu mem_mb procs fpm_procs fpm_max fpm_saturated req http_5xx http_ms http_ok http_code workers_up workers_total"
+[[ -z "${METRICS_HOST_LIST:-}" ]] && readonly METRICS_HOST_LIST="cpu load1 mem mem_used_mb swap disk net_rx net_tx"
+[[ -z "${METRICS_APP_LIST:-}" ]] && readonly METRICS_APP_LIST="cpu mem_mb procs fpm_procs fpm_max fpm_saturated req http_5xx http_ms http_ok http_code workers_up workers_total"
 # Every column of samples / rollups. A name added here in a later version is
 # added to an existing database by _met_db_init (ALTER TABLE … ADD COLUMN).
-readonly METRICS_COLUMNS="cpu load1 mem mem_used_mb swap disk net_rx net_tx mem_mb procs fpm_procs fpm_max fpm_saturated req http_5xx http_ms http_ok http_code workers_up workers_total"
+[[ -z "${METRICS_COLUMNS:-}" ]] && readonly METRICS_COLUMNS="cpu load1 mem mem_used_mb swap disk net_rx net_tx mem_mb procs fpm_procs fpm_max fpm_saturated req http_5xx http_ms http_ok http_code workers_up workers_total"
 
 # ── Configuration ──────────────────────────────────────────────
 

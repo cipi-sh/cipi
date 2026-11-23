@@ -19,16 +19,18 @@ Isolated, patched, zero-downtime. No panel needed, no SaaS behind it, no monthly
 <br>
 
 <a href="https://cipi.sh">
-  <img alt="A Laravel app going from git push to live with HTTPS on a Cipi server" src="https://cipi.sh/img/blog/hero-live.png" width="860">
+  <img alt="Animated demo: install Cipi on a VPS, create a Laravel app, deploy it, add HTTPS, then ship a second release with git push" src=".github/assets/cipi-demo.gif" width="900">
 </a>
+
+<sub>Install, create, deploy, HTTPS, <code>git push</code>. In real life the install takes about ten minutes and the rest a few more.</sub>
 
 </div>
 
 <br>
 
-## Try it in ten minutes
+## Live in about 15 minutes
 
-On a fresh Ubuntu 24.04 or 26.04 server, over SSH:
+On a fresh Ubuntu 24.04 or 26.04 server, over SSH (the install takes about ten minutes):
 
 ```bash
 wget -O - https://cipi.sh/setup.sh | bash
@@ -37,12 +39,12 @@ wget -O - https://cipi.sh/setup.sh | bash
 Then ship your app:
 
 ```bash
-cipi app create          # pick Laravel, a domain and your Git repo
-cipi deploy myapp        # atomic release, instant rollback
-cipi ssl install myapp   # HTTPS with Let's Encrypt
+cipi app create          # pick Laravel, a domain and your Git repo (a few minutes)
+cipi deploy myapp        # atomic release, instant rollback (about a minute)
+cipi ssl install myapp   # HTTPS with Let's Encrypt (seconds)
 ```
 
-That's it: your app is live. **[Follow the 15-minute guide →](https://cipi.sh/guides/deploy-laravel-ubuntu-vps)**
+About 15 minutes from a fresh server to a live app with HTTPS. **[Follow the 15-minute guide →](https://cipi.sh/guides/deploy-laravel-ubuntu-vps)**
 
 <br>
 

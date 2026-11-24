@@ -3146,6 +3146,7 @@ _create_deployer_config_from_template() {
             -e "s|__CIPI_NODE_OUTPUT__|$(app_get "$an" node_output)|g" \
             "$tpl" | app_write "$an" "${dh}/.deployer/deploy.php"
         deployer_audit_ensure_hook "$an" false || warn "Deploy audit hook not added to ${dh}/.deployer/deploy.php"
+        deployer_release_name_ensure_hook "$an" || warn "Release numbering guard not added to ${dh}/.deployer/deploy.php"
         declare -f _node_recipe_config_write >/dev/null 2>&1 || source "${CIPI_LIB}/node.sh"
         _node_recipe_config_write "$an"
         return 0
@@ -3228,6 +3229,7 @@ _create_deployer_config_from_template() {
     done < "$tmp" | app_write "$an" "${dh}/.deployer/deploy.php" || { rm -f "$tmp"; return 1; }
     rm -f "$tmp"
     deployer_audit_ensure_hook "$an" false || warn "Deploy audit hook not added to ${dh}/.deployer/deploy.php"
+    deployer_release_name_ensure_hook "$an" || warn "Release numbering guard not added to ${dh}/.deployer/deploy.php"
 }
 
 # Recreate deploy.php for an existing app (detects type from apps.json)

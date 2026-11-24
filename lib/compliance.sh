@@ -685,6 +685,8 @@ _cmp_ledger_rows() {
 # Releases Deployer created for <app> since <since> (UTC ISO) that the ledger
 # never saw — as published/rolled back, or as the attempted release of a
 # failed deploy. Prints "<release>\t<created_at>" per missing release.
+# Lines marked "imported" are Deployer 6 releases that migration 5.12.1 put
+# back in the log (deployer_release_state_repair): they were never missing.
 _cmp_unaudited_releases() {
     local app="$1" since="$2" ledger="$3" rlog="/home/${1}/.dep/releases_log"
     [[ -f "$rlog" ]] || return 0
@@ -698,7 +700,7 @@ _cmp_unaudited_releases() {
         [[ "$created_utc" < "$since" ]] && continue
         grep -qx "$name" <<<"$seen" && continue
         printf '%s\t%s\n' "$name" "$created_utc"
-    done < <(jq -r '[(.release_name // "" | tostring), (.created_at // "")] | @tsv' "$rlog" 2>/dev/null)
+    done < <(jq -r 'select(.imported == null) | [(.release_name // "" | tostring), (.created_at // "")] | @tsv' "$rlog" 2>/dev/null)
 }
 
 _cmp_check_deploys() {

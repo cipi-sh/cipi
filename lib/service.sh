@@ -29,6 +29,9 @@ _resolve_services() {
     case "$name" in
         all|"")
             local list=("${CIPI_SERVICES[@]}")
+            # Port 3306 runs MariaDB or MySQL (cipi db switch).
+            local i
+            for i in "${!list[@]}"; do [[ "${list[$i]}" == "mariadb" ]] && list[$i]=$(db_mysql_unit); done
             systemd_unit_exists postgresql && list+=("postgresql")
             systemd_unit_exists meilisearch && list+=("meilisearch")
             systemd_unit_exists crowdsec && list+=("crowdsec")
@@ -51,8 +54,11 @@ _resolve_services() {
                 systemd_unit_exists "php${v}-fpm" && echo -n "php${v}-fpm "
             done
             ;;
-        nginx|mariadb|valkey-server|supervisor|fail2ban|postgresql|meilisearch|crowdsec|crowdsec-firewall-bouncer|cloudflared)
+        nginx|valkey-server|supervisor|fail2ban|postgresql|meilisearch|crowdsec|crowdsec-firewall-bouncer|cloudflared)
             echo "$name"
+            ;;
+        mariadb|mysql)
+            db_mysql_unit
             ;;
         pgsql|postgres)
             echo "postgresql"
@@ -72,7 +78,7 @@ _resolve_services() {
             ;;
         *)
             error "Unknown service: ${name}"
-            echo -e "  Valid names: ${CYAN}nginx mariadb postgresql valkey-server supervisor fail2ban meilisearch crowdsec cloudflared php<ver>-fpm all${NC}" >&2
+            echo -e "  Valid names: ${CYAN}nginx mariadb|mysql postgresql valkey-server supervisor fail2ban meilisearch crowdsec cloudflared php<ver>-fpm all${NC}" >&2
             return 1
             ;;
     esac

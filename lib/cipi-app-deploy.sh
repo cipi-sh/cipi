@@ -39,6 +39,53 @@ DEPLOY_FILE="${HOME_DIR}/.deployer/deploy.php"
 LOG="/var/log/cipi-apps/${APP}/deploy.log"
 [[ -f "$LOG" && ! -L "$LOG" && -w "$LOG" ]] || LOG="${HOME_DIR}/logs/deploy.log"
 
+# ── One deploy at a time: a push that arrives meanwhile waits its turn ──
+# The cron moves ~/.deploy-trigger and starts this every minute, also while a
+# deploy is still running. Deployer refused the second run ("Deploy locked"),
+# it was reported as a failed deploy, and the push it was for never deployed.
+# Now a trigger that finds a deploy in flight — another automatic one (before,
+# during or after Deployer), or `cipi deploy` / the panel while Deployer runs —
+# goes back in the queue, and deploys when that one is over. Several pushes in
+# the meantime make one deploy, of the branch as it is then.
+RUN_DIR="${HOME_DIR}/.deploy-running"
+_requeue() {
+    if [[ -f "${HOME_DIR}/.deploy-trigger.run" && ! -L "${HOME_DIR}/.deploy-trigger.run" ]]; then
+        # Never over a newer trigger: that one is the queue now.
+        mv -n "${HOME_DIR}/.deploy-trigger.run" "${HOME_DIR}/.deploy-trigger" 2>/dev/null || true
+        rm -f "${HOME_DIR}/.deploy-trigger.run" 2>/dev/null || true
+    elif [[ ! -e "${HOME_DIR}/.deploy-trigger" ]]; then
+        : > "${HOME_DIR}/.deploy-trigger" 2>/dev/null || true
+    fi
+}
+# Deployer at work on this app, whoever started it (it always runs as the app user).
+_dep_alive() {
+    pgrep -u "$APP" -f -- "dep (deploy|rollback) -f ${DEPLOY_FILE}" >/dev/null 2>&1
+}
+_wrapper_alive() {   # the run that holds RUN_DIR is still going
+    local p; p=$(head -c 20 "${RUN_DIR}/pid" 2>/dev/null || true)
+    [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null \
+        && [[ "$(tr '\0' ' ' < "/proc/${p}/cmdline" 2>/dev/null)" == *"cipi-app-deploy ${APP} "* ]]
+}
+if ! mkdir "$RUN_DIR" 2>/dev/null; then
+    if _wrapper_alive; then _requeue; exit 0; fi
+    # Left behind by a run that was killed: nothing holds it any more.
+    rm -f "${RUN_DIR}/pid" 2>/dev/null || true
+    rmdir "$RUN_DIR" 2>/dev/null || true
+    mkdir "$RUN_DIR" 2>/dev/null || { _requeue; exit 0; }
+fi
+echo "$$" > "${RUN_DIR}/pid"
+trap 'rm -f "${RUN_DIR}/pid" 2>/dev/null; rmdir "$RUN_DIR" 2>/dev/null' EXIT
+if _dep_alive; then _requeue; exit 0; fi
+
+# A lock with no Deployer alive was left by a deploy that was interrupted (a
+# reboot, a kill): a deploy that fails releases its own (deploy:failed →
+# deploy:unlock). Nobody has to remove it by hand before the next push.
+STALE_LOCK=""
+if [[ -f "${HOME_DIR}/.dep/deploy.lock" && ! -L "${HOME_DIR}/.dep/deploy.lock" ]] && ! _dep_alive; then
+    STALE_LOCK=$(head -c 120 "${HOME_DIR}/.dep/deploy.lock" 2>/dev/null | tr -cd '[:alnum:]._@ -' || true)
+    rm -f "${HOME_DIR}/.dep/deploy.lock" 2>/dev/null || STALE_LOCK=""
+fi
+
 # The cron moves ~/.deploy-trigger here before calling us. Whoever wrote it
 # (the Git webhook endpoint of cipi/agent, its MCP deploy tool, …) may say who
 # asked for the deploy, as JSON or as KEY=VALUE lines:
@@ -76,6 +123,40 @@ export CIPI_DEPLOY_TRIGGER="$TRIGGER"
 mkdir -p "${HOME_DIR}/logs" 2>/dev/null || true
 touch "$LOG" 2>/dev/null || true
 
+# ── A commit that failed does not deploy again by itself ─────
+# When an automatic deploy fails with the code in hand (its release has a
+# REVISION), that commit is written to ~/.dep/cipi-paused-commit, and the
+# automatic deploys of the same commit stop there: a redelivered webhook, a
+# cipi/agent retry, do not build it again. A new commit on the branch deploys
+# as usual and clears it, and so do a deploy by hand (`cipi deploy`, the
+# panel) that succeeds and `cipi deploy <app> --unlock`. Nothing to unlock
+# to push a fix.
+PAUSE_FILE="${HOME_DIR}/.dep/cipi-paused-commit"
+# The commit Deployer would deploy now: the head of the app's branch, asked
+# of the remote with the deploy key, as Deployer does. Empty when unknown.
+_branch_head() {
+    local repo branch sshc
+    repo=$(sed -n "s/^set('repository', '\(.*\)');[[:space:]]*\$/\1/p" "$DEPLOY_FILE" 2>/dev/null | sed -n 1p)
+    branch=$(sed -n "s/^set('branch', '\(.*\)');[[:space:]]*\$/\1/p" "$DEPLOY_FILE" 2>/dev/null | sed -n 1p)
+    sshc=$(sed -n "s/^set('git_ssh_command', '\(.*\)');[[:space:]]*\$/\1/p" "$DEPLOY_FILE" 2>/dev/null | sed -n 1p)
+    [[ -n "$repo" && -n "$branch" ]] || return 0
+    GIT_SSH_COMMAND="${sshc:-ssh} -o BatchMode=yes" GIT_TERMINAL_PROMPT=0 \
+        timeout 30 git ls-remote -- "$repo" "refs/heads/${branch}" 2>/dev/null | awk 'NR == 1 { print $1 }'
+}
+PAUSED=""
+if [[ -f "$PAUSE_FILE" && ! -L "$PAUSE_FILE" ]]; then
+    PAUSED=$(head -n 1 "$PAUSE_FILE" 2>/dev/null | tr -cd '0-9a-f')
+fi
+if [[ -n "$PAUSED" ]]; then
+    HEAD_NOW=$(_branch_head || true)
+    # A remote that does not answer is not a reason to hold a push back.
+    if [[ "$HEAD_NOW" == "$PAUSED" ]]; then
+        printf '[%(%Y-%m-%d %H:%M:%S)T] ===== deploy skipped  app=%s trigger=%s commit=%s — it failed last time: push a fix, or deploy it by hand (cipi deploy %s) =====\n\n' \
+            -1 "$APP" "$TRIGGER" "${PAUSED:0:12}" "$APP" >> "$LOG" 2>/dev/null || true
+        exit 0
+    fi
+fi
+
 _release() {
     local target
     [[ -L "${HOME_DIR}/current" ]] || { echo ""; return 0; }
@@ -95,7 +176,12 @@ T0=$SECONDS
 {
     printf '[%(%Y-%m-%d %H:%M:%S)T] ===== deploy start  app=%s trigger=%s branch=%s from-release=%s =====\n' \
         -1 "$APP" "$TRIGGER" "${BRANCH:-?}" "${REL_BEFORE:-none}"
+    [[ -n "$STALE_LOCK" ]] && printf '[%(%Y-%m-%d %H:%M:%S)T] removed the lock left by an interrupted deploy (%s)\n' -1 "$STALE_LOCK"
 } >> "$LOG" 2>/dev/null || true
+
+# Which release this run makes: the commit of a release that fails is paused.
+LATEST_BEFORE=$(head -c 20 "${HOME_DIR}/.dep/latest_release" 2>/dev/null | tr -cd '0-9')
+DEP_MARK=$(wc -l < "$LOG" 2>/dev/null || echo 0)
 
 RC=0
 cd "$HOME_DIR" || exit 2
@@ -104,6 +190,30 @@ cd "$HOME_DIR" || exit 2
           printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$line"
       done >> "$LOG"
 RC=${PIPESTATUS[0]}
+
+# Refused because another deploy took the lock between the check above and
+# Deployer's own (`cipi deploy` or the panel, that very second): not a failure
+# of this push, which goes back in the queue.
+LOCK_REFUSED=false
+if [[ $RC -ne 0 ]] && grep -q 'Deploy locked by' < <(tail -n +"$((DEP_MARK + 1))" "$LOG" 2>/dev/null); then
+    LOCK_REFUSED=true
+fi
+
+PAUSED_NOW=""
+if [[ $RC -eq 0 ]]; then
+    rm -f "$PAUSE_FILE" 2>/dev/null || true
+elif [[ "$LOCK_REFUSED" != true ]]; then
+    LATEST_AFTER=$(head -c 20 "${HOME_DIR}/.dep/latest_release" 2>/dev/null | tr -cd '0-9')
+    if [[ -n "$LATEST_AFTER" && "$LATEST_AFTER" != "$LATEST_BEFORE" \
+          && -f "${HOME_DIR}/releases/${LATEST_AFTER}/REVISION" && ! -L "${HOME_DIR}/releases/${LATEST_AFTER}/REVISION" ]]; then
+        PAUSED_NOW=$(head -n 1 "${HOME_DIR}/releases/${LATEST_AFTER}/REVISION" 2>/dev/null | tr -cd '0-9a-f')
+        if [[ ${#PAUSED_NOW} -ge 40 && ! -L "$PAUSE_FILE" ]]; then
+            printf '%s\n' "$PAUSED_NOW" > "$PAUSE_FILE" 2>/dev/null || PAUSED_NOW=""
+        else
+            PAUSED_NOW=""
+        fi
+    fi
+fi
 
 REL_AFTER=$(_release)
 SECS=$(( SECONDS - T0 ))
@@ -130,7 +240,18 @@ Commit: ${COMMIT}}
 Duration: ${SECS}s
 Log: ${LOG}"
 
+if [[ "$LOCK_REFUSED" == true ]]; then
+    printf '[%(%Y-%m-%d %H:%M:%S)T] another deploy holds the lock — this push is queued again\n\n' -1 >> "$LOG" 2>/dev/null || true
+    _requeue
+    exit 0
+fi
 if [[ $RC -ne 0 ]]; then
+    if [[ -n "$PAUSED_NOW" ]]; then
+        printf '[%(%Y-%m-%d %H:%M:%S)T] automatic deploys of %s paused: a new push deploys, or by hand: cipi deploy %s\n\n' \
+            -1 "${PAUSED_NOW:0:12}" "$APP" >> "$LOG" 2>/dev/null || true
+        DETAIL="${DETAIL}
+Automatic deploys: paused for commit ${PAUSED_NOW:0:12} — the next push deploys as usual; to retry this commit: cipi deploy ${APP} (or the panel)"
+    fi
     sudo /usr/local/bin/cipi-app-notify "$APP" deploy "$RC" "$LOG" "$DETAIL" 2>/dev/null || true
     exit "$RC"
 fi

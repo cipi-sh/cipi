@@ -4,6 +4,76 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.13.1] — 2026-11-24
+
+### Fixed
+
+- **`cipi db switch mysql` stopped right after "Checking the MySQL packages...", with nothing said** (Ubuntu 24.04 and 26.04). The candidate came from `apt-cache policy mysql-server | awk '/Candidate:/{print $2; exit}'`. Ubuntu Server's `awk` is gawk (byobu depends on it), which reads lines as they arrive: it exits at the candidate line, apt-cache — which flushes a line at a time — dies of SIGPIPE writing the version table, and under `set -o pipefail` the assignment fails, so `set -e` ended `cipi`. Nothing had been changed yet. apt's output is now read whole (`_db_apt_candidate`), and when there is no candidate the first lines of `apt-cache policy` are shown. The same pattern is gone from `cipi service upgrade` / `cipi autoupdate` (`_stack_upgrade_candidate`) and from CrowdSec's SSH client lookup.
+- The rest of the switch, looked at for the same kind of stop: the MySQL version read after the install, and a rollback that stopped at its first failing step (packages, data directory) — every step is now tried and a failure is reported.
+- Pipelines in the 5.13.0 deploy code that a consumer leaving early could fail: the deploy wrapper's "is it still running" and "was the lock refused" checks, the branch read from `deploy.php`, `cipi deploy`'s "a deploy is running" check and the paused commit.
+
+### Added
+
+- **A stop that nothing checked says where it happened**, instead of leaving you at the prompt: `[ERROR] Stopped unexpectedly at db.sh:986 in _db_switch_run() (exit 141): …`. Not after an error that was already printed, and not for failures inside `$(…)`, pipelines or subshells, which the command that runs them judges.
+- **`cipi help` lists every command like `php artisan list`**: Usage, Options, then Available commands — the top-level ones, then one namespace per command family, commands in green, descriptions in one column — built from the topics' own lines, so it cannot drift from `cipi help <topic>`. In a terminal it opens in `less` (quits when it fits). `cipi help <topic>` and `cipi help all` show the command in green and its arguments dimmed; `help all` now includes `use` and `credentials`.
+
+### Upgrade
+
+- `cipi self-update`. `tests/verify-5.13.1.sh`; `tests/verify-5.13.0.sh` now runs the switch under `set -euo pipefail`, with an apt-cache that writes a line at a time and an awk that reads like gawk — 5.13.0 fails it the way it failed on the servers.
+
+## [5.13.0] — 2026-11-24
+
+A deploy that fails should not need anyone to unlock anything: fix the code, push, and the webhook deploys it. Most of that was already true — since 5.9.0 a deploy that fails releases its own lock (`deploy:failed` → `deploy:unlock`) — but two things still got in the way, and the one thing worth holding back was not held back. Deploys no longer wait for the jobs in progress either (#536). Backups can leave folders out, and port 3306 can run MySQL instead of MariaDB.
+
+### Fixed
+
+- **The panel's Access tab showed raw output — `[1mBasic auth — <app>[0m ━━━ Status [2mdisabled[0m` — on every app.** Since 5.11.0 `cipi basicauth status` (and `enable`, and `agent status`) read the vhost's cipi/agent marker with `grep | head | sed`; under `set -o pipefail` the grep that finds no marker — every app without one — failed the assignment, and `cipi` exited 1 right after printing its first lines. The API took the exit code for an error and passed the output, colours included, as its message. The helper never fails now. `basicauth enable` reported a failure after enabling for the same reason.
+- **Deploys failed on `workers:stop` after 300 seconds and left Horizon in STOPPING** ([#536](https://github.com/cipi-sh/cipi/issues/536)). Before switching `current`, the deploy ran `cipi-worker stop`: `supervisorctl stop` on every program of the app, which waits for each to exit — up to `stopwaitsecs`, an hour for Horizon and the queue workers so that a running job can finish — while Deployer gives a command 300 seconds. With a long job in progress the deploy failed (exit 255), `current` stayed on the previous release, Horizon stayed in STOPPING and nothing started it again; the deploys that went through waited for the jobs in hand (2–3 minutes instead of ~40 seconds). Deployer swaps `current` atomically (`mv -T`), so nothing has to stop before the swap:
+  - `cipi-worker stop` changes nothing any more (the `deploy.php` files that call it need no change);
+  - `cipi-worker restart`, after the swap, does not wait for the jobs: Horizon and the queue workers get SIGTERM — they finish the job in hand and exit, and Supervisor (`autorestart`) starts them again on the new release; Octane, Reverb and other programs are restarted, waiting 90 seconds at most each (`CIPI_WORKER_RESTART_WAIT`); a program not running is started; one still STOPPING is started in the background as soon as it has stopped.
+  - Octane keeps serving until its restart after the swap, instead of being down from before it.
+  - The panel's "Unable to connect to server" after ~600 s, the deploy history layout and the panel language are cipi/api and cipi/gui matters.
+
+- **A push that arrived while a deploy was running was lost, and reported as a failed deploy.** The per-minute cron moves `~/.deploy-trigger` and starts `cipi-app-deploy` also while a deploy is in progress; Deployer refused the second run ("Deploy locked by …"), the wrapper reported it as `FAILED`, sent the failure alert, and the commit it was for never deployed until the next push. `cipi deploy --status` said "it deploys when this run ends", which was not true. Now a trigger that finds a deploy in flight goes back in the queue and deploys when that one is over:
+  - another automatic deploy, before, during or after Deployer (post-deploy steps, healthcheck, auto-rollback): `~/.deploy-running` holds the PID of the wrapper at work; a directory left by a run that was killed does not block;
+  - `cipi deploy` or the panel while Deployer runs (Deployer always runs as the app user);
+  - the very same second, Deployer's own lock decides and the push is queued again instead of reported as failed.
+  - Several pushes in the meantime make one deploy, of the branch as it is then. A newer trigger is never overwritten.
+- **A lock left by an interrupted deploy** (a reboot, a kill — a deploy that fails releases its own) is removed by the next deploy, automatic or by hand, when no Deployer of the app is alive, and the deploy log says so. `cipi deploy <app> --unlock` is no longer needed for it.
+- **`cipi deploy <app>` while a deploy of the app is running** stops at once with "A deploy of '<app>' is running", instead of taking a database snapshot and being refused by Deployer as a failed deploy.
+
+### Added
+
+- **`cipi app env <app> --order=K1,K2,…`** — puts the keys of `.env` in that order (the panel's drag and drop). The list names every key once; anything else is refused and the file is left as it was. A key moves with its line(s) untouched (value, quotes, `export`) and the comments right above it; comments after a key stay with it; a blank line that started a group stays in front of the key that started it; a header stays first and the tail last. Applied after `--set`/`--unset` in the same call, so a new key can be placed where it belongs.
+- **`cipi basicauth status <app> --json`** — `{app, enabled, users, agent: {mode, public_prefix}}`, and **`cipi db engines --json`** — `{default, engines: [{engine, status, port, default, server, label}]}`, where `server` is `mariadb` or `mysql` for the engine `mariadb`. What the panel reads, with no colours to parse out. The text forms are unchanged for older APIs; the panel's whitelist allows `cipi db engines --json`.
+- **Backups can leave folders out: `--exclude-paths`.** An uploads folder of a terabyte is better kept with rsync than in a nightly tarball. `cipi backup profile add|edit <name> --exclude-paths=storage/app/uploads,*.mp4` — tar exclusion patterns matched against the names inside the app archive (relative to the app: `shared/…`, `htdocs/…`), after any `/` and with wildcards that cross `/`: `storage/app/uploads` leaves out `shared/storage/app/uploads`, `*.mp4` every video. `<apps>:<pattern>` applies to the apps of that name or glob only (`shop:storage/app/uploads`). Emptied again with `--exclude-paths=`.
+  - Absolute paths (which never match a name in the archive), and patterns that would leave the whole app out (`*`, `shared`, `htdocs`), are refused.
+  - `--dry-run` and the run itself say what each app leaves out; the archive's `meta.json` records it (`excluded_paths`), so a restore knows which folders come back from elsewhere.
+  - `cipi.yml`: `exclude_paths` in a backup profile, validated the same way, exported by `cipi yml export`.
+- **MySQL instead of MariaDB on port 3306: `cipi db switch mysql`.** MariaDB stays the default; MySQL is only ever an explicit choice, from the command line.
+  - **Only on a server with no databases on port 3306** (no database, no app on it, nothing in the registry): the data is not converted. No in-place upgrade exists between the two, and what a dump cannot carry — MariaDB's `uuid`/`inet6` types, sequences, queries an app sends that only one of them understands — would surface later, in the apps. A server in use moves the way an app moves anywhere: a new server, `cipi db switch mysql` there before its first app, then `cipi sync` — this server stays as it was, the way back.
+  - MySQL from the Ubuntu archive (8.4 LTS on 26.04; 8.0 on 24.04, where Ubuntu backports its security fixes): no repository or key of its own. The MariaDB.org repository is removed.
+  - Checked before anything stops: a `mysql-server` candidate, and an apt simulation of the removal — when removing MariaDB would also remove anything but its own packages and client libraries (a Perl or Python driver, a monitoring agent), nothing changes. Then: MariaDB stopped, its data directory kept aside (`/var/lib/mysql.mariadb-<time>`), its packages purged (`libmariadb3` stays), MySQL installed with the same root password (`caching_sha2_password`) and Cipi's tuning (`/etc/mysql/mysql.conf.d/99-cipi.cnf`: buffer pool by RAM, `innodb_redo_log_capacity`, X protocol on localhost), kept off unattended-upgrades like MariaDB. When the install fails, the previous server is put back with its data directory.
+  - `cipi db switch mariadb` goes back, on the same terms. `--yes` is required where no terminal can confirm it. Not in the panel's whitelist; `cipi db install mysql` (which the panel may run) never switches, it points to `cipi db switch`.
+  - The engine keeps its id `mariadb` — in `apps.json`, `databases.json`, the backup layout, `cipi.yml` and the API — so nothing that stores or exchanges it changes shape; apps keep `DB_CONNECTION=mysql`. Everything that runs the server follows it: the client (`mysql`), the unit (`cipi service`, `cipi monitor`), `cipi db upgrade`, the nightly autoupdate and `cipi pending` (MySQL's packages), `cipi disk`, `cipi reset db-password`, the credentials and the URL printed at app creation (`mysql+ssh://` for TablePlus) and the labels.
+  - **Dumps cross between the two:** a restore (`cipi db restore`, `cipi sync`, a backup) into MySQL drops MariaDB's sandbox line (`/*M!999999\- enable the sandbox mode */`, which the mysql client refuses) and maps its UCA 14 collations to MySQL's 0900 ones; into MariaDB, the 0900 collations become UCA 14. Rows of data are never touched.
+  - Notification trigger `db_switch`.
+- **A commit that failed does not deploy again by itself.** When an automatic deploy fails with the code in hand (its release has a `REVISION`), that commit is written to `~/.dep/cipi-paused-commit`, and automatic deploys of the same commit stop before Deployer: a redelivered webhook or a cipi/agent retry does not build it again (`===== deploy skipped … commit=<sha> …` in the deploy log). The head of the branch is asked of the remote with the deploy key, as Deployer does; a remote that does not answer holds nothing back.
+  - **A new commit deploys as usual** and clears the pause. So do a deploy by hand that succeeds (`cipi deploy`, the panel) and `cipi deploy <app> --unlock`.
+  - A deploy that fails before the code was fetched (SSH, disk, Deployer itself) pauses nothing: it is not the commit's fault.
+  - The failure alert says which commit is paused and how to retry it.
+  - `cipi deploy <app> --status` shows it (`Paused`), and `--status --json` has `paused_commit` (null when none).
+
+### Changed
+
+- `cipi deploy <app> --unlock` also resumes a paused commit; `--status` describes a leftover lock as one the next deploy removes.
+
+### Upgrade
+
+- Panel: cipi/api 1.43.0 and cipi/gui 4.5.0 read these (basic auth and engines as JSON, the `.env` order — rows dragged in the Environment tab —, `exclude_paths`, the paused commit, MySQL). cipi/sdk: `env()->update(…, order:)` and `env()->reorder()`; cipi-cli: `apps env order`, `apps env set --order`, `backup profile --exclude-paths`, the paused commit in `deploy status`, MySQL in `db engines`. `cipi self-update` rewrites the panel's whitelist, as on every update.
+- No migration: `cipi self-update` installs the new `/usr/local/bin/cipi-app-deploy` and `/usr/local/bin/cipi-worker` as on every update. The crontab line and the `deploy.php` files are unchanged; backup profiles without `exclude_paths` leave nothing out.
+- `tests/verify-5.13.0.sh` (78 checks) runs the wrapper against a Deployer stub (lock, `latest_release`, `REVISION` as Deployer 8 keeps them) and a local Git remote: a push during a running deploy (by hand and automatic), a guard left by a killed run, a stale lock, a failing commit and its redelivery, a fix, an early failure, an unreachable remote, a newer trigger. `cipi-worker` against a stub Supervisor (signals, restarts, a slow one, a program left STOPPING). Backup exclusions against real tar and the `cipi.yml` validator. `basicauth status` under `set -euo pipefail` and its JSON, `.env` reordering on a file with a header, groups, comments, quotes, `export` and a key set twice. `cipi db switch` both ways and its rollback against stubs of apt, dpkg, systemd and the two clients, the dump filter on MariaDB and MySQL dumps. **Not verified on a real server:** the MySQL packages of 24.04 and 26.04 installed over a purged MariaDB, PHP's connection to MySQL with `caching_sha2_password` over 127.0.0.1, Horizon's and the queue workers' handling of SIGTERM under Supervisor.
+
 ## [5.12.1] — 2026-11-24
 
 ### Fixed

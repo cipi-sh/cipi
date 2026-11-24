@@ -256,13 +256,14 @@ _cipi_complete() {
 
         db)
             case $pos in
-                1) sub="engines install uninstall default create list delete link unlink backup restore password upgrade" ;;
+                1) sub="engines install uninstall default switch create list delete link unlink backup restore password upgrade" ;;
                 2) case "$w1" in
-                       install|uninstall|default|upgrade) sub="mariadb pgsql" ;;
+                       install|uninstall|default|upgrade) sub="mariadb mysql pgsql" ;;
+                       switch) sub="mysql mariadb" ;;
                        create) sub="--name= --engine= --user= --app=" ;;
                        list)   sub="--engine= --json" ;;
                    esac ;;
-                3) case "$w1" in upgrade) sub="--yes" ;; link) sub="$(_cipi_apps)" ;; esac ;;
+                3) case "$w1" in upgrade|switch) sub="--yes" ;; link) sub="$(_cipi_apps)" ;; esac ;;
             esac ;;
 
         node)

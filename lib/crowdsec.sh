@@ -618,7 +618,7 @@ _crowdsec_ip_from_proc() {
         if [[ -r "/proc/${pid}/environ" ]]; then
             ip=$(tr '\0' '\n' < "/proc/${pid}/environ" 2>/dev/null \
                 | sed -n 's/^SSH_CONNECTION=//p; s/^SSH_CLIENT=//p' \
-                | awk 'NF {print $1; exit}')
+                | awk 'NF && !f {print $1; f = 1}')
             if [[ -n "${ip:-}" ]] && _crowdsec_valid_net "$ip"; then
                 echo "$ip"
                 return 0

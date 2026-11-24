@@ -64,7 +64,7 @@ frankenphp_upgrade|PHP|FrankenPHP build of an Octane app changed or upgraded
 frankenphp_available|Updates|FrankenPHP release on another PHP minor or major, not applied
 app_jit|PHP|JIT turned on or off for an app
 nginx_upgrade|Services|Nginx packages upgraded
-mariadb_upgrade|Database|MariaDB packages upgraded
+mariadb_upgrade|Database|MariaDB / MySQL packages upgraded
 pgsql_upgrade|Database|PostgreSQL packages upgraded
 valkey_upgrade|Services|Valkey packages upgraded
 node_upgrade|Node|Node.js runtimes upgraded (automatic update)
@@ -76,6 +76,7 @@ package_install|Packages|Optional package installed
 package_remove|Packages|Optional package removed
 db_create|Database|Database created
 db_delete|Database|Database deleted
+db_switch|Database|Server on port 3306 replaced (MariaDB ⇄ MySQL)
 search_install|Search|Meilisearch installed
 search_enable|Search|Search enabled for an app
 node_default|Node|Server-wide Node version changed
@@ -113,7 +114,7 @@ yml_fail|cipi.yml|cipi.yml invalid or could not be applied
 yml_post_fail|cipi.yml|Post-deploy step failed
 self_update|Updates|Cipi updated itself
 reset_root_password|Reset|Root SSH password reset
-reset_db_password|Reset|MariaDB root password reset
+reset_db_password|Reset|MariaDB / MySQL root password reset
 reset_valkey_password|Reset|Valkey password reset
 api_configure|API|Panel API configured
 api_update|API|Panel API updated

@@ -38,7 +38,7 @@ grep -qE '^[[:space:]]+search\)' "${ROOT}/cipi" \
     && pass "cipi dispatches search" || fail "cipi does not dispatch search"
 grep -q 'search_command' "$SEARCH" \
     && pass "search_command exists" || fail "no search_command"
-grep -q 'show_help_topic search' "${ROOT}/cipi" \
+awk '/^_HELP_TOPICS=\(/,/\)/' "${ROOT}/cipi" | grep -qw search \
     && pass "help all includes the search topic" || fail "help all omits search"
 grep -qE '^[[:space:]]+search\|meilisearch\|scout\)' "${ROOT}/cipi" \
     && pass "help topic accepts search|meilisearch|scout" || fail "no search help topic"
@@ -268,7 +268,7 @@ grep -qE '^[[:space:]]+package\|packages\)' "${ROOT}/cipi" \
     && pass "cipi dispatches package" || fail "cipi does not dispatch package"
 grep -q 'package_command' "$PKG" \
     && pass "package_command exists" || fail "no package_command"
-grep -q 'show_help_topic package' "${ROOT}/cipi" \
+awk '/^_HELP_TOPICS=\(/,/\)/' "${ROOT}/cipi" | grep -qw package \
     && pass "help all includes the package topic" || fail "help all omits package"
 grep -qE '^[[:space:]]+package\|packages\|pkg\)' "${ROOT}/cipi" \
     && pass "help topic accepts package|packages|pkg" || fail "no package help topic"

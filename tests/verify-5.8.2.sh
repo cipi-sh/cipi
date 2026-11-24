@@ -553,7 +553,7 @@ grep -q 'credentials|creds) _maybe_cmd_help credentials "$@"; require_root; sour
     && pass "cipi credentials is routed" || fail "route"
 grep -q '^        credentials|creds)$' "${ROOT}/cipi" && grep -q 'cipi help <topic>' "${ROOT}/cipi" && pass "help topic credentials" || fail "help topic"
 grep -q 'reset  credentials  server' "${ROOT}/cipi" && pass "credentials among the help topics" || fail "topics list"
-grep -q '"cipi credentials ..."' "${ROOT}/cipi" && pass "credentials in the help index" || fail "help index"
+awk '/^_HELP_TOPICS=\(/,/\)/' "${ROOT}/cipi" | grep -qw credentials && pass "credentials in the help index" || fail "help index"
 grep -q 'DNS check, install, certificate, token' "${ROOT}/cipi" && grep -q 'DNS check, admin account, install, certificate' "${ROOT}/cipi" && pass "help api/gui name the one-command flow" || fail "help api/gui"
 grep -q 'notifications reset credentials completion help"' "${LIB}/completion.sh" && grep -q '^        credentials|creds)$' "${LIB}/completion.sh" \
     && pass "completion knows cipi credentials" || fail "completion credentials"

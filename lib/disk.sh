@@ -19,6 +19,12 @@
 #############################################
 
 [[ -z "${DISK_MARIADB_DIR:-}" ]] && readonly DISK_MARIADB_DIR="/var/lib/mysql"
+
+# Port 3306 runs MariaDB or MySQL (db_mysql_* in common.sh); MariaDB for
+# whatever sources this file without common.sh.
+declare -f db_mysql_flavor >/dev/null 2>&1 || db_mysql_flavor() { echo mariadb; }
+declare -f db_mysql_label  >/dev/null 2>&1 || db_mysql_label()  { echo MariaDB; }
+declare -f db_mysql_client >/dev/null 2>&1 || db_mysql_client() { command -v mariadb >/dev/null 2>&1 && echo mariadb || echo mysql; }
 [[ -z "${DISK_PGSQL_DIR:-}" ]]   && readonly DISK_PGSQL_DIR="/var/lib/postgresql"
 [[ -z "${DISK_VALKEY_DIR:-}" ]]  && readonly DISK_VALKEY_DIR="/var/lib/valkey"
 
@@ -269,7 +275,7 @@ _disk_report() {
 
 _disk_db_mariadb() {
     local only="${1:-}"
-    command -v mariadb >/dev/null 2>&1 || return 0
+    command -v "$(db_mysql_client)" >/dev/null 2>&1 || return 0
     # shellcheck source=/dev/null
     source "${CIPI_LIB}/db.sh"
     local out dir name kb du_kb
@@ -284,7 +290,7 @@ _disk_db_mariadb() {
     dir="${dir%/}"
     [[ -n "$dir" ]] || dir="$DISK_MARIADB_DIR"
     if ! grep -q '^datadir|' <<< "$out"; then
-        echo "note|mariadb|MariaDB did not answer — check: cipi service list"
+        echo "note|mariadb|$(db_mysql_label) did not answer — check: cipi service list"
     fi
     while IFS='|' read -r _ name kb; do
         [[ -n "$name" ]] || continue
@@ -408,7 +414,7 @@ _disk_db_report() {
         grep -q "^[a-z]*|${engine}|" <<< "$lines" || continue
         name_head="DATABASE"
         case "$engine" in
-            mariadb)     label="MariaDB";     items_head="" ;;
+            mariadb)     label="$(db_mysql_label)"; items_head="" ;;
             pgsql)       label="PostgreSQL";  items_head="" ;;
             valkey)      label="Valkey";      items_head="KEYS" ;;
             meilisearch) label="Meilisearch"; items_head="DOCUMENTS"; name_head="INDEX" ;;

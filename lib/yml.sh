@@ -195,6 +195,10 @@ GLOB_RE = re.compile(r"^[a-zA-Z0-9_.*?\[\]-]{1,64}$")
 # shell or a downstream curl invocation.
 URL_RE = re.compile(r"^https?://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]{0,200})?$")
 TABLE_GLOB_RE = re.compile(r"^[a-zA-Z0-9_.*?\[\]-]{1,128}$")
+# A tar exclusion pattern relative to the app (storage/app/uploads, *.mp4):
+# never absolute, never one that leaves the whole app out.
+EXCL_PATH_RE = re.compile(r"^(?!/)[A-Za-z0-9._*?/@+ \[\]-]{1,255}$")
+EXCL_PATH_WHOLE = frozenset({"*", "*/", "shared", "htdocs"})
 POST_RUNNERS = frozenset({"artisan", "npm", "npx", "yarn", "pnpm", "composer", "php", "node"})
 ARTISAN_CMD_RE = re.compile(r"^[a-zA-Z0-9:_-]+$")
 POST_ARG_RE = re.compile(r"^[a-zA-Z0-9_@./:=+-]{1,256}$")
@@ -1531,7 +1535,7 @@ class Validator:
                 continue
             self.unknown_keys(pm, {
                 "name", "scope", "databases", "exclude_databases", "exclude_tables",
-                "every", "cron", "destinations", "encrypt",
+                "exclude_paths", "every", "cron", "destinations", "encrypt",
                 "keep", "keep_days", "keep_weeks",
             }, p)
 
@@ -1567,7 +1571,8 @@ class Validator:
 
             for field, rx in (("databases", GLOB_RE),
                               ("exclude_databases", GLOB_RE),
-                              ("exclude_tables", TABLE_GLOB_RE)):
+                              ("exclude_tables", TABLE_GLOB_RE),
+                              ("exclude_paths", EXCL_PATH_RE)):
                 if field not in pm:
                     continue
                 items = self.expect_list(pm[field], "%s.%s" % (p, field))
@@ -1581,6 +1586,9 @@ class Validator:
                         continue
                     if not rx.match(s):
                         self.err(gp, "invalid pattern %r" % s)
+                        continue
+                    if field == "exclude_paths" and s in EXCL_PATH_WHOLE:
+                        self.err(gp, "%r would leave the whole app out of its backup" % s)
                         continue
                     vals.append(s)
                 prof[field] = vals
@@ -3299,6 +3307,7 @@ _yml_backup_profile_desired() {
         | .databases  = ($s.databases // .databases)
         | .exclude_databases = ($s.exclude_databases // .exclude_databases)
         | .exclude_tables    = ($s.exclude_tables // .exclude_tables)
+        | .exclude_paths     = ($s.exclude_paths // .exclude_paths // [])
         | .destinations      = ($s.destinations // .destinations)
         | .encrypt           = (if ($s | has("encrypt")) then $s.encrypt else .encrypt end)
         | .retention         = ($s.retention // .retention)
@@ -4137,6 +4146,10 @@ _yml_generate() {
                 [[ -n "${exdbg// }" ]] && echo "      exclude_databases: $(_yml_flow $exdbg)"
                 # shellcheck disable=SC2086
                 [[ -n "${extg// }"  ]] && echo "      exclude_tables: $(_yml_flow $extg)"
+                # One per line: a path may hold a space.
+                local -a expl=(); local xl
+                while IFS= read -r xl; do [[ -n "$xl" ]] && expl+=("$xl"); done < <(_bk_profile_list_field "$p" exclude_paths)
+                [[ ${#expl[@]} -gt 0 ]] && echo "      exclude_paths: $(_yml_flow "${expl[@]}")"
 
                 if every=$(_yml_cron_to_every "$cron"); then
                     echo "      every: ${every}"
@@ -4482,6 +4495,7 @@ backup:
     # Slower, complete, off-site and encrypted.
     - name: ${app}-nightly
       scope: all           # all | files | db
+      exclude_paths: ["storage/app/uploads"]   # kept elsewhere (rsync): left out of the archive
       cron: "0 2 * * *"    # or use \`every:\`
       keep_days: 14
       destinations: [s3]   # local, s3 (the default bucket) and/or a named

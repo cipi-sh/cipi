@@ -19,7 +19,7 @@ source "${CIPI_LIB}/vault.sh"
 
 info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
-error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+error()   { _CIPI_ERROR_SHOWN=1; echo -e "${RED}[ERROR]${NC} $*" >&2; }
 success() { echo -e "${GREEN}✓${NC} $*"; }
 step()    { echo -e "${CYAN}→${NC} $*"; }
 
@@ -738,6 +738,30 @@ systemd_unit_exists() {
     [[ -n "$unit" ]] || return 1
     systemctl cat "${unit}.service" &>/dev/null
 }
+
+# ── The server on port 3306: MariaDB or MySQL ────────────────
+# MariaDB unless `cipi db switch mysql` replaced it (server.json
+# db_engines.mariadb.server). The engine keeps its id "mariadb" either way —
+# in apps.json, databases.json, the backup layout, cipi.yml and the panel's
+# API — so nothing that stores or exchanges it changes shape; these say which
+# server answers on it, under which name.
+db_mysql_flavor() {
+    if [[ -z "${_CIPI_MYSQL_FLAVOR:-}" ]]; then
+        _CIPI_MYSQL_FLAVOR=$(vault_read server.json 2>/dev/null | jq -r '.db_engines.mariadb.server // "mariadb"' 2>/dev/null || true)
+        [[ "$_CIPI_MYSQL_FLAVOR" == "mysql" ]] || _CIPI_MYSQL_FLAVOR="mariadb"
+    fi
+    echo "$_CIPI_MYSQL_FLAVOR"
+}
+# The command-line client. MySQL has no `mariadb`; MariaDB still ships `mysql`.
+db_mysql_client() {
+    if [[ "$(db_mysql_flavor)" == "mysql" ]] || ! command -v mariadb >/dev/null 2>&1; then
+        echo mysql
+    else
+        echo mariadb
+    fi
+}
+db_mysql_unit()  { [[ "$(db_mysql_flavor)" == "mysql" ]] && echo mysql || echo mariadb; }
+db_mysql_label() { [[ "$(db_mysql_flavor)" == "mysql" ]] && echo MySQL || echo MariaDB; }
 
 # Major version of the installed Deployer binary (e.g. "8"). Empty if `dep` is
 # missing/unreadable. Used to gate the PHP >= 8.3 requirement: only Deployer 8+
@@ -2455,7 +2479,7 @@ _reverb_allocate_port() {
 }
 
 # Supervisor program for Laravel Octane (FrankenPHP). Same conf file as queue workers
-# so cipi-worker stop/restart covers Octane on deploy.
+# so cipi-worker restart covers Octane on deploy.
 #
 # PHP_INI_SCAN_DIR: the compiled-in directory (leading ':'), the hardening
 # every Octane app loads, then the app's own directory (cipi app jit).

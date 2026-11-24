@@ -41,7 +41,7 @@ echo "-- dispatch / help / completion"
 grep -q 'source "${CIPI_LIB}/compliance.sh"' "${ROOT}/cipi" && pass "cipi sources compliance.sh" || fail "cipi does not source compliance.sh"
 grep -q 'compliance_command' "${ROOT}/cipi" && pass "cipi dispatches compliance" || fail "no compliance dispatch"
 grep -q '_help_cmd "cipi compliance' "${ROOT}/cipi" && pass "top-level help mentions compliance" || fail "help omits compliance"
-grep -q 'show_help_topic compliance' "${ROOT}/cipi" && pass "help all includes compliance" || fail "help all omits compliance"
+awk '/^_HELP_TOPICS=\(/,/\)/' "${ROOT}/cipi" | grep -qw compliance && pass "help all includes compliance" || fail "help all omits compliance"
 grep -q ' compliance ' <<< "$(sed -n '/_help_topics_list()/,/^EOF/p' "${ROOT}/cipi")" \
     && pass "compliance is in the help topics list" || fail "compliance missing from topics list"
 cmds=$(sed -n 's/.*local commands="\([^"]*\)".*/\1/p' "${LIB}/completion.sh" | head -1)
@@ -129,8 +129,8 @@ done
 echo "-- dispatch / help / completion (redirect / proxy)"
 grep -q 'source "${CIPI_LIB}/routes.sh"; redirect_command' "${ROOT}/cipi" && pass "cipi dispatches redirect" || fail "no redirect dispatch"
 grep -q 'source "${CIPI_LIB}/routes.sh";      proxy_command' "${ROOT}/cipi" && pass "cipi dispatches proxy" || fail "no proxy dispatch"
-grep -q 'show_help_topic redirect' "${ROOT}/cipi" && pass "help all includes redirect" || fail "help all omits redirect"
-grep -q 'show_help_topic proxy' "${ROOT}/cipi" && pass "help all includes proxy" || fail "help all omits proxy"
+awk '/^_HELP_TOPICS=\(/,/\)/' "${ROOT}/cipi" | grep -qw redirect && pass "help all includes redirect" || fail "help all omits redirect"
+awk '/^_HELP_TOPICS=\(/,/\)/' "${ROOT}/cipi" | grep -qw proxy && pass "help all includes proxy" || fail "help all omits proxy"
 topics=$(sed -n '/_help_topics_list()/,/^EOF/p' "${ROOT}/cipi")
 grep -q ' redirect ' <<< "$topics" && grep -q ' proxy ' <<< "$topics" \
     && pass "redirect and proxy in the help topics list" || fail "topics list omits redirect/proxy"

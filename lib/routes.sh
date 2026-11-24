@@ -514,7 +514,7 @@ _routes_reserved_local_port() {
     case "$port" in
         80|443) echo "nginx itself (proxy loop)"; return 0 ;;
         22)     echo "SSH"; return 0 ;;
-        3306)   echo "MariaDB"; return 0 ;;
+        3306)   db_mysql_label 2>/dev/null || echo "MariaDB"; return 0 ;;
         5432)   echo "PostgreSQL"; return 0 ;;
         6379)   echo "Valkey"; return 0 ;;
     esac

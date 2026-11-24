@@ -145,6 +145,7 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi db list, \
                                /usr/local/bin/cipi db list *, \
                                /usr/local/bin/cipi db engines, \
+                               /usr/local/bin/cipi db engines --json, \
                                /usr/local/bin/cipi db install *, \
                                /usr/local/bin/cipi db default *, \
                                /usr/local/bin/cipi db create *, \

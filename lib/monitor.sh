@@ -261,7 +261,7 @@ _mon_check_services() {
     if declare -f _resolve_services &>/dev/null; then
         services=$(_resolve_services all 2>/dev/null)
     else
-        services="nginx mariadb valkey-server supervisor fail2ban"
+        services="nginx $(db_mysql_unit) valkey-server supervisor fail2ban"
     fi
     local status=ok detail="" svc
     for svc in $services; do

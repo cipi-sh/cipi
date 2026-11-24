@@ -2,6 +2,13 @@
 #############################################
 # Cipi — Server credentials
 #############################################
+
+# Port 3306 runs MariaDB or MySQL (db_mysql_* in common.sh); MariaDB for
+# whatever sources this file without common.sh.
+declare -f db_mysql_flavor >/dev/null 2>&1 || db_mysql_flavor() { echo mariadb; }
+declare -f db_mysql_label  >/dev/null 2>&1 || db_mysql_label()  { echo MariaDB; }
+declare -f db_mysql_client >/dev/null 2>&1 || db_mysql_client() { command -v mariadb >/dev/null 2>&1 && echo mariadb || echo mysql; }
+
 # The passwords Cipi generates — root, the database roots, Valkey, the
 # Meilisearch master key, the backup encryption key — live encrypted in
 # /etc/cipi. The installer prints them once and waits until they are saved;
@@ -60,7 +67,7 @@ _cred_os() {
 _cred_url() {
     local engine="$1" ip="$2" user="$3" pass="$4"
     case "$engine" in
-        mariadb) echo "mariadb+ssh://cipi@${ip}/${user}:${pass}@127.0.0.1:3306/" ;;
+        mariadb) echo "$( [[ "$(db_mysql_flavor)" == "mysql" ]] && echo mysql || echo mariadb )+ssh://cipi@${ip}/${user}:${pass}@127.0.0.1:3306/" ;;
         pgsql)   echo "postgresql+ssh://cipi@${ip}/${user}:${pass}@127.0.0.1:5432/postgres" ;;
         valkey)  echo "redis://${user}:${pass}@127.0.0.1:6379" ;;
     esac
@@ -86,7 +93,7 @@ _cred_rows() {
         "Root has no SSH login: ssh cipi@${ip} with your key, then su root. Reset: cipi reset root-password"
 
     v=$(jq -r '.db_root_password // empty' <<< "$sj")
-    [[ -n "$v" ]] && _cred_row "Cipi ${host} — MariaDB root" "$(_cred_url mariadb "$ip" root "$v")" "root" "$v" \
+    [[ -n "$v" ]] && _cred_row "Cipi ${host} — $(db_mysql_label) root" "$(_cred_url mariadb "$ip" root "$v")" "root" "$v" \
         "Listens on 127.0.0.1 only; the URL opens it through SSH as cipi (TablePlus, DBeaver). Reset: cipi reset db-password"
 
     v=$(jq -r '.db_engines.pgsql.root_password // .pgsql_root_password // empty' <<< "$sj")
@@ -150,7 +157,7 @@ credentials_card() {
 
     v=$(jq -r '.db_root_password // empty' <<< "$sj")
     if [[ -n "$v" ]]; then
-        _cred_title "MariaDB"
+        _cred_title "$(db_mysql_label)"
         _cred_line "User" "root"
         _cred_line "Password" "$v"
         _cred_line "Host" "127.0.0.1:3306" "local only — over SSH from outside"

@@ -6,12 +6,17 @@ All notable changes to Cipi are documented in this file.
 
 ## [5.12.1] — 2026-11-24
 
-Deployer 7 and 8 number a release from .dep/latest_release and keep the list in .dep/releases_log; Deployer 6 numbered from .dep/releases and wrote neither. On servers that 5.10.0 moved from Deployer 6 to 8, every app started again at release 1 next to the old releases (cleanup and rollback no longer saw them) and a deploy stopped at "Release name "N" already exists" on the first name still taken.
+### Fixed
 
-- lib/deployer/release-name.php: release_name is max(latest_release, highest release in releases/) + 1; appended to deploy.php by deployer_release_name_ensure_hook (new deploy.php, cipi sync import)
-- deployer_release_state_repair: raises latest_release, puts Deployer 6 releases back in releases_log (marked "imported"), as the app user
-- compliance: imported lines are not unaudited releases
-- migration 5.12.1, tests/verify-5.12.1.sh
+- **Release numbers started again from 1 after 5.10.0, and deploys stopped at `Release name "2" already exists`.** Deployer 7 and 8 number a release from `.dep/latest_release` and keep the list in `.dep/releases_log`; Deployer 6 numbered from its own `.dep/releases` and wrote neither. On the servers that 5.10.0 moved from Deployer 6 (what `deployer.org/deployer.phar` served) to Deployer 8, the first deploy of every app made release `1` next to the old ones (`59 60 61`). Those were no longer in Deployer's list, so cleanup never removed them and `dep rollback` could not go back to them, and as soon as a name was already taken by an old directory the deploy failed at `deploy:release`. Servers that were already on Deployer 7 were not affected.
+  - **`deploy.php` gets a `release_name` that never repeats a release already in `releases/`**: the highest of `.dep/latest_release` and the highest numbered directory, plus one (`lib/deployer/release-name.php`, appended by `deployer_release_name_ensure_hook`, as the audit hook is). Laravel, Octane and Node apps; the custom recipe has no releases. Written into every new `deploy.php` and on `cipi sync` import. It also covers a `releases/` edited by hand, such as removing a release and pointing `current` back at an older one.
+  - **`deployer_release_state_repair`** (as the app user, idempotent) raises `.dep/latest_release` to the highest release, and puts the Deployer 6 releases back in `.dep/releases_log`, before the ones Deployer 8 made, with the dates of Deployer 6's own list (or of the directory). Each line it adds is marked `"imported"`. Skipped while a deploy holds the lock.
+  - `cipi compliance` does not report the imported lines as releases missing from the audit ledger.
+
+### Upgrade
+
+- `lib/migrations/5.12.1.sh` runs both for every app and prints what it changed (`release counter 1 → 61 (next release: 62)`, `Deployer 6 releases 59 60 61 imported`). No release is renamed, deleted or switched: `current` stays where it is. The next deploy follows the highest release (`62`), and its cleanup removes old releases past `keep_releases`, Deployer 6 ones included.
+- `tests/verify-5.12.1.sh`.
 
 ## [5.12.0] — 2026-11-23
 

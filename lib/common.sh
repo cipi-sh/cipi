@@ -792,6 +792,86 @@ deployer_unlock_ensure_hook() {
     return 0
 }
 
+# Deployer 7 and 8 number a release from .dep/latest_release; Deployer 6 kept
+# its own list (.dep/releases) and never wrote that file. The servers that went
+# from Deployer 6 to 8 with 5.10.0 started again at release 1 next to the old
+# releases, and a later deploy stopped at "Release name "N" already exists".
+# This appends lib/deployer/release-name.php, whose release_name is never at or
+# below a release already in releases/. Release-based recipes only (Laravel,
+# Octane, Node): the custom recipe has none. Appended as the app user, like the
+# audit hook.
+deployer_release_name_ensure_hook() {
+    local app="$1" df cur tpl
+    df="/home/${app}/.deployer/deploy.php"
+    [[ -f "$df" ]] || return 1
+    [[ "$(app_get "$app" custom 2>/dev/null || true)" == "true" ]] && return 0
+    cur=$(app_read "$app" "$df") || return 1
+    grep -q 'cipi:release-name' <<< "$cur" && return 0
+    grep -qE "recipe/(laravel|common)\.php" <<< "$cur" || return 0
+    grep -qE '^[[:space:]]*\?>[[:space:]]*$' <<< "$cur" && return 1
+    tpl="${CIPI_LIB}/deployer/release-name.php"
+    [[ -f "$tpl" ]] || return 1
+    app_append "$app" "$df" < "$tpl" || return 1
+    return 0
+}
+
+# What the move from Deployer 6 to 8 left behind in an app that had released
+# on Deployer 6, repaired as the app user (idempotent, prints one line per
+# change and nothing when there was nothing to do):
+#  - .dep/latest_release is raised to the highest release in releases/ when it
+#    is lower, so the next release follows it;
+#  - the releases Deployer 6 made, which are not in .dep/releases_log, go in
+#    it before the ones Deployer 8 made — in Deployer 6's order, with the date
+#    of its own .dep/releases (or of the directory) — so that deploy:cleanup
+#    removes them past keep_releases and `dep rollback` can go back to them.
+#    Only where Deployer 6's list is there; each line is marked "imported".
+# Skipped while a deploy holds the lock: Deployer appends to releases_log.
+deployer_release_state_repair() {   # <app>
+    local app="${1:-}"
+    [[ "$app" =~ ^[a-z][a-z0-9]{2,31}$ ]] || return 1
+    [[ "$(app_get "$app" custom 2>/dev/null || true)" == "true" ]] && return 0
+    app_sh "$app" '
+        cd -- "$1" 2>/dev/null || exit 0
+        [ -d releases ] && [ -d .dep ] && [ ! -L .dep ] || exit 0
+        if [ -e .dep/deploy.lock ]; then
+            echo "skipped: a deploy holds the lock (.dep/deploy.lock) — when it is over: bash /opt/cipi/lib/migrations/5.12.1.sh"
+            exit 0
+        fi
+        names=$(ls -1 releases 2>/dev/null | grep -x "[0-9][0-9]*" | sort -n)
+        [ -n "$names" ] || exit 0
+        highest=$(printf "%s\n" "$names" | tail -n 1)
+        latest=$(cat .dep/latest_release 2>/dev/null || true)
+        case "$latest" in ""|*[!0-9]*) latest=0 ;; esac
+        if [ "$highest" -gt "$latest" ]; then
+            [ ! -L .dep/latest_release ] || exit 1
+            printf "%s\n" "$highest" > .dep/latest_release || exit 1
+            echo "release counter ${latest} → ${highest} (next release: $((highest + 1)))"
+        fi
+        [ -f .dep/releases ] && [ ! -L .dep/releases ] && [ ! -L .dep/releases_log ] || exit 0
+        known=""
+        [ -f .dep/releases_log ] && known=$(jq -R -r "fromjson? | .release_name // empty | tostring" .dep/releases_log 2>/dev/null)
+        rows=$(mktemp .dep/.cipi-import.XXXXXX) || exit 1
+        trap "rm -f \"\$rows\" \"\$rows.log\"" EXIT
+        for n in $names; do
+            printf "%s\n" "$known" | grep -qx "$n" && continue
+            d=$(grep -E "^[0-9]{14},${n}\$" .dep/releases | tail -n 1 | cut -d, -f1)
+            ts=""
+            [ -n "$d" ] && ts=$(date -d "${d:0:4}-${d:4:2}-${d:6:2} ${d:8:2}:${d:10:2}:${d:12:2}" +%s 2>/dev/null)
+            [ -n "$ts" ] || ts=$(stat -c %Y "releases/$n")
+            printf "%s %s\n" "$ts" "$n" >> "$rows"
+        done
+        [ -s "$rows" ] || exit 0
+        sort -k1,1n -k2,2n "$rows" | while read -r ts n; do
+            jq -cn --arg c "$(date -u -d "@$ts" +%Y-%m-%dT%H:%M:%S+0000)" --arg n "$n" \
+                "{created_at: \$c, release_name: \$n, user: \"deployer6\", target: \"\", imported: \"deployer6\"}"
+        done > "$rows.log" || exit 1
+        [ -f .dep/releases_log ] && cat .dep/releases_log >> "$rows.log"
+        cat "$rows.log" > .dep/releases_log || exit 1
+        imported=$(sort -k1,1n -k2,2n "$rows" | cut -d" " -f2 | paste -sd" " -)
+        echo "releases_log: Deployer 6 releases ${imported} imported — cleanup and rollback see them again"
+    ' "/home/${app}"
+}
+
 app_exists() {
     [[ -f "${CIPI_CONFIG}/apps.json" ]] && vault_read apps.json | jq -e --arg a "$1" '.[$a]' &>/dev/null
 }

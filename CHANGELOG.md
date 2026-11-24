@@ -4,6 +4,15 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.12.1] — 2026-11-24
+
+Deployer 7 and 8 number a release from .dep/latest_release and keep the list in .dep/releases_log; Deployer 6 numbered from .dep/releases and wrote neither. On servers that 5.10.0 moved from Deployer 6 to 8, every app started again at release 1 next to the old releases (cleanup and rollback no longer saw them) and a deploy stopped at "Release name "N" already exists" on the first name still taken.
+
+- lib/deployer/release-name.php: release_name is max(latest_release, highest release in releases/) + 1; appended to deploy.php by deployer_release_name_ensure_hook (new deploy.php, cipi sync import)
+- deployer_release_state_repair: raises latest_release, puts Deployer 6 releases back in releases_log (marked "imported"), as the app user
+- compliance: imported lines are not unaudited releases
+- migration 5.12.1, tests/verify-5.12.1.sh
+
 ## [5.12.0] — 2026-11-23
 
 The panel's server page had an SMTP tab and nothing else: Resend, SES, Slack, Discord, Mattermost, Google Chat, Telegram, ntfy, Pushover and webhooks, and the 100-odd triggers, were CLI only. This release gives the panel API what it needs to manage all of them (API 1.42, panel 4.4).

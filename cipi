@@ -24,6 +24,24 @@ CYAN=$'\033[0;36m'; DIM=$'\033[2m'; NC=$'\033[0m'; BOLD=$'\033[1m'
 }
 source "${CIPI_LIB}/common.sh"
 
+# A command that fails where nothing checks it ends cipi (set -e). Say where,
+# instead of going back to the prompt in silence — as `cipi db switch mysql`
+# did on 5.13.0 right after "Checking the MySQL packages...". Not once an
+# error has been printed (that is the message), and not inside $(…),
+# pipelines or ( … ): their status is judged by the command that runs them.
+_cipi_unexpected_stop() {
+    local rc=$? cmd="${BASH_COMMAND}" where
+    (( BASH_SUBSHELL == 0 )) || return 0
+    [[ -z "${_CIPI_ERROR_SHOWN:-}" ]] || return 0
+    _CIPI_ERROR_SHOWN=1
+    where="${BASH_SOURCE[1]##*/}:${BASH_LINENO[0]}"
+    [[ -n "${FUNCNAME[1]:-}" && "${FUNCNAME[1]}" != main ]] && where+=" in ${FUNCNAME[1]}()"
+    echo -e "${RED}[ERROR]${NC} Stopped unexpectedly at ${where} (exit ${rc}): ${cmd}" >&2
+    echo -e "        ${DIM}Nothing after it ran. Please report it: https://github.com/cipi-sh/cipi/issues${NC}" >&2
+}
+set -E
+trap _cipi_unexpected_stop ERR
+
 require_root() {
     if [[ $EUID -ne 0 ]]; then
         error "Run as root: sudo cipi $*"
@@ -50,16 +68,43 @@ show_logo() {
 }
 
 # ── Help helpers ─────────────────────────────────────────────
-_help_h()    { echo -e "\n  ${BOLD}${CYAN}$1${NC}"; }
-_help_cmd()  { printf "    ${CYAN}%-44s${NC} %s\n" "$1" "$2"; }
+# Laid out like `php artisan list`: titles and namespaces in yellow, commands
+# in green, their arguments dimmed, descriptions in one column.
+_HELP_W=44
+_help_h()    { echo -e "\n  ${YELLOW}$1${NC}"; }
 _help_note() { echo -e "    ${DIM}$1${NC}"; }
+
+# "cipi app create [--custom]" → _HS_NAME="cipi app create", _HS_ARGS="[--custom]":
+# the command words up to the first argument, option or placeholder.
+# (read -a, not `for w in $1`: "[--json]" would be a glob.)
+_help_split() {
+    local -a w; local t in=0
+    read -ra w <<< "$1"
+    _HS_NAME=""; _HS_ARGS=""
+    for t in "${w[@]}"; do
+        if (( in == 0 )) && [[ "$t" != [\<\[\(]* && "$t" != *=* && "$t" != -* && "$t" != …* && "$t" != ...* ]]; then
+            _HS_NAME+="${_HS_NAME:+ }${t}"
+        else
+            in=1; _HS_ARGS+="${_HS_ARGS:+ }${t}"
+        fi
+    done
+}
+
+_help_cmd() {
+    local shown pad
+    _help_split "$1"
+    shown="${_HS_NAME}${_HS_ARGS:+ ${_HS_ARGS}}"
+    pad=$(( _HELP_W - ${#shown} )); (( pad >= 1 )) || pad=1
+    printf "    ${GREEN}%s${NC}${DIM}%s${NC}%*s%s\n" "$_HS_NAME" "${_HS_ARGS:+ ${_HS_ARGS}}" "$pad" "" "$2"
+}
+
 _help_topic_header() {
     if [[ -n "${CIPI_HELP_INLINE:-}" ]]; then
-        echo -e "\n  ${BOLD}${CYAN}$1${NC}"
+        echo -e "\n ${YELLOW}${BOLD}$1${NC}"
         echo -e "  ${DIM}────────────────────────────────────────${NC}"
     else
         show_logo
-        echo -e "${BOLD}Cipi v${CIPI_VERSION}${NC} ${DIM}— $1${NC}"
+        echo -e "${GREEN}Cipi${NC} ${YELLOW}${CIPI_VERSION}${NC} ${DIM}— $1${NC}"
     fi
 }
 
@@ -71,6 +116,44 @@ git  ini  yml  nginx  api  gui  notification  smtp  reset  credentials  server  
 EOF
 }
 
+# The order of `cipi help` and `cipi help all`.
+_HELP_TOPICS=(server updates service app use domains www redirect proxy auth basicauth deploy worker schedule
+              health monitor metrics db search node api gui git sync ssh ssl php frankenphp package firewall ban
+              crowdsec zt scan compliance backup ini yml nginx smtp notification valkey reset credentials completion)
+
+# Every command of every topic, one line each: "name<TAB>description", from
+# the topics' own _help_cmd lines — the list cannot drift from them. The
+# name is the command words, plus the options that make it another command
+# (deploy --rollback); the description stops where its dimmed options start.
+_help_index() {
+    (
+        _help_cmd() { printf '%s\t%s\t%s\n' "$1" "$2" "$t" >&3; }
+        CIPI_HELP_INLINE=1
+        for t in "${_HELP_TOPICS[@]}"; do ( show_help_topic "$t" ) || true; done
+    ) 3>&1 >/dev/null 2>&1 | awk -F '\t' -v dim="$DIM" '
+        BEGIN { esc = sprintf("%c", 27) }
+        $1 !~ /^cipi / { next }
+        {
+            d = $2; i = index(d, dim); if (i > 1) d = substr(d, 1, i - 1)
+            gsub(esc "\\[[0-9;]*m", "", d); sub(/[ \t]+$/, "", d)
+            n = split($1, w, " "); name = ""; args = 0
+            for (k = 2; k <= n; k++) {
+                t = w[k]
+                if (!args && t !~ /^[<\[(-]/ && t !~ /=/ && t !~ /^(\.\.\.|…)/) { name = name (name == "" ? "" : " ") t; continue }
+                args = 1
+                if (t ~ /^--[a-z][a-z-]*$/ && t !~ /^--(json|yes|force|dry-run|print|all|check|clear|quiet|wait|no-[a-z-]+)$/) name = name " " t
+            }
+            if (name == "") next
+            r++; nm[r] = name; ds[r] = d
+            split(name, f, " ")
+            # A command listed in several topics is shown where its own topic
+            # (app limits under app, not under server) puts it.
+            if (!(name in pick) || ($3 == f[1] && tp[pick[name]] != f[1])) pick[name] = r
+            tp[r] = $3
+        }
+        END { for (k = 1; k <= r; k++) if (pick[nm[k]] == k) print nm[k] "\t" ds[k] }'
+}
+
 show_help() {
     local topic="${1:-}"
 
@@ -79,65 +162,50 @@ show_help() {
         return
     fi
 
+    # Longer than a screen: through less, from the top (quits when it fits).
+    if [[ -t 1 && -z "${CIPI_NO_PAGER:-}" ]] && command -v less >/dev/null 2>&1; then
+        # (Quitting less early ends the writer with SIGPIPE: not a failure.)
+        CIPI_NO_PAGER=1 show_help | less -R -F -X || true
+        return 0
+    fi
+    local cols; cols=$(tput cols 2>/dev/null || true); [[ "$cols" =~ ^[0-9]+$ ]] || cols=120
     show_logo
-    echo -e "${BOLD}Cipi v${CIPI_VERSION}${NC} ${DIM}— Server Control Panel for Laravel${NC}"
+    echo -e "${GREEN}Cipi${NC} ${YELLOW}${CIPI_VERSION}${NC} ${DIM}— Server Control Panel for Laravel${NC}"
     echo ""
-    echo -e "  Usage:  ${CYAN}cipi <command> [args]${NC}"
-    echo -e "          ${CYAN}cipi help <topic>${NC}"
+    echo -e "${YELLOW}Usage:${NC}"
+    echo -e "  cipi <command> [arguments] [options]"
+    echo -e "  cipi help <topic>                  ${DIM}every option of a command, with notes${NC}"
     echo ""
-    echo -e "  ${BOLD}Core${NC}"
-    _help_cmd "cipi status"              "Server overview"
-    _help_cmd "cipi disk"                "Disk usage: server and per app  ${DIM}db · [--json]${NC}"
-    _help_cmd "cipi version"             "Cipi version"
-    _help_cmd "cipi self-update"         "Update Cipi  ${DIM}[--check]${NC}"
-    _help_cmd "cipi pending"             "What is waiting: a reboot, a patch, a warning  ${DIM}[--json]${NC}"
-    _help_cmd "cipi autoupdate ..."      "Nightly patches: nginx, databases, Valkey, Node, Composer  ${DIM}on|off|run${NC}"
-    _help_cmd "cipi reboot ..."          "Is a reboot needed; restart now or automatically  ${DIM}now|auto on|off${NC}"
-    _help_cmd "cipi completion bash|zsh" "Shell tab-completion"
-    _help_cmd "cipi service ..."           "nginx, mariadb, php-fpm, ..."
+    echo -e "${YELLOW}Options:${NC}"
+    printf "  ${GREEN}%-20s${NC} %s\n" "-h, --help" "Help of a command: cipi db --help, cipi help db" \
+                                      "-v, --version" "The version of Cipi" \
+                                      "    --json" "Machine-readable output, where a command has it" \
+                                      "    --yes" "Go on without asking, where a command asks first"
     echo ""
-    echo -e "  ${BOLD}Apps & deploy${NC}"
-    _help_cmd "cipi app ..."               "Create, edit, logs, env, ..."
-    _help_cmd "cipi use <app>"             "Default app for the per-app commands  ${DIM}[--clear]${NC}"
-    _help_cmd "cipi node ..."              "Node frontends: SPA, static, SSR  ${DIM}install|status|restart${NC}"
-    _help_cmd "cipi domains / alias / www" "Domains, aliases & www redirects"
-    _help_cmd "cipi redirect / proxy ..."  "Nginx redirects & prefix reverse proxies"
-    _help_cmd "cipi deploy <app>"        "Deploy / rollback / webhook"
-    _help_cmd "cipi worker ..."            "Queue workers / Horizon"
-    _help_cmd "cipi schedule ..."          "Laravel scheduler on/off"
-    _help_cmd "cipi health ..."            "HTTP healthchecks, incl. post-deploy"
-    _help_cmd "cipi monitor ..."           "Server checks: disk, app disk limits, ssl, services, workers, 5xx"
-    _help_cmd "cipi metrics ..."           "History: CPU, memory, requests, 5xx, uptime; heartbeat; OpenMetrics"
-    _help_cmd "cipi db ..."                "Databases"
-    _help_cmd "cipi search ..."            "Meilisearch for Scout (opt-in)  ${DIM}install|enable${NC}"
+    echo -e "${YELLOW}Available commands:${NC}"
+    _help_index | awk -F '\t' -v g="$GREEN" -v y="$YELLOW" -v nc="$NC" -v cols="$cols" '
+        { name[NR] = $1; desc[NR] = $2; split($1, w, " "); ns[NR] = w[1]; count[w[1]]++
+          if (length($1) > width) width = length($1) }
+        END {
+            if (width > 32) width = 32
+            room = cols - width - 5
+            for (i = 1; i <= NR; i++) if (count[ns[i]] == 1 && name[i] !~ / /) line(i)
+            for (i = 1; i <= NR; i++) {
+                if (count[ns[i]] == 1 && name[i] !~ / /) continue
+                if (!(ns[i] in done)) {
+                    done[ns[i]] = 1
+                    printf " %s%s%s\n", y, ns[i], nc
+                    for (j = i; j <= NR; j++) if (ns[j] == ns[i]) line(j)
+                }
+            }
+        }
+        function line(k,   d) {
+            d = desc[k]
+            if (room > 20 && length(d) > room) d = substr(d, 1, room - 1) "…"
+            printf "  %s%-" width "s%s  %s\n", g, name[k], nc, d
+        }'
     echo ""
-    echo -e "  ${BOLD}Security & access${NC}"
-    _help_cmd "cipi ssl / ssh / firewall / ban"  "Certs, keys, firewall, bans"
-    _help_cmd "cipi crowdsec ..."          "IP reputation (opt-in)  ${DIM}enable|disable|status|rescue${NC}"
-    _help_cmd "cipi zt ..."                "Cloudflare Zero Trust (opt-in)  ${DIM}enable|hostname|access|lock${NC}"
-    _help_cmd "cipi scan ..."              "Nightly malware scan (opt-in)  ${DIM}enable|disable|<app>${NC}"
-    _help_cmd "cipi compliance ..."        "ISO 27001 / SOC 2 evidence  ${DIM}check|report${NC}"
-    _help_cmd "cipi auth / basicauth ..."  "Composer auth.json & HTTP basic auth"
-    _help_cmd "cipi valkey ..."            "One Valkey instance per app  ${DIM}list|isolate|share${NC}"
-    _help_cmd "cipi reset ..."             "Reset root / DB / Valkey passwords"
-    _help_cmd "cipi credentials ..."       "The server passwords again, or as CSV for a password manager  ${DIM}[export]${NC}"
-    echo ""
-    echo -e "  ${BOLD}Panel${NC}"
-    _help_cmd "cipi api ..."               "REST API for the control panel"
-    _help_cmd "cipi gui ..."               "Web control panel"
-    echo ""
-    echo -e "  ${BOLD}Ops${NC}"
-    _help_cmd "cipi php / ini"                   "PHP versions and php.ini settings"
-    _help_cmd "cipi frankenphp ..."              "FrankenPHP builds of Octane apps  ${DIM}status|upgrade|use|import${NC}"
-    _help_cmd "cipi package ..."                 "Optional tools  ${DIM}ffmpeg, image optimisers, pdftotext${NC}"
-    _help_cmd "cipi backup ..."                  "Backup profiles, schedules, retention"
-    _help_cmd "cipi yml ..."                     "Apply a project's cipi.yml"
-    _help_cmd "cipi nginx / sync / git"          "Default server, migrate apps, Git tokens"
-    _help_cmd "cipi notification ..."            "Alerts: SMTP, Resend, SES, Slack, Telegram, webhook, …  ${DIM}add|test|triggers${NC}"
-    echo ""
-    echo -e "  ${DIM}Detailed help:${NC}  ${CYAN}cipi help <topic>${NC}"
-    echo -e "  ${DIM}Topics:${NC}         $(_help_topics_list | tr '\n' ' ' | sed 's/  */ /g')"
-    echo -e "  ${DIM}Everything:${NC}     ${CYAN}cipi help all${NC}"
+    echo -e "  ${DIM}Every option of a command, with notes:${NC} ${GREEN}cipi help <topic>${NC}  ${DIM}·  all of them:${NC} ${GREEN}cipi help all${NC}"
     echo ""
 }
 
@@ -1062,53 +1130,12 @@ show_help_topic() {
 # Full dump (former monolithic help) for power users / docs.
 show_help_all() {
     show_logo
-    echo -e "${BOLD}Cipi v${CIPI_VERSION}${NC} ${DIM}— all commands${NC}"
-    echo -e "  ${DIM}Tip: use ${CYAN}cipi help <topic>${DIM} for a shorter view${NC}"
+    echo -e "${GREEN}Cipi${NC} ${YELLOW}${CIPI_VERSION}${NC} ${DIM}— all commands, with their options${NC}"
+    echo -e "  ${DIM}A shorter view: ${GREEN}cipi help${DIM} (the list) or ${GREEN}cipi help <topic>${NC}"
 
     CIPI_HELP_INLINE=1
-    show_help_topic server
-    show_help_topic updates
-    show_help_topic service
-    show_help_topic app
-    show_help_topic domains
-    show_help_topic www
-    show_help_topic redirect
-    show_help_topic proxy
-    show_help_topic auth
-    show_help_topic basicauth
-    show_help_topic deploy
-    show_help_topic worker
-    show_help_topic schedule
-    show_help_topic health
-    show_help_topic monitor
-    show_help_topic metrics
-    show_help_topic db
-    show_help_topic search
-    show_help_topic node
-    show_help_topic api
-    show_help_topic gui
-    show_help_topic git
-    show_help_topic sync
-    show_help_topic ssh
-    show_help_topic ssl
-    show_help_topic php
-    show_help_topic frankenphp
-    show_help_topic package
-    show_help_topic firewall
-    show_help_topic ban
-    show_help_topic crowdsec
-    show_help_topic zt
-    show_help_topic scan
-    show_help_topic compliance
-    show_help_topic backup
-    show_help_topic ini
-    show_help_topic yml
-    show_help_topic nginx
-    show_help_topic smtp
-    show_help_topic notification
-    show_help_topic valkey
-    show_help_topic reset
-    show_help_topic completion
+    local t
+    for t in "${_HELP_TOPICS[@]}"; do show_help_topic "$t"; done
     unset CIPI_HELP_INLINE
     echo ""
 }

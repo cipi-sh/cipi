@@ -126,7 +126,10 @@ _stack_upgrade_version() {
 _stack_upgrade_candidate() {
     local pkg
     pkg=$(_stack_upgrade_main_pkg "$1") || return 1
-    apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/{print $2; exit}'
+    # Read whole: an awk that exits at the first match (gawk reads as lines
+    # come) leaves apt-cache to die of SIGPIPE, and pipefail fails the caller.
+    local out; out=$(apt-cache policy "$pkg" 2>/dev/null) || true
+    awk '/^[[:space:]]*Candidate:/ && !f { print $2; f = 1 }' <<< "$out"
 }
 
 # Third-party repos Cipi already configured at install time. Re-assert them

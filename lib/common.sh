@@ -19,7 +19,7 @@ source "${CIPI_LIB}/vault.sh"
 
 info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
-error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+error()   { _CIPI_ERROR_SHOWN=1; echo -e "${RED}[ERROR]${NC} $*" >&2; }
 success() { echo -e "${GREEN}✓${NC} $*"; }
 step()    { echo -e "${CYAN}→${NC} $*"; }
 

@@ -241,7 +241,7 @@ _deploy_run() {
     # deploy that was interrupted (a reboot, a kill; one that fails releases
     # its own): it is removed here, nobody has to run --unlock first.
     if [[ -f "${home}/.dep/deploy.lock" ]]; then
-        if _deploy_live_pids "$app" | grep -q $'\tdep$'; then
+        if grep -q $'\tdep$' <<< "$(_deploy_live_pids "$app")"; then
             error "A deploy of '${app}' is running — wait for it: cipi deploy ${app} --status"
             exit 1
         fi
@@ -817,7 +817,7 @@ _deploy_status() {
     local queued=false locked=false paused=""
     [[ -f "${home}/.deploy-trigger" ]] && queued=true
     [[ -f "${home}/.dep/deploy.lock" ]] && locked=true
-    [[ -f "${home}/.dep/cipi-paused-commit" ]] && paused=$(app_read "$app" "${home}/.dep/cipi-paused-commit" 2>/dev/null | head -n 1 | tr -cd '0-9a-f')
+    [[ -f "${home}/.dep/cipi-paused-commit" ]] && paused=$(app_read "$app" "${home}/.dep/cipi-paused-commit" 2>/dev/null | sed -n 1p | tr -cd '0-9a-f')
     local pids; pids=$(_deploy_live_pids "$app")
     local pid_list=""; [[ -n "$pids" ]] && pid_list=$(cut -f1 <<< "$pids" | tr '\n' ' ')
 
@@ -1118,7 +1118,7 @@ _deploy_unlock() {
         done=true
     fi
     if [[ -f "$pausefile" ]]; then
-        c=$(app_read "$app" "$pausefile" 2>/dev/null | head -n 1 | tr -cd '0-9a-f')
+        c=$(app_read "$app" "$pausefile" 2>/dev/null | sed -n 1p | tr -cd '0-9a-f')
         app_rm "$app" "$pausefile" || true
         success "Automatic deploys resumed${c:+ — commit ${c:0:12} deploys again on the next push or webhook}"
         log_action "DEPLOY RESUME: $app ${c:0:12}"

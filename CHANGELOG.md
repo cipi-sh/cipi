@@ -4,6 +4,23 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.13.1] — 2026-11-24
+
+### Fixed
+
+- **`cipi db switch mysql` stopped right after "Checking the MySQL packages...", with nothing said** (Ubuntu 24.04 and 26.04). The candidate came from `apt-cache policy mysql-server | awk '/Candidate:/{print $2; exit}'`. Ubuntu Server's `awk` is gawk (byobu depends on it), which reads lines as they arrive: it exits at the candidate line, apt-cache — which flushes a line at a time — dies of SIGPIPE writing the version table, and under `set -o pipefail` the assignment fails, so `set -e` ended `cipi`. Nothing had been changed yet. apt's output is now read whole (`_db_apt_candidate`), and when there is no candidate the first lines of `apt-cache policy` are shown. The same pattern is gone from `cipi service upgrade` / `cipi autoupdate` (`_stack_upgrade_candidate`) and from CrowdSec's SSH client lookup.
+- The rest of the switch, looked at for the same kind of stop: the MySQL version read after the install, and a rollback that stopped at its first failing step (packages, data directory) — every step is now tried and a failure is reported.
+- Pipelines in the 5.13.0 deploy code that a consumer leaving early could fail: the deploy wrapper's "is it still running" and "was the lock refused" checks, the branch read from `deploy.php`, `cipi deploy`'s "a deploy is running" check and the paused commit.
+
+### Added
+
+- **A stop that nothing checked says where it happened**, instead of leaving you at the prompt: `[ERROR] Stopped unexpectedly at db.sh:986 in _db_switch_run() (exit 141): …`. Not after an error that was already printed, and not for failures inside `$(…)`, pipelines or subshells, which the command that runs them judges.
+- **`cipi help` lists every command like `php artisan list`**: Usage, Options, then Available commands — the top-level ones, then one namespace per command family, commands in green, descriptions in one column — built from the topics' own lines, so it cannot drift from `cipi help <topic>`. In a terminal it opens in `less` (quits when it fits). `cipi help <topic>` and `cipi help all` show the command in green and its arguments dimmed; `help all` now includes `use` and `credentials`.
+
+### Upgrade
+
+- `cipi self-update`. `tests/verify-5.13.1.sh`; `tests/verify-5.13.0.sh` now runs the switch under `set -euo pipefail`, with an apt-cache that writes a line at a time and an awk that reads like gawk — 5.13.0 fails it the way it failed on the servers.
+
 ## [5.13.0] — 2026-11-24
 
 A deploy that fails should not need anyone to unlock anything: fix the code, push, and the webhook deploys it. Most of that was already true — since 5.9.0 a deploy that fails releases its own lock (`deploy:failed` → `deploy:unlock`) — but two things still got in the way, and the one thing worth holding back was not held back. Deploys no longer wait for the jobs in progress either (#536). Backups can leave folders out, and port 3306 can run MySQL instead of MariaDB.

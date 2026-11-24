@@ -64,7 +64,7 @@ _dep_alive() {
 _wrapper_alive() {   # the run that holds RUN_DIR is still going
     local p; p=$(head -c 20 "${RUN_DIR}/pid" 2>/dev/null || true)
     [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null \
-        && tr '\0' ' ' < "/proc/${p}/cmdline" 2>/dev/null | grep -q "cipi-app-deploy ${APP} "
+        && [[ "$(tr '\0' ' ' < "/proc/${p}/cmdline" 2>/dev/null)" == *"cipi-app-deploy ${APP} "* ]]
 }
 if ! mkdir "$RUN_DIR" 2>/dev/null; then
     if _wrapper_alive; then _requeue; exit 0; fi
@@ -136,9 +136,9 @@ PAUSE_FILE="${HOME_DIR}/.dep/cipi-paused-commit"
 # of the remote with the deploy key, as Deployer does. Empty when unknown.
 _branch_head() {
     local repo branch sshc
-    repo=$(sed -n "s/^set('repository', '\(.*\)');[[:space:]]*\$/\1/p" "$DEPLOY_FILE" 2>/dev/null | head -n 1)
-    branch=$(sed -n "s/^set('branch', '\(.*\)');[[:space:]]*\$/\1/p" "$DEPLOY_FILE" 2>/dev/null | head -n 1)
-    sshc=$(sed -n "s/^set('git_ssh_command', '\(.*\)');[[:space:]]*\$/\1/p" "$DEPLOY_FILE" 2>/dev/null | head -n 1)
+    repo=$(sed -n "s/^set('repository', '\(.*\)');[[:space:]]*\$/\1/p" "$DEPLOY_FILE" 2>/dev/null | sed -n 1p)
+    branch=$(sed -n "s/^set('branch', '\(.*\)');[[:space:]]*\$/\1/p" "$DEPLOY_FILE" 2>/dev/null | sed -n 1p)
+    sshc=$(sed -n "s/^set('git_ssh_command', '\(.*\)');[[:space:]]*\$/\1/p" "$DEPLOY_FILE" 2>/dev/null | sed -n 1p)
     [[ -n "$repo" && -n "$branch" ]] || return 0
     GIT_SSH_COMMAND="${sshc:-ssh} -o BatchMode=yes" GIT_TERMINAL_PROMPT=0 \
         timeout 30 git ls-remote -- "$repo" "refs/heads/${branch}" 2>/dev/null | awk 'NR == 1 { print $1 }'
@@ -195,7 +195,7 @@ RC=${PIPESTATUS[0]}
 # Deployer's own (`cipi deploy` or the panel, that very second): not a failure
 # of this push, which goes back in the queue.
 LOCK_REFUSED=false
-if [[ $RC -ne 0 ]] && tail -n +"$((DEP_MARK + 1))" "$LOG" 2>/dev/null | grep -q 'Deploy locked by'; then
+if [[ $RC -ne 0 ]] && grep -q 'Deploy locked by' < <(tail -n +"$((DEP_MARK + 1))" "$LOG" 2>/dev/null); then
     LOCK_REFUSED=true
 fi
 

@@ -237,7 +237,16 @@ cat > "${D}/bin/dpkg-query" <<STUB
 #!/bin/bash
 while read -r p; do [[ -n "\$p" ]] && echo "installed \$p"; done < "${D}/pkgs"
 STUB
-printf '#!/bin/bash\nprintf "mysql-server:\\n  Installed: (none)\\n  Candidate: 8.4.11-0ubuntu0.26.04.1\\n"\n' > "${D}/bin/apt-cache"
+# apt-cache as the real one writes: a line at a time, the version table after
+# the candidate; and awk as gawk (Ubuntu Server's) reads: as lines come. An
+# `awk '…{print; exit}'` on it kills apt-cache with SIGPIPE (5.13.1).
+cat > "${D}/bin/apt-cache" <<'STUB'
+#!/bin/bash
+echo "mysql-server:"; echo "  Installed: (none)"; echo "  Candidate: 8.4.11-0ubuntu0.26.04.1"
+sleep 0.2; echo "  Version table:"; echo "     8.4.11-0ubuntu0.26.04.1 500"
+STUB
+if command -v gawk >/dev/null 2>&1; then ln -sf "$(command -v gawk)" "${D}/bin/awk"
+else printf '#!/bin/bash\nexec mawk -W interactive "$@"\n' > "${D}/bin/awk"; fi
 cat > "${D}/bin/systemctl" <<STUB
 #!/bin/bash
 echo "systemctl \$*" >> "${D}/calls"
@@ -276,6 +285,9 @@ printf '#!/bin/bash\nexit 1\n' > "${D}/bin/pgrep"; printf '#!/bin/bash\necho "Me
 chmod +x "${D}/bin/"*
 echo "S3cret" > "${D}/root.pass"
 cat > "${D}/run.sh" <<RUN
+# As cipi runs: set -euo pipefail (a failure nothing checks ends it).
+set -euo pipefail
+RED=\$'\\033[0;31m'; GREEN=\$'\\033[0;32m'; YELLOW=\$'\\033[1;33m'; CYAN=\$'\\033[0;36m'; DIM=\$'\\033[2m'; NC=\$'\\033[0m'; BOLD=\$'\\033[1m'
 export CIPI_LIB="${D}/lib" CIPI_CONFIG="${D}/cfg" CIPI_LOG="${D}/log"
 export DB_MYSQL_ETC="${D}/etc" DB_MYSQL_DATA="${D}/data/mysql" APT_SOURCES_DIR="${D}/sources" CIPI_UNATTENDED_FILE="${D}/uu"
 export PATH="${D}/bin:\${PATH}"
@@ -389,7 +401,7 @@ cmp -s "${E}/.env" "${E}/before.env" && pass "…a missing, repeated, unknown or
 grep -q -- '--order=\*) order=' "${LIB}/app.sh" && grep -q 'Order not applied' "${LIB}/app.sh" && pass "cipi app env --order (after --set/--unset)" || fail "--order flag"
 
 # ── cipi deploy (deploy.sh) ──────────────────────────────────
-grep -q '_deploy_live_pids "$app" | grep -q' "${LIB}/deploy.sh" && pass "cipi deploy refuses while Deployer runs, removes a stale lock" || fail "deploy.sh lock check"
+grep -qF '<<< "$(_deploy_live_pids "$app")"' "${LIB}/deploy.sh" && pass "cipi deploy refuses while Deployer runs, removes a stale lock" || fail "deploy.sh lock check"
 grep -q 'cipi-paused-commit' "${LIB}/deploy.sh" && grep -q 'paused_commit:' "${LIB}/deploy.sh" && pass "deploy by hand, --unlock and --status know the paused commit" || fail "deploy.sh pause"
 
 echo ""

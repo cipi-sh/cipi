@@ -67,13 +67,13 @@ grep -q 'source "${CIPI_LIB}/zt.sh"' "${ROOT}/cipi" && pass "cipi sources zt.sh"
 grep -q '_help_cmd "cipi zt' "${ROOT}/cipi" && pass "top-level help mentions cipi zt" || fail "help omits cipi zt"
 grep -q 'zt|zerotrust|zero-trust|cloudflare|tunnel)' "${ROOT}/cipi" \
     && pass "help topic aliases include zt" || fail "no zt help topic"
-grep -q 'show_help_topic zt' "${ROOT}/cipi" && pass "help all includes zt" || fail "help all omits zt"
+awk '/^_HELP_TOPICS=\(/,/\)/' "${ROOT}/cipi" | grep -qw zt && pass "help all includes zt" || fail "help all omits zt"
 
 echo "-- dispatch / help / completion (monitor)"
 grep -q 'monitor_command' "${ROOT}/cipi" && pass "cipi dispatches monitor" || fail "no monitor dispatch"
 grep -q 'source "${CIPI_LIB}/monitor.sh"' "${ROOT}/cipi" && pass "cipi sources monitor.sh" || fail "cipi does not source monitor.sh"
 grep -q '_help_cmd "cipi monitor' "${ROOT}/cipi" && pass "top-level help mentions cipi monitor" || fail "help omits cipi monitor"
-grep -q 'show_help_topic monitor' "${ROOT}/cipi" && pass "help all includes monitor" || fail "help all omits monitor"
+awk '/^_HELP_TOPICS=\(/,/\)/' "${ROOT}/cipi" | grep -qw monitor && pass "help all includes monitor" || fail "help all omits monitor"
 grep -q ' monitor ' <<< "$(sed -n '/_help_topics_list()/,/^EOF/p' "${ROOT}/cipi")" \
     && pass "monitor is in the help topics list" || fail "monitor missing from topics list"
 

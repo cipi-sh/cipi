@@ -785,6 +785,17 @@ _db_install_mariadb() {
 
 _db_apt() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 "$@"; }
 
+# The version apt would install, empty when none. apt's output is read whole:
+# with `| awk '…{print; exit}'` gawk — the awk of Ubuntu Server, through
+# byobu — stops reading at the first match, apt-cache dies of SIGPIPE on its
+# next line, and under pipefail set -e ended `cipi db switch` right after
+# "Checking the MySQL packages..." with nothing said (5.13.0).
+_db_apt_candidate() {   # <package>
+    local out
+    out=$(LC_ALL=C apt-cache policy "$1" 2>/dev/null) || true
+    awk '/^[[:space:]]*Candidate:/ && !f { print $2; f = 1 }' <<< "$out"
+}
+
 _db_mysql_etc()  { echo "${DB_MYSQL_ETC:-/etc/mysql}"; }
 _db_mysql_data() { echo "${DB_MYSQL_DATA:-/var/lib/mysql}"; }
 _db_server_cnf() {   # <flavor> — Cipi's tuning for that server
@@ -973,9 +984,11 @@ _db_switch_run() {   # <from> <to>
     step "Checking the ${lt} packages..."
     _db_apt update -qq >/dev/null 2>&1 || true
     if [[ "$to" == "mysql" ]]; then
-        local cand; cand=$(LC_ALL=C apt-cache policy mysql-server 2>/dev/null | awk '/Candidate:/{print $2; exit}')
+        local cand; cand=$(_db_apt_candidate mysql-server)
         if [[ -z "$cand" || "$cand" == "(none)" ]]; then
             error "No mysql-server package available from apt — nothing changed"
+            LC_ALL=C apt-cache policy mysql-server 2>&1 | sed -n '1,6s/^/  /p' >&2 || true
+            echo -e "  ${DIM}Check the sources: apt-get update; apt-cache policy mysql-server${NC}" >&2
             exit 1
         fi
         info "MySQL ${cand%%-*} from the Ubuntu archive"
@@ -1018,7 +1031,7 @@ _db_switch_run() {   # <from> <to>
     _db_switch_record "$to" true "$pass"
     [[ "$to" == "mysql" ]] && _db_switch_blacklist_mysql
 
-    local ver; ver=$("$(_db_server_client "$to")" -u root -p"$pass" -N -e "SELECT VERSION();" 2>/dev/null | head -n 1)
+    local ver; ver=$("$(_db_server_client "$to")" -u root -p"$pass" -N -e "SELECT VERSION();" 2>/dev/null | sed -n 1p) || ver=""
     log_action "DB SWITCH: ${from} → ${to} done (${ver:-?}); ${from} data kept in ${kept}"
     cipi_notify \
         "Cipi: port 3306 now runs ${lt} on $(hostname)" \
@@ -1037,11 +1050,19 @@ _db_switch_rollback() {   # <from> <to> <ts> <root password> <reason>
     error "${why} — putting $(_db_server_label "$from") back"
     log_action "DB SWITCH: ${from} → ${to} failed (${why}), rolling back"
     systemctl stop "$(_db_server_unit "$to")" 2>/dev/null || true
-    new_pkgs=$(_db_server_pkgs "$to" | paste -sd' ' -)
-    # shellcheck disable=SC2086
-    [[ -n "$new_pkgs" ]] && _db_apt purge -y -qq $new_pkgs >/dev/null 2>&1
-    [[ -d "$data" && -d "$kept" ]] && mv "$data" "${data}.failed-${to}-${ts}"
-    [[ -d "$kept" ]] && mv "$kept" "$data"
+    new_pkgs=$(_db_server_pkgs "$to" | paste -sd' ' -) || new_pkgs=""
+    # Every step is tried: a rollback that stopped half-way would leave
+    # neither server (set -e would end it at the first one that fails).
+    if [[ -n "$new_pkgs" ]]; then
+        # shellcheck disable=SC2086
+        _db_apt purge -y -qq $new_pkgs >/dev/null 2>&1 || warn "Could not remove $(_db_server_label "$to")'s packages: ${new_pkgs}"
+    fi
+    if [[ -d "$data" && -d "$kept" ]]; then
+        mv "$data" "${data}.failed-${to}-${ts}" || warn "Could not move ${data} aside"
+    fi
+    if [[ -d "$kept" && ! -e "$data" ]]; then
+        mv "$kept" "$data" || warn "Could not put ${kept} back as ${data}"
+    fi
     if [[ "$from" == "mariadb" ]]; then
         # shellcheck source=/dev/null
         source "${CIPI_LIB}/php-apt.sh"

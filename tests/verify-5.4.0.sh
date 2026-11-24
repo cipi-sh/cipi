@@ -524,7 +524,7 @@ if command -v php >/dev/null 2>&1; then
     php -l "${LIB}/deployer/node.php" >/dev/null 2>&1 && pass "php -l deployer/node.php" || fail "deployer/node.php does not parse"
 fi
 grep -q 'source "${CIPI_LIB}/node.sh";        node_command' "${ROOT}/cipi" && pass "cipi dispatches node" || fail "no node dispatch"
-grep -q 'show_help_topic node' "${ROOT}/cipi" && pass "help all includes node" || fail "help omits node"
+awk '/^_HELP_TOPICS=\(/,/\)/' "${ROOT}/cipi" | grep -qw node && pass "help all includes node" || fail "help omits node"
 grep -qw node <<< "$(sed -n 's/.*local commands="\([^"]*\)".*/\1/p' "${LIB}/completion.sh" | head -1)" \
     && pass "completion verb node" || fail "completion omits node"
 grep -q 'cipi-node-switch ${app_user} \*' "${LIB}/app.sh" && pass "node apps may call cipi-node-switch (sudoers)" || fail "no cipi-node-switch sudoers rule"

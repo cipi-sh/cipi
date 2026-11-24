@@ -711,7 +711,8 @@ db_connection_url() {
     port=$(db_engine_port "$engine")
     case "$engine" in
         mariadb)
-            echo "mariadb+ssh://${ssh_user}:${ssh_pass}@${server_ip}/${db_user}:${db_pass}@${host}/${db_name}"
+            # mysql+ssh:// where `cipi db switch mysql` ran, as in cipi credentials.
+            echo "$(db_mysql_flavor)+ssh://${ssh_user}:${ssh_pass}@${server_ip}/${db_user}:${db_pass}@${host}/${db_name}"
             ;;
         pgsql)
             echo "postgresql+ssh://${ssh_user}:${ssh_pass}@${server_ip}/${db_user}:${db_pass}@${host}:${port}/${db_name}"

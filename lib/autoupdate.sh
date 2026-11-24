@@ -52,7 +52,7 @@ _autoupdate_normalize() {
 _autoupdate_label() {
     case "${1:-}" in
         nginx) echo "Nginx" ;;
-        mariadb) echo "MariaDB" ;;
+        mariadb) db_mysql_label ;;
         pgsql) echo "PostgreSQL" ;;
         valkey) echo "Valkey" ;;
         node) echo "Node.js" ;;

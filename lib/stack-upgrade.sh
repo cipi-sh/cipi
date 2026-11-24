@@ -34,7 +34,7 @@ _stack_upgrade_normalize() {
 _stack_upgrade_label() {
     case "${1:-}" in
         nginx)   echo "Nginx" ;;
-        mariadb) echo "MariaDB" ;;
+        mariadb) db_mysql_label ;;
         pgsql)   echo "PostgreSQL" ;;
         valkey)  echo "Valkey" ;;
         *)       echo "${1:-unknown}" ;;
@@ -46,7 +46,7 @@ _stack_upgrade_label() {
 _stack_upgrade_main_pkg() {
     case "${1:-}" in
         nginx)   echo nginx ;;
-        mariadb) echo mariadb-server ;;
+        mariadb) [[ "$(db_mysql_flavor)" == "mysql" ]] && echo mysql-server || echo mariadb-server ;;
         pgsql)   echo postgresql ;;
         valkey)  echo valkey-server ;;
     esac
@@ -55,7 +55,7 @@ _stack_upgrade_main_pkg() {
 _stack_upgrade_unit() {
     case "${1:-}" in
         nginx)   echo nginx ;;
-        mariadb) echo mariadb ;;
+        mariadb) db_mysql_unit ;;
         pgsql)   echo postgresql ;;
         valkey)  echo valkey-server ;;
     esac
@@ -75,7 +75,7 @@ _stack_upgrade_notify_id() {
 _stack_upgrade_pkg_pattern() {
     case "${1:-}" in
         nginx)   echo '^nginx(-|$)' ;;
-        mariadb) echo '^mariadb-' ;;
+        mariadb) [[ "$(db_mysql_flavor)" == "mysql" ]] && echo '^mysql-' || echo '^mariadb-' ;;
         pgsql)   echo '^postgresql' ;;
         valkey)  echo '^valkey' ;;
         *)       return 1 ;;
@@ -101,11 +101,13 @@ _stack_upgrade_version() {
             nginx -v 2>&1 | sed -n 's/.*nginx\///p' | awk '{print $1}'
             ;;
         mariadb)
-            mariadb --version 2>&1 | awk '{
+            # "mariadb  Ver 15.1 Distrib 11.4.4-MariaDB" / "mysql  Ver 8.4.11-0ubuntu0…":
+            # the first x.y that is not the client's own Ver 15.1.
+            "$(db_mysql_client)" --version 2>&1 | sed 's/Ver 15\.1 //' | awk '{
                 for (i = 1; i <= NF; i++) {
                     if ($i ~ /^[0-9]+\.[0-9]+/) { print $i; exit }
                 }
-            }' | sed 's/[,].*//; s/-MariaDB.*//'
+            }' | sed 's/[,].*//; s/-MariaDB.*//; s/-[0-9]*ubuntu.*//'
             ;;
         pgsql)
             psql --version 2>/dev/null | awk '{print $3}'
@@ -140,6 +142,8 @@ _stack_upgrade_ensure_repo() {
             nginx_setup_mainline_repo || true
             ;;
         mariadb)
+            # MySQL comes from the Ubuntu archive: no repository of its own.
+            [[ "$(db_mysql_flavor)" == "mysql" ]] && return 0
             # shellcheck source=/dev/null
             source "${CIPI_LIB}/php-apt.sh"
             mariadb_setup_apt_repo || true

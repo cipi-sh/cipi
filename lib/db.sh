@@ -5,6 +5,10 @@
 
 # Engines: mariadb (native, port 3306) and pgsql (optional, port 5432).
 # Aliases accepted on CLI: postgres → pgsql, postgresql → pgsql, mysql → mariadb.
+#
+# The engine on port 3306 is MariaDB, or MySQL after `cipi db switch mysql`
+# (db_mysql_flavor in common.sh). Its id stays "mariadb" everywhere it is
+# stored, so apps, registries, backups and the panel are the same either way.
 
 db_command() {
     local sub="${1:-}"; shift||true
@@ -12,7 +16,8 @@ db_command() {
         install)   _db_install_engine "$@" ;;
         uninstall|remove-engine) _db_uninstall_engine "$@" ;;
         default)   _db_set_default "$@" ;;
-        engines)   _db_engines ;;
+        engines)   _db_engines "$@" ;;
+        switch)    _db_switch "$@" ;;
         upgrade)   source "${CIPI_LIB}/stack-upgrade.sh"; _stack_upgrade_db "$@" ;;
         create)    _db_create "$@" ;;
         list|ls)   _db_list "$@" ;;
@@ -22,7 +27,7 @@ db_command() {
         backup)    _db_backup "$@" ;;
         restore)   _db_restore "$@" ;;
         password)  _db_password "$@" ;;
-        *) error "Use: install uninstall default engines create list delete link unlink backup restore password upgrade"; exit 1 ;;
+        *) error "Use: install uninstall default engines switch create list delete link unlink backup restore password upgrade"; exit 1 ;;
     esac
 }
 
@@ -39,7 +44,7 @@ db_normalize_engine() {
 
 db_engine_label() {
     case "${1:-}" in
-        mariadb) echo "MariaDB" ;;
+        mariadb) db_mysql_label ;;
         pgsql)   echo "PostgreSQL" ;;
         *)       echo "${1:-unknown}" ;;
     esac
@@ -63,7 +68,7 @@ db_engine_laravel_connection() {
 
 db_engine_service_name() {
     case "${1:-}" in
-        mariadb) echo "mariadb" ;;
+        mariadb) db_mysql_unit ;;
         pgsql)   echo "postgresql" ;;
         *)       echo "" ;;
     esac
@@ -127,7 +132,7 @@ db_engine_is_installed() {
     case "$engine" in
         mariadb)
             [[ "$(vault_read server.json | jq -r '.db_engines.mariadb.installed // true')" == "true" ]] \
-                && systemd_unit_exists mariadb
+                && systemd_unit_exists "$(db_mysql_unit)"
             ;;
         pgsql)
             [[ "$(vault_read server.json | jq -r '.db_engines.pgsql.installed // false')" == "true" ]] \
@@ -325,8 +330,8 @@ _db_unlink() {
 
 _db_mariadb_exec() {
     local dbr; dbr=$(db_get_root_password mariadb)
-    [[ -z "$dbr" || "$dbr" == "null" ]] && { error "MariaDB root password not configured (reset with: cipi reset db-password)"; return 1; }
-    mariadb -u root -p"$dbr" "$@"
+    [[ -z "$dbr" || "$dbr" == "null" ]] && { error "$(db_mysql_label) root password not configured (reset with: cipi reset db-password)"; return 1; }
+    "$(db_mysql_client)" -u root -p"$dbr" "$@"
 }
 
 _db_pgsql_exec() {
@@ -437,7 +442,7 @@ db_list_databases() {
         mariadb)
             local dbr; dbr=$(db_get_root_password mariadb)
             [[ -z "$dbr" || "$dbr" == "null" ]] && return 1
-            mariadb -u root -p"$dbr" -N -B -e \
+            "$(db_mysql_client)" -u root -p"$dbr" -N -B -e \
                 "SELECT schema_name FROM information_schema.schemata
                  WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys')
                  ORDER BY schema_name;" 2>/dev/null
@@ -465,7 +470,7 @@ db_list_tables() {
         mariadb)
             local dbr; dbr=$(db_get_root_password mariadb)
             [[ -z "$dbr" || "$dbr" == "null" ]] && return 1
-            mariadb -u root -p"$dbr" -N -B -e \
+            "$(db_mysql_client)" -u root -p"$dbr" -N -B -e \
                 "SELECT table_name FROM information_schema.tables
                  WHERE table_schema = '${name}' AND table_type = 'BASE TABLE'
                  ORDER BY table_name;" 2>/dev/null
@@ -606,6 +611,41 @@ _db_restore_say_why() {
     return 0
 }
 
+# A dump made by the other server of port 3306, made readable by this one:
+# what moves an app between a MariaDB and a MySQL server (cipi sync, a
+# backup restored on a server that was switched). Only the lines that are not
+# rows of data are touched — mysqldump writes each INSERT on a line of its
+# own, its strings with \n escaped — so a row that mentions a collation is
+# imported as it is.
+#   into MySQL:   MariaDB's sandbox line (/*M!999999\- enable the sandbox
+#                 mode */, which the mysql client refuses) goes; its UCA 14
+#                 collations, which MySQL does not have, become their 0900
+#                 equivalents (utf8mb3 ones: utf8mb3_unicode_ci).
+#   into MariaDB: MySQL's 0900 collations become the UCA 14 ones.
+# What has no equivalent (MariaDB's uuid/inet6 types, sequences) is left as it
+# is, and the import stops there with the server's own message.
+_db_mysql_restore_filter() {   # <flavor of this server>  stdin → stdout
+    if [[ "${1:-mariadb}" == "mysql" ]]; then
+        sed -E \
+            -e '1{/^\/\*M!999999\\- enable the sandbox mode \*\/[[:space:]]*$/d}' \
+            -e '/^INSERT INTO /!{
+                  s/\butf8mb4_uca1400_(nopad_)?ai_ci\b/utf8mb4_0900_ai_ci/g
+                  s/\butf8mb4_uca1400_(nopad_)?as_ci\b/utf8mb4_0900_as_ci/g
+                  s/\butf8mb4_uca1400_(nopad_)?(as|ai)_cs\b/utf8mb4_0900_as_cs/g
+                  s/\butf8mb4_uca1400_(nopad_)?bin\b/utf8mb4_0900_bin/g
+                  s/\butf8mb3_uca1400_[a-z_]*_c[is]\b/utf8mb3_unicode_ci/g
+                }'
+    else
+        sed -E \
+            -e '/^INSERT INTO /!{
+                  s/\butf8mb4_0900_ai_ci\b/utf8mb4_uca1400_ai_ci/g
+                  s/\butf8mb4_0900_as_ci\b/utf8mb4_uca1400_as_ci/g
+                  s/\butf8mb4_0900_as_cs\b/utf8mb4_uca1400_as_cs/g
+                  s/\butf8mb4_0900_bin\b/utf8mb4_bin/g
+                }'
+    fi
+}
+
 # Restore a dump into an existing database. Returns non-zero when the import
 # did not complete, and says why. Both clients stop at the first failed
 # statement (mariadb by default, psql through ON_ERROR_STOP=1), so a dump that
@@ -619,10 +659,11 @@ db_restore_database() {
     err=$(mktemp) || return 1
     case "$engine" in
         mariadb)
-            local dbr; dbr=$(db_get_root_password mariadb)
+            local dbr cli flavor; dbr=$(db_get_root_password mariadb); cli=$(db_mysql_client); flavor=$(db_mysql_flavor)
             ( set -o pipefail
               _db_dump_cat "$file" "$reader" 2>>"$err" \
-                | mariadb -u root -p"$dbr" "$name" >/dev/null 2>>"$err" ) || rc=$?
+                | _db_mysql_restore_filter "$flavor" 2>>"$err" \
+                | "$cli" -u root -p"$dbr" "$name" >/dev/null 2>>"$err" ) || rc=$?
             ;;
         pgsql)
             local dbr; dbr=$(db_get_root_password pgsql)
@@ -682,50 +723,343 @@ db_connection_url() {
 
 _db_install_engine() {
     local raw="${1:-}"
-    [[ -z "$raw" ]] && { error "Usage: cipi db install <mariadb|pgsql>"; exit 1; }
+    [[ -z "$raw" ]] && { error "Usage: cipi db install <mariadb|mysql|pgsql>"; exit 1; }
     local engine
-    engine=$(db_normalize_engine "$raw") || { error "Invalid engine '${raw}'. Use: mariadb pgsql"; exit 1; }
+    engine=$(db_normalize_engine "$raw") || { error "Invalid engine '${raw}'. Use: mariadb mysql pgsql"; exit 1; }
     db_ensure_engine_state
 
     case "$engine" in
-        mariadb) _db_install_mariadb ;;
+        mariadb)
+            # Which server port 3306 runs is chosen by `cipi db switch`, from
+            # the command line only: `install` (which the panel may run)
+            # installs the one chosen, never the other.
+            local want="" have; have=$(db_mysql_flavor)
+            [[ "$raw" == "mysql" || "$raw" == "mariadb" ]] && want="$raw"
+            if [[ -n "$want" && "$want" != "$have" ]]; then
+                if db_engine_is_installed mariadb; then
+                    info "$(db_mysql_label) is installed on port 3306"
+                    echo -e "  To replace it (a server with no databases on it): ${CYAN}cipi db switch ${want}${NC}"
+                else
+                    error "Port 3306 is set to run $(db_mysql_label). To choose $(_db_server_label "$want"): cipi db switch ${want}"
+                    exit 1
+                fi
+                return 0
+            fi
+            _db_install_mariadb
+            ;;
         pgsql)   _db_install_pgsql ;;
     esac
 }
 
 _db_install_mariadb() {
+    local flavor label; flavor=$(db_mysql_flavor); label=$(db_mysql_label)
     if db_engine_is_installed mariadb; then
-        info "MariaDB is already installed"
+        info "${label} is already installed"
         return 0
     fi
-    step "Installing MariaDB..."
-    # shellcheck source=/dev/null
-    source "${CIPI_LIB}/php-apt.sh"
-    mariadb_setup_apt_repo || true
-    DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -qq mariadb-server mariadb-client \
-        || { error "MariaDB install failed"; exit 1; }
-
+    step "Installing ${label}..."
     local pass; pass=$(generate_password 40)
-    # Secure root if fresh
-    mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${pass}'; FLUSH PRIVILEGES;" 2>/dev/null \
-        || mariadb -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${pass}'; FLUSH PRIVILEGES;" 2>/dev/null \
-        || true
+    _db_server_install "$flavor" "$pass" || { error "${label} install failed"; exit 1; }
+    _db_switch_record "$flavor" true "$pass"
+    log_action "DB ENGINE INSTALLED: mariadb (${flavor})"
+    success "${label} installed on port 3306"
+    echo -e "${YELLOW}Root password saved in vault. Reset with: cipi reset db-password --engine=mariadb${NC}"
+}
 
-    local tmp
-    tmp=$(mktemp)
-    vault_read server.json | jq --arg p "$pass" '
-        .db_root_password = $p
+# ── MariaDB or MySQL on port 3306 ────────────────────────────
+#
+# `cipi db switch mysql` replaces MariaDB with MySQL, and `switch mariadb`
+# puts it back. Only on a server with no databases on port 3306: the data is
+# not converted (no in-place upgrade exists between the two, and what a dump
+# cannot carry — MariaDB's uuid/inet6 types, sequences, queries an app sends
+# that only one of them understands — would surface later, in the apps). A
+# server in use moves to MySQL the way an app moves anywhere: a new server
+# switched before its first app, then `cipi sync`, whose import makes the
+# MariaDB dumps readable by MySQL (_db_mysql_restore_filter); the old server
+# is the way back. Never offered to the panel: CLI only, and --yes when no
+# terminal can confirm it.
+#
+# MySQL comes from the Ubuntu archive (8.0 on 24.04, where Ubuntu backports
+# its security fixes; 8.4 LTS on 26.04): no repository or key of its own.
+
+_db_apt() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 "$@"; }
+
+_db_mysql_etc()  { echo "${DB_MYSQL_ETC:-/etc/mysql}"; }
+_db_mysql_data() { echo "${DB_MYSQL_DATA:-/var/lib/mysql}"; }
+_db_server_cnf() {   # <flavor> — Cipi's tuning for that server
+    if [[ "$1" == "mysql" ]]; then echo "$(_db_mysql_etc)/mysql.conf.d/99-cipi.cnf"
+    else echo "$(_db_mysql_etc)/mariadb.conf.d/99-cipi.cnf"; fi
+}
+_db_server_unit()  { [[ "$1" == "mysql" ]] && echo mysql || echo mariadb; }
+_db_server_label() { [[ "$1" == "mysql" ]] && echo MySQL || echo MariaDB; }
+_db_server_client() { [[ "$1" == "mysql" ]] && echo mysql || echo mariadb; }
+_db_server_install_pkgs() { [[ "$1" == "mysql" ]] && echo "mysql-server mysql-client" || echo "mariadb-server mariadb-client"; }
+
+# Installed packages of one server. The client libraries other software links
+# (libmariadb3, libmysqlclient*) are not on the list; mysql-common is, so the
+# one that comes back is the one of the next server (MariaDB.org ships its own).
+_db_server_pkgs() {   # <flavor>
+    local pat='^(mariadb-|galera-|mysql-common$)'
+    [[ "$1" == "mysql" ]] && pat='^mysql-'
+    dpkg-query -W -f='${db:Status-Status} ${Package}\n' 2>/dev/null \
+        | awk -v p="$pat" '$1 == "installed" && $2 ~ p { print $2 }'
+}
+
+# The tuning setup.sh gives MariaDB, for either server.
+_db_server_write_cnf() {   # <flavor>
+    local f bp="256M" ram
+    f=$(_db_server_cnf "$1")
+    ram=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}'); [[ "$ram" =~ ^[0-9]+$ ]] || ram=1024
+    (( ram >= 2048 ))  && bp="512M"
+    (( ram >= 4096 ))  && bp="1G"
+    (( ram >= 8192 ))  && bp="2G"
+    (( ram >= 16384 )) && bp="4G"
+    mkdir -p "$(dirname "$f")"
+    if [[ "$1" == "mysql" ]]; then
+        # innodb_redo_log_capacity: what innodb_log_file_size became (8.0.30).
+        cat > "$f" <<CNFEOF
+[mysqld]
+bind-address = 127.0.0.1
+mysqlx-bind-address = 127.0.0.1
+innodb_buffer_pool_size = ${bp}
+innodb_redo_log_capacity = 256M
+innodb_flush_log_at_trx_commit = 2
+innodb_flush_method = O_DIRECT
+max_connections = 100
+character-set-server = utf8mb4
+collation-server = utf8mb4_unicode_ci
+skip-name-resolve
+CNFEOF
+    else
+        cat > "$f" <<CNFEOF
+[mysqld]
+bind-address = 127.0.0.1
+innodb_buffer_pool_size = ${bp}
+innodb_log_file_size = 256M
+innodb_flush_log_at_trx_commit = 2
+innodb_flush_method = O_DIRECT
+max_connections = 100
+character-set-server = utf8mb4
+collation-server = utf8mb4_unicode_ci
+skip-name-resolve
+CNFEOF
+    fi
+}
+
+# Packages, root password (the socket of a fresh install lets root in once),
+# tuning, a running unit that answers with the password. 0 or 1.
+_db_server_install() {   # <flavor> <root password>
+    local flavor="$1" pass="$2" cli unit
+    cli=$(_db_server_client "$flavor"); unit=$(_db_server_unit "$flavor")
+    if [[ "$flavor" == "mariadb" ]]; then
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/php-apt.sh"
+        mariadb_setup_apt_repo || true
+    fi
+    _db_apt update -qq >/dev/null 2>&1 || true
+    # shellcheck disable=SC2046
+    _db_apt install -y -qq $(_db_server_install_pkgs "$flavor") || return 1
+    local auth="IDENTIFIED BY"
+    [[ "$flavor" == "mysql" ]] && auth="IDENTIFIED WITH caching_sha2_password BY"
+    "$cli" -u root <<SQL || return 1
+ALTER USER 'root'@'localhost' ${auth} '${pass}';
+DROP USER IF EXISTS ''@'localhost';
+DROP DATABASE IF EXISTS test;
+FLUSH PRIVILEGES;
+SQL
+    _db_server_write_cnf "$flavor" || return 1
+    systemctl enable "$unit" >/dev/null 2>&1 || true
+    systemctl restart "$unit" || return 1
+    "$cli" -u root -p"$pass" -N -e "SELECT VERSION();" >/dev/null 2>&1
+}
+
+# server.json: which server runs on port 3306, and whether it is installed.
+_db_switch_record() {   # <flavor> <installed true|false> [root password]
+    local tmp; tmp=$(mktemp)
+    vault_read server.json | jq --arg f "$1" --argjson i "$2" --arg p "${3:-}" '
+        (if $p != "" then .db_root_password = $p else . end)
         | .db_default_engine = (.db_default_engine // "mariadb")
         | .db_engines = (.db_engines // {})
-        | .db_engines.mariadb = {installed: true, port: 3306}
-    ' > "$tmp"
-    vault_write server.json < "$tmp"
+        | .db_engines.mariadb = ((.db_engines.mariadb // {}) + {installed: $i, port: 3306, server: $f})
+    ' > "$tmp" && vault_write server.json < "$tmp"
     rm -f "$tmp"
+    _CIPI_MYSQL_FLAVOR="$1"
+}
 
-    systemctl enable --now mariadb
-    log_action "DB ENGINE INSTALLED: mariadb"
-    success "MariaDB installed on port 3306"
-    echo -e "${YELLOW}Root password saved in vault. Reset with: cipi reset db-password --engine=mariadb${NC}"
+# MySQL is kept off unattended-upgrades as MariaDB is: a database restart is
+# not a 4am surprise; `cipi db upgrade` and the nightly autoupdate apply it.
+_db_switch_blacklist_mysql() {
+    local f="${CIPI_UNATTENDED_FILE:-/etc/apt/apt.conf.d/50cipi-unattended-upgrades}"
+    [[ -f "$f" ]] || return 0
+    grep -q '"mysql-' "$f" && return 0
+    sed -i '/"mariadb-common";/a\    "mysql-.*";' "$f"
+}
+
+# cipi db switch <mysql|mariadb> [--yes]
+_db_switch() {
+    local raw="${1:-}"; shift || true
+    parse_args "$@"
+    local to
+    case "$raw" in
+        mysql)   to=mysql ;;
+        mariadb) to=mariadb ;;
+        *) error "Usage: cipi db switch <mysql|mariadb> [--yes]"; exit 1 ;;
+    esac
+    db_ensure_engine_state
+    local from; from=$(db_mysql_flavor)
+    local lf lt; lf=$(_db_server_label "$from"); lt=$(_db_server_label "$to")
+    if [[ "$from" == "$to" ]] && db_engine_is_installed mariadb; then
+        info "Port 3306 already runs ${lt}"
+        return 0
+    fi
+
+    # Nothing installed on port 3306 (PostgreSQL is the default): the choice
+    # is recorded, and `cipi db install` installs that one.
+    if ! db_engine_is_installed mariadb; then
+        _db_switch_record "$to" false
+        success "Port 3306 will run ${lt} — install it with: cipi db install ${to}"
+        log_action "DB SWITCH: port 3306 → ${to} (not installed)"
+        return 0
+    fi
+
+    # A server with no databases on it, or nothing.
+    local dbs apps reg
+    if ! dbs=$(db_list_databases mariadb); then
+        error "${lf} did not answer — check: cipi service list"
+        exit 1
+    fi
+    apps=$(vault_read apps.json 2>/dev/null | jq -r '
+        to_entries[] | select((.value.custom // false) | not)
+        | select((.value.engine // "mariadb") == "mariadb") | .key' 2>/dev/null | paste -sd' ' - || true)
+    reg=$(vault_read databases.json 2>/dev/null | jq -r '(.mariadb // {}) | keys[]' 2>/dev/null | paste -sd' ' - || true)
+    if [[ -n "$dbs" || -n "$apps" || -n "$reg" ]]; then
+        error "${lf} → ${lt} runs only on a server with no databases on port 3306: the data is not converted"
+        [[ -n "$dbs" ]]  && echo -e "  Databases: $(echo "$dbs" | paste -sd' ' -)"
+        [[ -n "$apps" ]] && echo -e "  Apps on ${lf}: ${apps}"
+        [[ -n "$reg" && "$reg" != "$(echo "$dbs" | paste -sd' ' -)" ]] && echo -e "  In the registry: ${reg}"
+        echo ""
+        echo -e "  To move apps to ${lt}: a new server, ${CYAN}cipi db switch ${to}${NC} there before its first app,"
+        echo -e "  then ${CYAN}cipi sync${NC} the apps across — this server stays as it is, the way back."
+        exit 1
+    fi
+
+    if [[ "${ARG_yes:-}" != "true" ]]; then
+        if [[ -t 0 ]]; then
+            echo ""
+            warn "${lf} is removed (packages and configuration) and ${lt} installed on port 3306."
+            confirm "Replace ${lf} with ${lt}?" || { info "Cancelled"; return 0; }
+        else
+            error "Replacing the database server is never implicit: cipi db switch ${to} --yes"
+            exit 1
+        fi
+    fi
+    if pgrep -x 'mariadb-dump|mysqldump|mariabackup|mariadb-backup' >/dev/null 2>&1; then
+        error "A database dump is running (a backup?) — try again when it is over"
+        exit 1
+    fi
+
+    _db_switch_run "$from" "$to"
+}
+
+_db_switch_run() {   # <from> <to>
+    local from="$1" to="$2" ts lf lt data kept cnf pass old_pkgs sim extra
+    ts=$(date +%Y%m%d%H%M%S); lf=$(_db_server_label "$from"); lt=$(_db_server_label "$to")
+    data=$(_db_mysql_data); kept="${data}.${from}-${ts}"; cnf=$(_db_server_cnf "$from")
+    pass=$(db_get_root_password mariadb)
+    [[ -n "$pass" && "$pass" != "null" ]] || pass=$(generate_password 40)
+
+    # ── checks: nothing changes when one fails
+    step "Checking the ${lt} packages..."
+    _db_apt update -qq >/dev/null 2>&1 || true
+    if [[ "$to" == "mysql" ]]; then
+        local cand; cand=$(LC_ALL=C apt-cache policy mysql-server 2>/dev/null | awk '/Candidate:/{print $2; exit}')
+        if [[ -z "$cand" || "$cand" == "(none)" ]]; then
+            error "No mysql-server package available from apt — nothing changed"
+            exit 1
+        fi
+        info "MySQL ${cand%%-*} from the Ubuntu archive"
+    fi
+    old_pkgs=$(_db_server_pkgs "$from" | paste -sd' ' -)
+    if [[ -n "$old_pkgs" ]]; then
+        # Removing the server must take nothing else with it: what depends on
+        # its client libraries (a Perl or Python driver, a monitoring agent)
+        # would go too. Simulated first.
+        # shellcheck disable=SC2086
+        sim=$(LC_ALL=C _db_apt -s purge $old_pkgs 2>/dev/null) || { error "apt cannot plan the removal of ${lf} — nothing changed"; exit 1; }
+        extra=$(awk '/^(Purg|Remv) /{ print $2 }' <<< "$sim" | grep -vxF -f <(tr ' ' '\n' <<< "$old_pkgs") \
+                | grep -vE '^(lib(mariadb|mysqlclient)[a-z0-9.-]*|libdbd-(mariadb|mysql)-perl|default-mysql-[a-z-]+|mariadb-[a-z0-9.-]+|mysql-[a-z0-9.-]+|galera-[0-9a-z.-]+)$' \
+                | paste -sd' ' - || true)
+        if [[ -n "$extra" ]]; then
+            error "Removing ${lf} would also remove: ${extra} — nothing changed"
+            exit 1
+        fi
+    fi
+
+    # ── from here the server is down
+    log_action "DB SWITCH: ${from} → ${to} started"
+    step "Stopping ${lf}..."
+    systemctl stop "$(_db_server_unit "$from")" 2>/dev/null || true
+    [[ -d "$data" ]] && { mv "$data" "$kept" || { error "Could not move ${data} aside — ${lf} stopped, nothing else changed: systemctl start $(_db_server_unit "$from")"; exit 1; }; }
+    [[ -f "$cnf" ]] && mv "$cnf" "${cnf}.cipi-${ts}"
+    if [[ -n "$old_pkgs" ]]; then
+        step "Removing ${lf}..."
+        # shellcheck disable=SC2086
+        _db_apt purge -y -qq $old_pkgs >/dev/null 2>&1 || { _db_switch_rollback "$from" "$to" "$ts" "$pass" "removing ${lf} failed"; exit 1; }
+    fi
+    # MariaDB.org's repository would offer its own mysql-common next to MySQL.
+    [[ "$to" == "mysql" ]] && rm -f "${APT_SOURCES_DIR:-/etc/apt/sources.list.d}/mariadb.list"
+
+    step "Installing ${lt}..."
+    if ! _db_server_install "$to" "$pass"; then
+        _db_switch_rollback "$from" "$to" "$ts" "$pass" "installing ${lt} failed"
+        exit 1
+    fi
+    _db_switch_record "$to" true "$pass"
+    [[ "$to" == "mysql" ]] && _db_switch_blacklist_mysql
+
+    local ver; ver=$("$(_db_server_client "$to")" -u root -p"$pass" -N -e "SELECT VERSION();" 2>/dev/null | head -n 1)
+    log_action "DB SWITCH: ${from} → ${to} done (${ver:-?}); ${from} data kept in ${kept}"
+    cipi_notify \
+        "Cipi: port 3306 now runs ${lt} on $(hostname)" \
+        "${lf} was replaced with ${lt} ${ver}.\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\nThe ${lf} data directory is kept in ${kept}." \
+        db_switch 2>/dev/null || true
+    success "Port 3306 runs ${lt} ${ver} — same root password, same apps' settings (DB_CONNECTION=mysql)"
+    [[ -d "$kept" ]] && info "The ${lf} data directory is kept in ${kept} — remove it when you no longer need it"
+    info "Back to ${lf}, while there are no databases: cipi db switch ${from}"
+}
+
+# What failed after the old server was stopped: back to it, as far as apt
+# allows. Exits through the caller.
+_db_switch_rollback() {   # <from> <to> <ts> <root password> <reason>
+    local from="$1" to="$2" ts="$3" pass="$4" why="$5" data kept new_pkgs
+    data=$(_db_mysql_data); kept="${data}.${from}-${ts}"
+    error "${why} — putting $(_db_server_label "$from") back"
+    log_action "DB SWITCH: ${from} → ${to} failed (${why}), rolling back"
+    systemctl stop "$(_db_server_unit "$to")" 2>/dev/null || true
+    new_pkgs=$(_db_server_pkgs "$to" | paste -sd' ' -)
+    # shellcheck disable=SC2086
+    [[ -n "$new_pkgs" ]] && _db_apt purge -y -qq $new_pkgs >/dev/null 2>&1
+    [[ -d "$data" && -d "$kept" ]] && mv "$data" "${data}.failed-${to}-${ts}"
+    [[ -d "$kept" ]] && mv "$kept" "$data"
+    if [[ "$from" == "mariadb" ]]; then
+        # shellcheck source=/dev/null
+        source "${CIPI_LIB}/php-apt.sh"
+        mariadb_setup_apt_repo || true
+    fi
+    _db_apt update -qq >/dev/null 2>&1 || true
+    local cnf; cnf=$(_db_server_cnf "$from")
+    # shellcheck disable=SC2046
+    if _db_apt install -y -qq $(_db_server_install_pkgs "$from") >/dev/null 2>&1; then
+        [[ -f "${cnf}.cipi-${ts}" ]] && mv -f "${cnf}.cipi-${ts}" "$cnf"
+        systemctl restart "$(_db_server_unit "$from")" 2>/dev/null || true
+    fi
+    _db_switch_record "$from" true "$pass"
+    if "$(_db_server_client "$from")" -u root -p"$pass" -N -e "SELECT 1;" >/dev/null 2>&1; then
+        warn "$(_db_server_label "$from") is back on port 3306, as it was"
+    else
+        error "$(_db_server_label "$from") is not answering yet. Its data directory is ${data}; its packages: $(_db_server_install_pkgs "$from")"
+        error "  apt-get install $(_db_server_install_pkgs "$from") && systemctl start $(_db_server_unit "$from")"
+    fi
 }
 
 _db_install_pgsql() {
@@ -864,9 +1198,11 @@ _db_uninstall_engine() {
     step "Uninstalling $(db_engine_label "$engine")..."
     case "$engine" in
         mariadb)
-            systemctl stop mariadb 2>/dev/null || true
-            DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 purge -y -qq \
-                mariadb-server mariadb-client mariadb-common 2>/dev/null || true
+            systemctl stop "$(db_mysql_unit)" 2>/dev/null || true
+            local pkgs; pkgs=$(_db_server_pkgs "$(db_mysql_flavor)" | paste -sd' ' -)
+            # shellcheck disable=SC2086
+            [[ -n "$pkgs" ]] && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 purge -y -qq \
+                $pkgs 2>/dev/null || true
             DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 autoremove -y -qq 2>/dev/null || true
             rm -rf /var/lib/mysql 2>/dev/null || true
             local tmp
@@ -925,6 +1261,22 @@ _db_set_default() {
 _db_engines() {
     db_ensure_engine_state
     local default; default=$(db_get_default_engine)
+    # --json: what the panel reads. "server" says what runs on the engine —
+    # mariadb or mysql for the engine "mariadb" (cipi db switch), pgsql —
+    # and "label" its name.
+    if [[ "${1:-}" == "--json" ]]; then
+        local e rows="[]" inst server
+        for e in mariadb pgsql; do
+            inst=false; db_engine_is_installed "$e" && inst=true
+            server="pgsql"; [[ "$e" == "mariadb" ]] && server=$(db_mysql_flavor)
+            rows=$(jq -c --arg e "$e" --argjson i "$inst" --argjson p "$(db_engine_port "$e")" --arg d "$default" \
+                --arg s "$server" --arg l "$(db_engine_label "$e")" \
+                '. + [{engine: $e, status: (if $i then "installed" else "not_installed" end), port: $p,
+                       default: ($e == $d), server: $s, label: $l}]' <<< "$rows")
+        done
+        jq -n --arg d "$default" --argjson e "$rows" '{default: $d, engines: $e}'
+        return 0
+    fi
     echo -e "\n${BOLD}Database engines${NC}"
     printf "  ${BOLD}%-12s %-14s %-8s %s${NC}\n" "ENGINE" "STATUS" "PORT" "DEFAULT"
     local e status port mark
@@ -943,6 +1295,11 @@ _db_engines() {
     echo ""
     echo -e "  Install:  ${CYAN}cipi db install pgsql${NC}"
     echo -e "  Default:  ${CYAN}cipi db default <engine>${NC}"
+    if [[ "$(db_mysql_flavor)" == "mysql" ]]; then
+        echo -e "  Port 3306 runs MySQL (engine id: mariadb). Back to MariaDB: ${CYAN}cipi db switch mariadb${NC}"
+    else
+        echo -e "  MySQL instead of MariaDB (no databases yet): ${CYAN}cipi db switch mysql${NC}"
+    fi
     echo ""
 }
 
@@ -1099,9 +1456,9 @@ _db_list() {
         case "$engine" in
             mariadb)
                 local dbr rows
-                dbr=$(db_get_root_password mariadb) || { error "Cannot read MariaDB credentials from vault"; exit 1; }
-                [[ -z "$dbr" || "$dbr" == "null" ]] && { error "MariaDB root password not configured (reset with: cipi reset db-password)"; exit 1; }
-                if ! rows=$(mariadb -u root -p"$dbr" -N -e "
+                dbr=$(db_get_root_password mariadb) || { error "Cannot read $(db_mysql_label) credentials from vault"; exit 1; }
+                [[ -z "$dbr" || "$dbr" == "null" ]] && { error "$(db_mysql_label) root password not configured (reset with: cipi reset db-password)"; exit 1; }
+                if ! rows=$("$(db_mysql_client)" -u root -p"$dbr" -N -e "
                     SELECT s.schema_name,
                            COALESCE(ROUND(SUM(t.data_length + t.index_length) / 1024 / 1024, 2), 0)
                     FROM information_schema.schemata s
@@ -1109,7 +1466,7 @@ _db_list() {
                     WHERE s.schema_name NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
                     GROUP BY s.schema_name
                     ORDER BY s.schema_name;" 2>&1); then
-                    error "MariaDB query failed: ${rows}"
+                    error "$(db_mysql_label) query failed: ${rows}"
                     exit 1
                 fi
                 while IFS=$'\t' read -r db sz; do

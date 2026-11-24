@@ -102,7 +102,7 @@ app_create() {
         default_engine=$(db_get_default_engine)
         if [[ -z "$db_engine" ]]; then
             local -a _eng_choices=()
-            db_engine_is_installed mariadb && _eng_choices+=("mariadb|MariaDB")
+            db_engine_is_installed mariadb && _eng_choices+=("mariadb|$(db_mysql_label)")
             db_engine_is_installed pgsql   && _eng_choices+=("pgsql|PostgreSQL")
             [[ ${#_eng_choices[@]} -eq 0 ]] && { error "No database engine installed"; exit 1; }
             [[ ${#_eng_choices[@]} -gt 1 ]] && read_choice "Database engine" "$default_engine" db_engine "${_eng_choices[@]}"
@@ -1620,9 +1620,116 @@ _env_unset_key() {
     rm -f "$tmp"
 }
 
+# The key of a KEY=value line (export allowed), "-" for a blank line, "#" for
+# anything else (a comment, a line that is not a variable).
+_env_line_key() {
+    local line="$1" key
+    [[ -z "${line//[[:space:]]/}" ]] && { echo "-"; return 0; }
+    [[ "$line" =~ ^[[:space:]]*# ]] && { echo "#"; return 0; }
+    if [[ "$line" =~ ^[[:space:]]*export[[:space:]]+ ]]; then
+        line="${line#*export }"
+        line="${line#"${line%%[![:space:]]*}"}"
+    fi
+    [[ "$line" == *=* ]] || { echo "#"; return 0; }
+    key="${line%%=*}"
+    key="${key%"${key##*[![:space:]]}"}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    if _env_valid_key "$key"; then echo "$key"; else echo "#"; fi
+}
+
+# Put the keys of .env in the order given — `cipi app env <app> --order=…`,
+# the panel's drag and drop. The list names every key of the file once.
+#   - A key moves with its own line(s), untouched (value, quotes, export), and
+#     the comments right above it.
+#   - A blank line that started a group stays in front of the key that
+#     started it; comments after a key and before a blank line stay with that
+#     key; comments between two blank lines go with the key below them.
+#   - What comes before the first key (a header) stays first, what comes
+#     after the last key stays last.
+# 1 with the reason on stderr, and the file as it was.
+_env_reorder() {
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_reorder _env_line_key _env_valid_key" _env_reorder "$@" < /dev/null; return; fi
+    local file="$1" order="$2"
+    local -a L=() T=() want=() keys=()
+    local line i j k s n first=-1 last=-1 prev="" prev_end gap_blank tail_done
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        L+=("$line"); T+=("$(_env_line_key "$line")")
+    done < "$file"
+    n=${#L[@]}
+    for (( i = 0; i < n; i++ )); do
+        [[ "${T[i]}" == "-" || "${T[i]}" == "#" ]] && continue
+        (( first < 0 )) && first=$i
+        last=$i
+    done
+    (( first >= 0 )) || { echo "the file has no variables" >&2; return 1; }
+
+    # The order: valid keys, each once, exactly the keys of the file.
+    IFS=',' read -ra want <<< "$order"
+    local -A in_order=() in_file=()
+    for k in "${want[@]}"; do
+        k="${k//[[:space:]]/}"
+        [[ -n "$k" ]] || continue
+        _env_valid_key "$k" || { echo "invalid key in the order: ${k}" >&2; return 1; }
+        [[ -z "${in_order[$k]:-}" ]] || { echo "${k} is twice in the order" >&2; return 1; }
+        in_order[$k]=1; keys+=("$k")
+    done
+    for (( i = first; i <= last; i++ )); do
+        [[ "${T[i]}" == "-" || "${T[i]}" == "#" ]] || in_file[${T[i]}]=1
+    done
+    for k in "${!in_file[@]}"; do [[ -n "${in_order[$k]:-}" ]] || { echo "the order leaves out ${k}" >&2; return 1; }; done
+    for k in "${keys[@]}"; do [[ -n "${in_file[$k]:-}" ]] || { echo "${k} is not in the file" >&2; return 1; }; done
+
+    # The blocks, in the order of the file.
+    local -A text=() blank=()
+    s=$first
+    while (( s > 0 )) && [[ "${T[s-1]}" == "#" ]]; do (( s-- )); done
+    local header_end=$s
+    prev_end=$s
+    for (( i = first; i <= last; i++ )); do
+        k="${T[i]}"
+        [[ "$k" == "-" || "$k" == "#" ]] && continue
+        s=$i
+        while (( s > prev_end )) && [[ "${T[s-1]}" == "#" ]]; do (( s-- )); done
+        # Between the previous key and this block: comments that follow the
+        # previous key go with it; after the first blank line, with this one.
+        gap_blank=false; tail_done=false
+        local before=""
+        for (( j = prev_end; j < s; j++ )); do
+            if [[ "${T[j]}" == "-" ]]; then gap_blank=true; tail_done=true; continue; fi
+            if [[ "$tail_done" == false && -n "$prev" ]]; then
+                text[$prev]+="${L[j]}"$'\n'
+            else
+                before+="${L[j]}"$'\n'
+            fi
+        done
+        if [[ -n "${text[$k]+x}" ]]; then
+            text[$k]+="${before}"
+        else
+            text[$k]="${before}"; blank[$k]=$gap_blank
+        fi
+        for (( j = s; j <= i; j++ )); do text[$k]+="${L[j]}"$'\n'; done
+        prev="$k"; prev_end=$(( i + 1 ))
+    done
+
+    local out
+    out=$(mktemp) || return 1
+    {
+        for (( i = 0; i < header_end; i++ )); do printf '%s\n' "${L[i]}"; done
+        local idx=0
+        for k in "${keys[@]}"; do
+            (( idx > 0 )) && [[ "${blank[$k]}" == true ]] && printf '\n'
+            printf '%s' "${text[$k]}"
+            (( idx++ )) || true
+        done
+        for (( i = last + 1; i < n; i++ )); do printf '%s\n' "${L[i]}"; done
+    } > "$out" || { rm -f "$out"; return 1; }
+    cat "$out" > "$file"
+    rm -f "$out"
+}
+
 app_env() {
     local app="${1:-}"; shift || true
-    [[ -z "$app" ]] && { error "Usage: cipi app env <app> [--show|--get=KEY|--set=K=V|--unset=KEY] [--json]"; exit 1; }
+    [[ -z "$app" ]] && { error "Usage: cipi app env <app> [--show|--get=KEY|--set=K=V|--unset=KEY|--order=K1,K2,…] [--json]"; exit 1; }
     app_exists "$app" || { error "Not found"; exit 1; }
     local is_custom; is_custom=$(app_get "$app" custom)
     [[ "$is_custom" == "true" && "$(app_get "$app" runtime)" != "node" ]] && { error "Custom apps have no .env"; exit 1; }
@@ -1630,7 +1737,7 @@ app_env() {
     local env_file="/home/${app}/shared/.env"
     [[ -f "$env_file" ]] || { error ".env not found at ${env_file}"; exit 1; }
 
-    local want_show=false want_json=false get_key=""
+    local want_show=false want_json=false get_key="" order=""
     local -a sets=() unsets=()
     local arg
 
@@ -1641,9 +1748,10 @@ app_env() {
             --get=*) get_key="${arg#--get=}" ;;
             --set=*) sets+=("${arg#--set=}") ;;
             --unset=*) unsets+=("${arg#--unset=}") ;;
+            --order=*) order="${arg#--order=}"; [[ -n "$order" ]] || { error "--order needs the keys, comma-separated"; exit 1; } ;;
             --*=*|--*)
                 error "Unknown flag: ${arg}"
-                echo "Use: cipi app env <app> [--show|--get=KEY|--set=K=V|--unset=KEY] [--json]"
+                echo "Use: cipi app env <app> [--show|--get=KEY|--set=K=V|--unset=KEY|--order=K1,K2,…] [--json]"
                 exit 1
                 ;;
             *)
@@ -1654,7 +1762,7 @@ app_env() {
     done
 
     local noninteractive=false
-    [[ "$want_show" == "true" || -n "$get_key" || ${#sets[@]} -gt 0 || ${#unsets[@]} -gt 0 ]] && noninteractive=true
+    [[ "$want_show" == "true" || -n "$get_key" || -n "$order" || ${#sets[@]} -gt 0 || ${#unsets[@]} -gt 0 ]] && noninteractive=true
 
     # The .env is the app user's file: the editor, the edits and the reads
     # below run as that user (app_as in common.sh). As root they followed
@@ -1681,9 +1789,17 @@ app_env() {
         _env_valid_key "$key" || { error "Invalid env key: ${key}"; exit 1; }
         _env_unset_key "$env_file" "$key"
     done
-    if [[ ${#sets[@]} -gt 0 || ${#unsets[@]} -gt 0 ]]; then
+    # The order last: it names the keys the file has once --set/--unset are done.
+    if [[ -n "$order" ]]; then
+        local why
+        if ! why=$(_env_reorder "$env_file" "$order" 2>&1); then
+            error "Order not applied: ${why:-could not rewrite .env}"
+            exit 1
+        fi
+    fi
+    if [[ ${#sets[@]} -gt 0 || ${#unsets[@]} -gt 0 || -n "$order" ]]; then
         app_as "$app" chmod 640 "$env_file" < /dev/null
-        log_action "ENV UPDATED: $app"
+        log_action "ENV UPDATED: $app${order:+ (order)}"
     fi
 
     if [[ -n "$get_key" ]]; then
@@ -3702,11 +3818,23 @@ basicauth_disable() {
 }
 
 basicauth_status() {
-    local app="${1:-}"
-    [[ -z "$app" ]] && { error "Usage: cipi basicauth status <app>"; exit 1; }
+    local app="${1:-}"; shift || true
+    [[ -z "$app" || "$app" == --* ]] && { error "Usage: cipi basicauth status <app> [--json]"; exit 1; }
     app_exists "$app" || { error "App '$app' not found"; exit 1; }
+    parse_args "$@"
     local enabled; enabled=$(app_get "$app" basic_auth)
     local file; file=$(_basicauth_file "$app")
+    # --json: what the panel reads, with nothing to parse out of colours.
+    if [[ "${ARG_json:-}" == "true" ]]; then
+        local users="[]" prefix mode="public"
+        [[ -f "$file" ]] && users=$(cut -d: -f1 "$file" | jq -R . | jq -sc 'map(select(length > 0))')
+        prefix=$(_basicauth_agent_in_vhost "$app")
+        [[ "$(app_get "$app" basic_auth_agent)" == "protected" ]] && mode="protected"
+        jq -n --arg a "$app" --argjson e "$([[ "$enabled" == "true" ]] && echo true || echo false)" \
+            --argjson u "$users" --arg m "$mode" --arg p "$prefix" \
+            '{app: $a, enabled: $e, users: $u, agent: {mode: $m, public_prefix: (if $p == "" then null else "/" + $p + "/" end)}}'
+        return 0
+    fi
     echo -e "\n${BOLD}Basic auth — ${app}${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     if [[ "$enabled" == "true" ]]; then
@@ -3801,8 +3929,14 @@ EOF
 }
 
 # The prefix the vhost leaves public now (from its marker comment), or nothing.
+# Prints the prefix, or nothing — always with status 0: under `set -o
+# pipefail` the grep that finds no marker failed the whole assignment
+# (`p=$(…)`), and `cipi basicauth status|enable|agent` exited 1 halfway, after
+# printing their first lines, on every app whose vhost has no marker. The
+# panel took that for an error and showed the raw output (5.11.0–5.12.x).
 _basicauth_agent_in_vhost() {
-    grep -o 'cipi-agent-public:/[^ ]*/' "/etc/nginx/sites-available/${1}" 2>/dev/null | head -1 | sed 's|^cipi-agent-public:/||; s|/$||'
+    { grep -o 'cipi-agent-public:/[^ ]*/' "/etc/nginx/sites-available/${1}" 2>/dev/null || true; } \
+        | head -1 | sed 's|^cipi-agent-public:/||; s|/$||'
 }
 
 # Rewrite the vhost when what it leaves public is not what it should. Run as

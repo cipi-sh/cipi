@@ -235,6 +235,21 @@ _deploy_run() {
 
     _deploy_assert_php_compat "$app" "$php_ver"
 
+    # One deploy at a time. While Deployer runs it holds .dep/deploy.lock, and
+    # this one would only be refused by it — after a database snapshot, and
+    # reported as a failed deploy. A lock with no Deployer alive was left by a
+    # deploy that was interrupted (a reboot, a kill; one that fails releases
+    # its own): it is removed here, nobody has to run --unlock first.
+    if [[ -f "${home}/.dep/deploy.lock" ]]; then
+        if _deploy_live_pids "$app" | grep -q $'\tdep$'; then
+            error "A deploy of '${app}' is running — wait for it: cipi deploy ${app} --status"
+            exit 1
+        fi
+        app_rm "$app" "${home}/.dep/deploy.lock" || true
+        info "Removed the lock left by an interrupted deploy"
+        log_action "DEPLOY UNLOCK: $app (stale lock, no deploy running)"
+    fi
+
     # Legacy per-file ACLs on laravel-*.log break deploy:writable chmod — strip before Deployer runs.
     ensure_app_logs_permissions "$app" || true
 
@@ -279,6 +294,9 @@ _deploy_run() {
     if [[ $rc -eq 0 ]]; then
         deploy_log_close "$app" "OK" "$rel_after" "$secs" "$rc"
         success "Deploy completed${rel_after:+  (release ${rel_after}, ${secs}s)}"
+        # A commit whose automatic deploy failed is paused (cipi-app-deploy);
+        # a deploy by hand that goes through resumes them.
+        [[ -f "${home}/.dep/cipi-paused-commit" ]] && app_rm "$app" "${home}/.dep/cipi-paused-commit"
         log_action "DEPLOY OK: $app release=${rel_after:-?} in ${secs}s"
         # The success notification is sent after the release has been verified,
         # so it can state whether the app actually answers — reporting "deploy
@@ -721,9 +739,12 @@ _deploy_log_show() {
 # still working on it: Deployer itself, the webhook wrapper (cipi-app-deploy)
 # or the `cipi deploy` that started it, which run the post-deploy steps and
 # the healthcheck once Deployer has finished. With nothing alive any more it
-# was interrupted (a reboot, a kill) and the lock it left behind is what
-# --unlock removes. A ~/.deploy-trigger the per-minute cron has not picked up
-# yet is a push about to deploy: queued.
+# was interrupted (a reboot, a kill) and the lock it left behind is removed by
+# the next deploy (or --unlock). A ~/.deploy-trigger the per-minute cron has
+# not picked up yet is a push about to deploy: queued — also while a deploy
+# runs, since cipi-app-deploy puts it back until that one is over. A commit
+# whose automatic deploy failed is paused (paused_commit) until a new push, a
+# deploy by hand that succeeds, or --unlock.
 #
 # This is what the panel polls to show a deploy it did not start. The output
 # never changes anything, so it is safe at any moment, as often as needed.
@@ -793,9 +814,10 @@ _deploy_status() {
         done < <(grep -n '\] ===== deploy ' "$lf" 2>/dev/null || true)
     fi
 
-    local queued=false locked=false
+    local queued=false locked=false paused=""
     [[ -f "${home}/.deploy-trigger" ]] && queued=true
     [[ -f "${home}/.dep/deploy.lock" ]] && locked=true
+    [[ -f "${home}/.dep/cipi-paused-commit" ]] && paused=$(app_read "$app" "${home}/.dep/cipi-paused-commit" 2>/dev/null | head -n 1 | tr -cd '0-9a-f')
     local pids; pids=$(_deploy_live_pids "$app")
     local pid_list=""; [[ -n "$pids" ]] && pid_list=$(cut -f1 <<< "$pids" | tr '\n' ' ')
 
@@ -840,7 +862,7 @@ _deploy_status() {
     if [[ "${ARG_json:-}" == "true" ]]; then
         jq -n \
             --arg app "$app" --arg state "$state" --arg phase "$phase" \
-            --argjson queued "$queued" --argjson locked "$locked" --argjson has_cur "$has_cur" \
+            --argjson queued "$queued" --argjson locked "$locked" --argjson has_cur "$has_cur" --arg paused "$paused" \
             --arg ct "$cur_trigger" --arg cb "$cur_branch" --arg cf "$cur_from" \
             --arg cs "$(_deploy_iso "$cur_epoch")" --arg ce "$cur_elapsed" --arg pids "$pid_list" \
             --arg lr "$last_result" --arg lk "$last_kind" --arg lrel "$last_release" \
@@ -851,7 +873,7 @@ _deploy_status() {
             def nz: if . == "" then null else . end;
             def num: if . == "" then null else tonumber end;
             {app: $app, state: $state, running: ($state == "running"), phase: ($phase | nz),
-             queued: $queued, locked: $locked,
+             queued: $queued, locked: $locked, paused_commit: ($paused | nz),
              current: (if $has_cur then
                  {trigger: ($ct | nz), branch: ($cb | nz), from_release: ($cf | nz),
                   started_at: ($cs | nz), elapsed: ($ce | num),
@@ -892,10 +914,13 @@ _deploy_status() {
     [[ "$queued" == true && "$state" != "queued" ]] && printf "  %-10s a push is waiting — it deploys when this run ends\n" "Queued"
     if [[ "$locked" == true ]]; then
         if [[ "$state" == "interrupted" || "$state" == "idle" ]]; then
-            printf "  %-10s ${YELLOW}present${NC} — a stuck lock: cipi deploy %s --unlock\n" "Lock" "$app"
+            printf "  %-10s ${YELLOW}present${NC} — left by an interrupted deploy: the next deploy removes it (or now: cipi deploy %s --unlock)\n" "Lock" "$app"
         else
             printf "  %-10s present (held by the run)\n" "Lock"
         fi
+    fi
+    if [[ -n "$paused" ]]; then
+        printf "  %-10s ${YELLOW}automatic deploys of commit %s${NC} — it failed; a new push deploys, or by hand: cipi deploy %s\n" "Paused" "${paused:0:12}" "$app"
     fi
     if [[ -n "$last_result" ]]; then
         local verdict="${GREEN}OK${NC}"; [[ "$last_result" == "failed" ]] && verdict="${RED}FAILED${NC}"
@@ -1079,17 +1104,28 @@ _deploy_last() {
     return 0
 }
 
+# Removes the Deployer lock — which a deploy that fails releases by itself, and
+# the next deploy removes when no Deployer is alive — and resumes the automatic
+# deploys of a commit that failed (~/.dep/cipi-paused-commit).
 _deploy_unlock() {
     local app="$1"
     local home="/home/${app}"
-    local lockfile="${home}/.dep/deploy.lock"
-    if [[ ! -f "$lockfile" ]]; then
-        info "No deploy lock found for '${app}'"
-        return 0
+    local lockfile="${home}/.dep/deploy.lock" pausefile="${home}/.dep/cipi-paused-commit" done=false c=""
+    if [[ -f "$lockfile" ]]; then
+        app_rm "$app" "$lockfile" || true
+        success "Deploy unlocked — run: cipi deploy ${app}"
+        log_action "DEPLOY UNLOCK: $app"
+        done=true
     fi
-    app_rm "$app" "$lockfile" || true
-    success "Deploy unlocked — run: cipi deploy ${app}"
-    log_action "DEPLOY UNLOCK: $app"
+    if [[ -f "$pausefile" ]]; then
+        c=$(app_read "$app" "$pausefile" 2>/dev/null | head -n 1 | tr -cd '0-9a-f')
+        app_rm "$app" "$pausefile" || true
+        success "Automatic deploys resumed${c:+ — commit ${c:0:12} deploys again on the next push or webhook}"
+        log_action "DEPLOY RESUME: $app ${c:0:12}"
+        done=true
+    fi
+    [[ "$done" == true ]] || info "No deploy lock found for '${app}'"
+    return 0
 }
 
 _deploy_rollback() {

@@ -379,6 +379,7 @@ _bk_default_profile_json() {
         databases: ["*"],
         exclude_databases: [],
         exclude_tables: [],
+        exclude_paths: [],
         cron: "0 2 * * *",
         interval_seconds: 86400,
         destinations: ["s3"],
@@ -494,6 +495,8 @@ _bk_profile_show() {
     extbl=$(_bk_profile_list_field "$p" exclude_tables | paste -sd, -)
     printf "  %-20s %s\n" "Exclude DBs"    "${exdb:-—}"
     printf "  %-20s %s\n" "Exclude tables" "${extbl:-—}"
+    local expth; expth=$(_bk_profile_list_field "$p" exclude_paths | paste -sd, -)
+    printf "  %-20s %s\n" "Exclude paths"  "${expth:-—}"
     printf "  %-20s %s\n" "Destinations" "$(_bk_profile_list_field "$p" destinations | paste -sd, -)"
     printf "  %-20s %s\n" "Encrypted"    "$(_bk_profile_get "$p" encrypt)"
     printf "  %-20s %s\n" "Created"      "$(_bk_profile_created_label "$p")"
@@ -644,6 +647,23 @@ _bk_profile_add() {
         && json=$(echo "$json" | jq --argjson v "$(_bk_csv_to_json "${ARG_exclude_databases}")" '.exclude_databases = $v')
     [[ -n "${ARG_exclude_tables+x}" ]] \
         && json=$(echo "$json" | jq --argjson v "$(_bk_csv_to_json "${ARG_exclude_tables}")" '.exclude_tables = $v')
+    # Folders and files left out of the app archives (an uploads folder of a
+    # terabyte, kept elsewhere with rsync). Emptied again with --exclude-paths=.
+    if [[ -n "${ARG_exclude_paths+x}" ]]; then
+        local xp bad=""
+        xp=$(_bk_csv_to_json "${ARG_exclude_paths}")
+        while IFS= read -r pat; do
+            [[ -n "$pat" ]] || continue
+            _bk_valid_exclude_path "$pat" || bad="${bad}${bad:+, }${pat}"
+        done < <(echo "$xp" | jq -r '.[]')
+        if [[ -n "$bad" ]]; then
+            error "Invalid --exclude-paths entry: ${bad}"
+            info "A path relative to the app (storage/app/uploads, wp-content/uploads, *.mp4),"
+            info "optionally for some apps only: shop:storage/app/uploads  (apps by name or glob)"
+            exit 1
+        fi
+        json=$(echo "$json" | jq --argjson v "$xp" '.exclude_paths = $v')
+    fi
 
     # ── schedule
     if [[ -n "${ARG_every:-}" && -n "${ARG_cron:-}" ]]; then
@@ -868,6 +888,42 @@ _bk_app_paths() {
     return 0
 }
 
+# ── Paths left out of the app archives ───────────────────────
+#
+# A profile's exclude_paths are tar exclusion patterns, matched against the
+# names inside the archive, which are relative to the app's home (shared/…,
+# htdocs/…). As tar does for exclusions, a pattern matches after any "/" and
+# its wildcards cross "/": "storage/app/uploads" leaves out
+# shared/storage/app/uploads, "*.mp4" every video. "<apps>:<pattern>" applies
+# to the apps of that name or glob only ("shop:storage/app/uploads").
+_bk_valid_exclude_path() {
+    local p="$1" pat
+    [[ -n "$p" && "$p" != *$'\n'* && ${#p} -le 255 ]] || return 1
+    pat="$p"
+    if [[ "$p" =~ ^([a-z0-9*?-]+):(.+)$ ]]; then pat="${BASH_REMATCH[2]}"; fi
+    # Absolute paths never match a name inside the archive: refused rather
+    # than silently excluding nothing.
+    local re='^[][A-Za-z0-9._*?/@+ -]+$'
+    [[ "$pat" != /* && "$pat" =~ $re ]] || return 1
+    # Nothing that would leave the whole app out.
+    [[ "$pat" != "*" && "$pat" != "*/" && "$pat" != "shared" && "$pat" != "htdocs" ]]
+}
+
+# The patterns of <profile> that apply to <app>, one per line.
+_bk_app_excludes() {   # <profile> <app>
+    local p="$1" app="$2" e
+    while IFS= read -r e; do
+        [[ -n "$e" ]] || continue
+        if [[ "$e" =~ ^([a-z0-9*?-]+):(.+)$ ]]; then
+            # shellcheck disable=SC2053
+            [[ "$app" == ${BASH_REMATCH[1]} ]] && echo "${BASH_REMATCH[2]}"
+        else
+            echo "$e"
+        fi
+    done < <(_bk_profile_list_field "$p" exclude_paths)
+    return 0
+}
+
 # Is this gzip stream complete and readable? Catches the failure mode that
 # matters most here — an archive truncated by a full disk, which is non-empty
 # and therefore passes every size check, but restores to nothing.
@@ -995,7 +1051,8 @@ _bk_run_profile() {
         local a
         for a in "${apps[@]:-}"; do
             [[ -n "$a" ]] || continue
-            echo -e "    ${CYAN}${a}${NC} ${DIM}($(_bk_app_paths "$a" | paste -sd, - || echo 'nothing to archive'))${NC}"
+            local xs; xs=$(_bk_app_excludes "$p" "$a" | paste -sd, -)
+            echo -e "    ${CYAN}${a}${NC} ${DIM}($(_bk_app_paths "$a" | paste -sd, - || echo 'nothing to archive')${xs:+; leaving out ${xs}})${NC}"
         done
         echo -e "  ${BOLD}Would dump ${#dbs[@]} database(s):${NC}"
         local l
@@ -1027,7 +1084,14 @@ _bk_run_profile() {
             warn "  ${a}: nothing to archive (no shared/ or htdocs/) — skipped"
             continue
         fi
-        step "  Files: ${a} (${paths//$'\n'/, })"
+        local -a tar_excl=()
+        local xpat xlist=""
+        while IFS= read -r xpat; do
+            [[ -n "$xpat" ]] || continue
+            tar_excl+=( "--exclude=${xpat}" )
+            xlist="${xlist}${xlist:+, }${xpat}"
+        done < <(_bk_app_excludes "$p" "$a")
+        step "  Files: ${a} (${paths//$'\n'/, }${xlist:+; leaving out ${xlist}})"
         mkdir -p "${tmp}/apps/${a}"
         # tar exits 1 for *warnings* — most commonly "file changed as we read
         # it", which happens constantly on a live app writing its logs. Only
@@ -1035,7 +1099,7 @@ _bk_run_profile() {
         # would flag a perfectly good backup as broken on every busy site.
         local tar_rc=0
         # shellcheck disable=SC2086
-        tar_err=$(tar -czf "${tmp}/apps/${a}/files.tar.gz" -C "$(_bk_app_home "$a")" $paths 2>&1) || tar_rc=$?
+        tar_err=$(tar -czf "${tmp}/apps/${a}/files.tar.gz" -C "$(_bk_app_home "$a")" "${tar_excl[@]}" $paths 2>&1) || tar_rc=$?
         if [[ $tar_rc -ge 2 ]]; then
             error "    archive failed: ${tar_err}"
             errors="${errors}${errors:+, }files:${a}"
@@ -1050,10 +1114,12 @@ _bk_run_profile() {
             rm -f "${tmp}/apps/${a}/files.tar.gz"
             continue
         fi
-        vault_read apps.json | jq --arg a "$a" '.[$a] | {
+        # What the archive leaves out travels with it: a restore says which
+        # folders have to come back from wherever they are kept.
+        vault_read apps.json | jq --arg a "$a" --argjson x "$(_bk_app_excludes "$p" "$a" | jq -R -s 'split("\n") | map(select(length > 0))')" '.[$a] | {
             domain, aliases, php, branch, repository, custom, docroot, engine,
             octane, reverb, horizon, schedule
-        }' > "${tmp}/apps/${a}/meta.json" 2>/dev/null || echo '{}' > "${tmp}/apps/${a}/meta.json"
+        } + {excluded_paths: $x}' > "${tmp}/apps/${a}/meta.json" 2>/dev/null || echo '{}' > "${tmp}/apps/${a}/meta.json"
     done
 
     # ── databases

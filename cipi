@@ -828,10 +828,20 @@ show_help_topic() {
         firewall|ufw)
             _help_topic_header "Firewall"
             echo ""
-            _help_cmd "cipi firewall allow <port>"     "Allow port"
-            _help_cmd "cipi firewall list"             "Firewall rules"
-            _help_cmd "cipi firewall attempts"         "Failed SSH logins before a ban (default 3)"
+            _help_cmd "cipi firewall status"           "UFW, fail2ban and CrowdSec at a glance  ${DIM}[--json]${NC}"
+            _help_cmd "cipi firewall list"             "Firewall rules  ${DIM}[--json]${NC}"
+            _help_cmd "cipi firewall allow <port>"     "Open a port or a range  ${DIM}[--from=IP|CIDR] [--proto=tcp|udp]${NC}"
+            _help_cmd "cipi firewall deny <port>"      "Refuse it, ahead of every allow  ${DIM}[--from=] [--proto=]${NC}"
+            _help_cmd "cipi firewall remove <port>"    "Drop an allow  ${DIM}[--from=] [--proto=tcp|udp|any] [--deny]${NC}"
+            _help_cmd "cipi firewall block <ip|cidr>"  "Refuse every port to an address"
+            _help_cmd "cipi firewall unblock <ip|cidr>" "Drop a block"
+            _help_cmd "cipi firewall attempts"         "Failed SSH logins before a ban (default 3)  ${DIM}[--json]${NC}"
             _help_cmd "cipi firewall attempts <n>"     "Set it  ${DIM}1-100 | default${NC}"
+            echo ""
+            _help_note "The ports this server is reached on — its SSH port, 80, 443 — are never denied to"
+            _help_note "everyone or removed here, a block never takes in this SSH session, and an allow"
+            _help_note "never undoes a Zero Trust lock: --force does it at the shell, never from the panel."
+            _help_note "The panel's Firewall tab runs these (cipi/api 1.44, cipi/gui 4.6)."
             echo ""
             ;;
 
@@ -839,7 +849,7 @@ show_help_topic() {
             _help_topic_header "Ban"
             echo ""
             _help_cmd "cipi ban list"                  "List banned IPs (fail2ban + CrowdSec if enabled)"
-            _help_cmd "cipi ban unban <IP>"            "Unban an IP from both"
+            _help_cmd "cipi ban unban <IP>"            "Unban an IP from both  ${DIM}(a CIDR: CrowdSec ranges)${NC}"
             echo ""
             ;;
 
@@ -898,7 +908,7 @@ show_help_topic() {
         crowdsec)
             _help_topic_header "CrowdSec"
             echo ""
-            _help_cmd "cipi crowdsec enable"           "Install engine + firewall bouncer"
+            _help_cmd "cipi crowdsec enable"           "Install engine + firewall bouncer  ${DIM}[--allow=IP|CIDR]${NC}"
             _help_cmd "cipi crowdsec disable"          "Flush rules, then remove (fail2ban stays)"
             _help_cmd "cipi crowdsec status"           "Engine / bouncer / rescue / decisions"
             _help_cmd "cipi crowdsec allow <ip|cidr>"  "Never ban this address"

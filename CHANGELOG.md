@@ -4,6 +4,46 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.14.0] — 2026-11-25
+
+The firewall from the panel. A server's Firewall tab (cipi/gui 4.6.0, cipi/api 1.44.0) shows UFW, fail2ban and CrowdSec together and changes what is safe to change from a browser: ports, blocked addresses, the fail2ban threshold, bans, CrowdSec and its allowlist. What keeps the server reachable stays out of its reach. The same panel release lets an admin require two-factor authentication for every account; `cipi compliance` reads that policy.
+
+### Added
+
+- **`cipi firewall status [--json]`** — everything in one read:
+  - UFW: active or not, the default policies, and every rule as ufw keeps it (the `### tuple ###` lines of `/etc/ufw/user.rules` and `user6.rules`, comments decoded), an IPv4 rule and its IPv6 twin as one (`family`: `both`, `v4`, `v6`). Each rule says what it is (`kind`: `port` for what `allow`/`deny` make, `block` for what `block` makes, `other` for the rest), which Cipi feature owns it (`managed_by`, from its comment: `zero-trust`, `metrics`, `crowdsec`), whether it keeps a protected port open (`protected`), and so whether the panel may remove it (`removable`).
+  - `protected_ports`: the ports sshd listens on (`sshd -T`, 22 when unreadable), 80 and 443. `zero_trust`: the HTTP and SSH locks.
+  - fail2ban: the threshold (saved and live, and `attempts_pending` when they differ), find and ban times, every jail with its banned addresses.
+  - CrowdSec: engine, bouncer, rescue listener, the operator's allowlist, the decisions, free RAM, and `enable_blockers` — what would stop `cipi crowdsec enable` (its RAM and real_ip checks), so the panel can say so before trying.
+  - Without `--json`, a summary; `cipi firewall list --json` and `cipi firewall attempts --json` give their parts.
+- **`cipi firewall remove <port> [--from=] [--proto=tcp|udp|any] [--deny]`** — drops what `allow` (or `deny`) made. Before, a port opened with `allow` could only be "closed" with `deny`, which UFW never reached (below).
+- **`cipi firewall block <ip|cidr>` / `unblock`** — every port refused to an address, ahead of every allow: a scanner, an abuser, a range. Lasts until unblocked, unlike a fail2ban or CrowdSec ban.
+- `cipi firewall allow` takes `--proto=udp` and port ranges (`8000:8100`); the port and `--from` are validated (1–65535, an IPv4/IPv6 address or CIDR) before anything reaches ufw.
+- **`cipi crowdsec enable --allow=<ip|cidr>`** — allowlists that address too. The panel passes its own: the server never bans the panel that manages it.
+- **The panel's whitelist** (`/etc/sudoers.d/cipi-api`) allows `firewall status --json`, `firewall allow|remove|block|unblock|attempts`, `ban unban`, `crowdsec enable`, `crowdsec disable --force` (`--force` there only skips the question), `crowdsec allow|unallow`. Not `firewall deny` (the panel opens ports and blocks addresses; it does not deny ports), not `crowdsec rescue` (break-glass belongs at the server) or `refresh`.
+- **`cipi compliance`, control `gui_2fa`, reads the panel's 2FA policy** (cipi/gui 4.6.0, Team → Two-factor authentication): required and everyone enrolled → pass; required with accounts still to enrol → warn, naming them (the panel takes them to the setup at their next request); not required and accounts without 2FA → fail, as before, now saying where to require it.
+
+### Changed
+
+- **`cipi firewall deny` goes ahead of every allow** (`ufw prepend`, `ufw insert 1` where it is missing). UFW stops at the first rule that matches: a deny added after an allow of the same port let the traffic in all the same. It also takes `--from=` and `--proto=`.
+- **What keeps the server reachable is not closed from here**:
+  - `deny` of the SSH port, 80 or 443 to everyone, and `remove` of the rule that opens them to everyone, are refused — a range that takes one of them in too. One address can still be denied (`--from=`).
+  - `block` refuses a range that takes in the address of the SSH session giving the command, and so does `deny --from=` on the SSH port; ranges wider than /8 (IPv4) or /16 (IPv6) are refused.
+  - `allow` to everyone refuses to reopen what a Zero Trust lock keeps closed (`cipi zt lock http|ssh`): it says which `cipi zt unlock` does it.
+  - `--force` gets past these at the server's shell. Coming from the panel (sudo as `www-data`) it is ignored, whatever the panel sends; so is `crowdsec enable --force`, which skips the RAM and real_ip checks — the panel gets them as they are. Enabled from the panel, CrowdSec does not look for an SSH session to allowlist (there is none).
+- `firewall allow`, `deny`, `remove`, `block`, `unblock` are written to `cipi.log`, and say when the rule was already there, when it did not exist, and when UFW is inactive.
+
+### Fixed
+
+- **`cipi ban unban 1.2.3.4` unbanned 11.2.3.45** — and `198.51.100.2` matched `198.51.100.20`: the address was looked for as a substring of fail2ban's list, every dot a wildcard. It is matched whole now. `ban unban` takes nothing but an address (a CIDR for CrowdSec ranges, `cscli decisions … --range`); an option or shell characters are refused before fail2ban-client and cscli see them.
+- `cipi ban list` and `unban` no longer stop under `set -o pipefail` when fail2ban answers without a jail list.
+- `cipi crowdsec allow|unallow` accept as IPv6 only hex digits, colons and a mask (`*:*` was enough: the value is written into a YAML allowlist), and `unallow` validates its argument before grep reads it as one.
+
+### Upgrade
+
+- `cipi self-update` rewrites the panel's whitelist, as on every update; no migration. Then `cipi api update` (cipi/api 1.44.0) on every managed server and `cipi gui update` (cipi/gui 4.6.0) on the panel's — the Firewall tab needs all three, and a token with `firewall-view` / `firewall-manage` (`cipi api token create`; a `--full-access` token has them).
+- `tests/verify-5.14.0.sh` (94 checks) runs the firewall commands against a ufw stub that keeps its rules as ufw 0.36 does, and fail2ban, cscli, systemctl and sshd stubs: the JSON, both families, comments, removals, `prepend` and its `insert 1` fallback, the protected ports (sshd's own), the session and Zero Trust guards, `--force` from the shell and from the panel, the threshold, `ban unban` on near-identical addresses, CrowdSec's state and decisions, the sudoers (visudo, 40 commands per rule) and the compliance control on a panel database. **Not verified on a real server:** ufw 0.36's `prepend` on Ubuntu 24.04 and 26.04 with IPv4 and IPv6 rules, `ufw --force delete` by rule, `crowdsec enable` started from the panel's queue.
+
 ## [5.13.1] — 2026-11-24
 
 ### Fixed

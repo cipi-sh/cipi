@@ -339,7 +339,7 @@ _cipi_complete() {
                    esac ;;
             esac ;;
 
-        firewall) [[ $pos -eq 1 ]] && sub="allow list attempts" ;;
+        firewall) [[ $pos -eq 1 ]] && sub="status list allow deny remove block unblock attempts" ;;
         ban)      [[ $pos -eq 1 ]] && sub="list unban" ;;
 
         crowdsec)

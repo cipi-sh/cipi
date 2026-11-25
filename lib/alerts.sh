@@ -85,8 +85,14 @@ _alerts_ensure_config() {
 }
 
 # Triggers that escalate an ntfy channel to high priority and get a
-# rotating-light tag. Recovery and routine events stay quiet.
+# rotating-light tag. Recovery and routine events stay quiet. The list is
+# notifications.sh's (_notify_trigger_urgent), which the selector "urgent"
+# of a channel's events reads too; the one below is for a caller without it.
 _alert_trigger_urgent() {
+    if declare -f _notify_trigger_urgent >/dev/null 2>&1; then
+        _notify_trigger_urgent "${1:-}"
+        return
+    fi
     case "${1:-}" in
         ssh_login|sudo|su|scan_hit|scan_integrity|crowdsec_rescue|\
 backup_fail|backup_stale|deploy_fail|deploy_health_fail|health_fail|\
@@ -227,7 +233,8 @@ _alert_deliver_channel() {
     return 0
 }
 
-# _alerts_deliver <subject> <body> [trigger] — fan out to every enabled channel.
+# _alerts_deliver <subject> <body> [trigger] — fan out to every enabled
+# channel that takes the trigger (its `events`, cipi notification events).
 _alerts_deliver() {
     local subject="$1" body="$2" trigger="${3:-}"
     [[ -f "$ALERTS_CFG" ]] || return 0
@@ -237,7 +244,12 @@ _alerts_deliver() {
     local ch
     while IFS= read -r ch; do
         [[ -z "$ch" ]] && continue
-        _alert_deliver_channel "$ch" "$subject" "$body" "$trigger" || true
+        if [[ -n "$trigger" ]] && declare -f _notify_events_take >/dev/null 2>&1 \
+            && ! _notify_events_take "$(jq -c '.events // null' <<<"$ch")" "$trigger"; then
+            continue
+        fi
+        # stdin from /dev/null: a delivery never reads the list of channels.
+        _alert_deliver_channel "$ch" "$subject" "$body" "$trigger" </dev/null || true
     done <<< "$channels"
     return 0
 }
@@ -291,7 +303,7 @@ _alerts_add() {
     _alerts_build_channel "$type" "$id"
     vault_read alerts.json | jq --argjson ch "$_ALERT_CH" '.channels += [$ch]' | vault_write alerts.json
     log_action "ALERT CHANNEL ADD: ${id} (${type})"
-    success "Channel '${id}' (${type}) added — every notification trigger now reaches it"
+    success "Channel '${id}' (${type}) added — every notification trigger reaches it unless you choose (cipi notification events ${id} …)"
     info "Test it with: cipi notification test ${id}"
 }
 
@@ -326,7 +338,10 @@ _alerts_update() {
 
     _alerts_build_channel "$type" "$id"
     local ch
-    ch=$(jq -c --argjson e "$enabled" '.enabled = $e' <<<"$_ALERT_CH")
+    # What the channel takes (cipi notification events) is not a flag of its
+    # type: it stays as it was.
+    ch=$(jq -c --argjson e "$enabled" --argjson ev "$(jq -c '.events // null' <<<"$cur")" \
+        '.enabled = $e | if $ev == null then . else .events = $ev end' <<<"$_ALERT_CH")
     vault_read alerts.json | jq --arg id "$id" --argjson ch "$ch" \
         '.channels |= map(if .id == $id then $ch else . end)' | vault_write alerts.json
     log_action "ALERT CHANNEL UPDATE: ${id} (${type})"
@@ -468,6 +483,9 @@ _alerts_list() {
         esac
         local extra=""
         [[ "$type" == "ntfy" && -n "$priority" && "$priority" != "default" ]] && extra="  ${DIM}priority=${priority}${NC}"
+        if declare -f _notify_events_label >/dev/null 2>&1 && [[ "$(jq -c '.events // null' <<<"$ch")" != null ]]; then
+            extra="${extra}  ${DIM}takes $(_notify_events_label "$(jq -c '.events' <<<"$ch")")${NC}"
+        fi
         if [[ "$enabled" == "true" ]]; then
             tbl_row "${GREEN}●${NC}" "$id" "$type" "${target}${extra}"
         else
@@ -476,7 +494,7 @@ _alerts_list() {
     done < <(echo "$cfg" | jq -c '.channels[]')
     tbl_print
     echo ""
-    echo -e "  ${DIM}Manage: cipi notification add|remove|enable|disable|test${NC}"
+    echo -e "  ${DIM}Manage: cipi notification add|remove|enable|disable|test · what each takes: cipi notification events${NC}"
     echo ""
 }
 

@@ -720,16 +720,25 @@ _firewall_status_json() {
     lockh=$(_firewall_zt_lock http); lockssh=$(_firewall_zt_lock ssh)
     [[ "$lockh" == "true" ]] || lockh=false
     [[ "$lockssh" == "true" ]] || lockssh=false
+    # The visitor's address behind Cloudflare (cipi nginx real-ip): what the
+    # bans above act on, so the panel shows and changes it on the same tab.
+    local realip=""
+    # shellcheck source=/dev/null
+    declare -f _nginx_realip_json >/dev/null 2>&1 || source "${CIPI_LIB}/nginx.sh"
+    declare -f _zt_apply_realip >/dev/null 2>&1 || source "${CIPI_LIB}/zt.sh"
+    realip=$(_nginx_realip_json 2>/dev/null) || realip=""
+    [[ -n "$realip" ]] || realip='null'
     jq -n -c --argjson installed "$installed" --argjson active "$active" --arg incoming "$incoming" \
         --arg outgoing "$outgoing" --argjson rules "$rules" --arg protected "$protected" \
-        --argjson f2b "$f2b" --argjson cs "$cs" --argjson lockh "$lockh" --argjson lockssh "$lockssh" '
+        --argjson f2b "$f2b" --argjson cs "$cs" --argjson lockh "$lockh" --argjson lockssh "$lockssh" \
+        --argjson realip "$realip" '
         { ufw: { installed: $installed, active: $active,
                  default_incoming: (if $incoming == "" then null else $incoming end),
                  default_outgoing: (if $outgoing == "" then null else $outgoing end),
                  rules: $rules },
           protected_ports: ($protected | split(" ") | map(select(length > 0) | tonumber) | unique),
           zero_trust: { lock_http: $lockh, lock_ssh: $lockssh },
-          fail2ban: $f2b, crowdsec: $cs }'
+          fail2ban: $f2b, crowdsec: $cs, real_ip: $realip }'
 }
 
 _firewall_status() {

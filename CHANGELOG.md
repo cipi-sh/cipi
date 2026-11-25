@@ -4,6 +4,35 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.15.0] — 2026-11-25
+
+Each notification channel takes only what it is given: one channel for everything, one for the alarms, one for the deploys. The visitor's address behind Cloudflare is turned on from the panel's Firewall tab. And a server switched to MySQL no longer lists the client's warning about passwords as one of its databases — the root password of MySQL and MariaDB is no longer on any command line at all.
+
+### Added
+
+- **`cipi notification events` — what each channel takes.** Until now every trigger that was on reached every channel that was on. A channel now takes everything (as before, and the default) or only its `events`, a list of selectors any of which lets a trigger through:
+  - a **category** of the catalog, as an id: `security`, `deploy`, `backup`, `monitor`, `health`, `ssl`, `database`, `basic-auth`, `ssh-keys`, `cipi-yml`… (`cipi notification events --json` lists them);
+  - a single **trigger**: `backup_fail`, `deploy_success`…;
+  - **`urgent`**: failures and security events — a failed deploy, backup, cron run or cipi.yml, a healthcheck down, a service or a worker stopped, the disk or an app's limit filling up, 5xx spikes, a read-only filesystem, an SSH login, sudo, su, malware or drift found, CrowdSec's rescue. The same triggers ntfy and Pushover raise in priority, which now read the one list.
+
+  `cipi notification events <channel> security,deploy` sets it, `… urgent` for the alarms alone, `… all` back to everything; `cipi notification events` shows every channel (`--json` with the categories). `add` and `update` take `--events=` too, checked before the channel is saved: a typo changes nothing and is named. SMTP is a channel like the others (`cipi notification events smtp deploy`), and reconfiguring SMTP or editing a channel keeps what it takes. The triggers on and off (`cipi notification triggers`) still come first: a trigger that is off reaches no channel. A notification without a trigger (`cipi monitor test`) and `cipi notification test` reach every channel.
+  `cipi notification status --json` gives each channel its `events` (`null`: everything) and lists the `categories` and the `selectors`; `cipi notification triggers --json` gives each trigger its `category_id`.
+- **The visitor's address behind Cloudflare, from the panel** (cipi/gui 4.7.0, cipi/api 1.45.0): `cipi nginx real-ip` was a terminal command. `cipi firewall status --json` now carries `real_ip` — on or off, who keeps it (`real-ip`, `zero-trust`, `both`, or `other`: a configuration Cipi did not write), the ranges trusted and when they were fetched, `can_disable` (on, and kept by this setting alone) and `bans_active` (fail2ban or CrowdSec runs, which `off` warns of) — and the panel's sudoers allow `nginx real-ip status --json`, `nginx real-ip cloudflare`, `nginx real-ip refresh` and `nginx real-ip off --yes`, each spelled out, nothing after them. `cipi nginx real-ip status --json` reads the same function.
+
+### Fixed
+
+- **A server switched to MySQL listed "mysql: [Warning] Using a password on the command line interface can be insecure." as a database** — in `cipi db list` and in the panel's Databases page, with a Backup, a Restore and a New password next to it. MySQL's client (`cipi db switch mysql`) says so on stderr every time it is given `-p<password>`; MariaDB's does not. `cipi db list` read the client's stderr together with its rows (to show the error when the query fails), so the warning was one more row. Two fixes:
+  - **the root password is no longer on any command line**: every `mysql`, `mariadb` and `mysqldump` Cipi runs as root — the list, the dumps and backups, a restore, `cipi db create|delete|password`, `cipi db switch`, `cipi reset db-password` — gets it in an option file read from a pipe (`--defaults-extra-file=<(…)`, `db_mysql_as_root` in `lib/common.sh`), never as `-p…`. On the command line it was in the process list — readable by every user of the server, each app's included — until the client got round to overwriting it, which is exactly what MySQL warns about; nothing touches the disk, so nothing is left behind either;
+  - `cipi db list` keeps the client's stderr apart from the rows, for PostgreSQL too (which warns at connection time about a collation version mismatch after a glibc upgrade): a failed query still says why, a warning is never a database.
+- **The PAM, cron and deploy-webhook helpers reached SMTP alone.** `cipi-auth-notify` (SSH login, sudo, su), `cipi-cron-notify` (`cron_fail`) and `cipi-app-notify` (a deploy through the webhook, its success or failure) predate the other channels and sent email only: Slack, Telegram, ntfy and the rest never heard of an SSH login. They now send through every channel that takes the trigger — `cipi-auth-notify` in the background, as before, so that a login never waits on a webhook — and run with alert channels and no SMTP at all.
+
+### Notes
+
+- No migration: `cipi self-update` installs the helpers and rewrites the panel's sudoers, as it does at every update. A channel without `events` takes everything, so nothing changes until you choose.
+- The panel's side: cipi/api 1.45.0 (`events` on a channel, `PUT|DELETE /api/firewall/real-ip`, `POST /api/firewall/real-ip/refresh`) and cipi/gui 4.7.0. An older API refuses `events` instead of ignoring it.
+
+---
+
 ## [5.14.0] — 2026-11-25
 
 The firewall from the panel. A server's Firewall tab (cipi/gui 4.6.0, cipi/api 1.44.0) shows UFW, fail2ban and CrowdSec together and changes what is safe to change from a browser: ports, blocked addresses, the fail2ban threshold, bans, CrowdSec and its allowlist. What keeps the server reachable stays out of its reach. The same panel release lets an admin require two-factor authentication for every account; `cipi compliance` reads that policy. And the optional packages grow from four entries to twenty — Browsershot's libraries among them, and the security scanners [Hackly](https://github.com/andreapollastri/hackly) runs, seven of them pinned upstream releases — which the panel can now install and remove.

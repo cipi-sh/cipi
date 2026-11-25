@@ -6,8 +6,12 @@
 # before 5.10.0 and shown here as the channel "smtp"), and the channels of
 # lib/alerts.sh (Resend, Amazon SES, Slack, Discord, Mattermost, Google
 # Chat, Telegram, ntfy, Pushover, webhook).
-# What sends them — triggers: this file. Every trigger reaches every
-# enabled channel.
+# What sends them — triggers: this file. An enabled trigger reaches every
+# enabled channel that takes it: a channel takes every trigger, or only the
+# events it was given (cipi notification events <channel> …) — categories
+# (security, deploy, backup…), single triggers, or "urgent" (failures and
+# security events). One channel for everything, one for the alarms, one for
+# deploys.
 #
 # `cipi notifications` (the older name) and `cipi smtp` keep working.
 #############################################
@@ -130,6 +134,230 @@ service_stop|Services|Service stopped
 EOF
 }
 
+# ── Which channel takes which events ─────────────────────────
+#
+# A channel's `events` (alerts.json channels[].events, smtp.json .events):
+# absent, null, [] or ["all"] — every trigger; otherwise a list of selectors,
+# any of which lets a trigger through:
+#   <category>   a category of the catalog, as an id: security, deploy,
+#                backup, monitor, basic-auth, ssh-keys, cipi-yml…
+#   <trigger>    one trigger: backup_fail, deploy_success…
+#   urgent       failures and security events — the triggers ntfy and
+#                Pushover already raise in priority (_notify_trigger_urgent)
+# A notification without a trigger (cipi monitor test) reaches every channel.
+# The triggers on and off (cipi notification triggers) still come first: a
+# trigger that is off reaches no channel.
+
+# "Basic auth" → basic-auth, "cipi.yml" → cipi-yml.
+_notify_slug() {
+    printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+}
+
+_notify_trigger_category_id() {   # <trigger> → its category, as an id
+    _notify_slug "$(_notify_trigger_catalog | awk -F'|' -v t="${1:-}" '$1 == t { print $2; exit }')"
+}
+
+# Failures and security events: what needs someone now. ntfy and Pushover
+# raise these in priority; "urgent" sends a channel these alone.
+_notify_trigger_urgent() {
+    local urgent=" ssh_login sudo su scan_hit scan_integrity scan_incomplete crowdsec_rescue"
+    urgent+=" backup_fail backup_stale deploy_fail deploy_health_fail deploy_snapshot_fail health_fail"
+    urgent+=" monitor_services monitor_workers monitor_fs monitor_disk monitor_app_disk monitor_http_5xx"
+    urgent+=" cron_fail yml_fail yml_post_fail "
+    [[ -n "${1:-}" && "$urgent" == *" ${1} "* ]]
+}
+
+# Every category, in catalog order: id|label|number of triggers
+_notify_categories() {
+    local cat id
+    _notify_trigger_catalog | awk -F'|' '!seen[$2]++ { order[++n] = $2 } { count[$2]++ }
+        END { for (i = 1; i <= n; i++) print order[i] "|" count[order[i]] }' \
+    | while IFS='|' read -r cat id; do
+        printf '%s|%s|%s\n' "$(_notify_slug "$cat")" "$cat" "$id"
+    done
+}
+
+_notify_categories_json() {
+    _notify_categories | jq -R -s -c '[split("\n")[] | select(length > 0) | split("|")
+        | {id: .[0], label: .[1], triggers: (.[2] | tonumber)}]'
+}
+
+# "security,deploy,backup_fail" → ["security","deploy","backup_fail"], or
+# null for every trigger ("all", or nothing). Every selector is checked; the
+# first one that is none of a category, a trigger, urgent or all is printed on
+# stderr and the function fails.
+_notify_events_parse() {   # <comma-separated selectors>
+    local raw="${1:-}" sel cats out='[]'
+    raw="${raw// /}"
+    [[ -z "$raw" || "$raw" == all ]] && { echo null; return 0; }
+    cats=" $(_notify_categories | cut -d'|' -f1 | tr '\n' ' ') "
+    IFS=',' read -r -a _sels <<< "$raw"
+    for sel in "${_sels[@]}"; do
+        [[ -z "$sel" ]] && continue
+        sel=$(printf '%s' "$sel" | tr '[:upper:]' '[:lower:]')
+        if [[ "$sel" == all ]]; then echo null; return 0; fi
+        if [[ "$sel" == urgent || "$cats" == *" ${sel} "* ]] || _notify_trigger_known "$sel"; then
+            out=$(jq -c --arg s "$sel" 'if index($s) then . else . + [$s] end' <<< "$out")
+        else
+            printf '%s' "$sel" >&2
+            return 1
+        fi
+    done
+    [[ "$out" == "[]" ]] && { echo null; return 0; }
+    echo "$out"
+}
+
+# 0 when a channel with these events takes this trigger.
+_notify_events_take() {   # <events JSON: array|null> <trigger>
+    local ev="${1:-null}" t="${2:-}" cat urgent=false
+    [[ -z "$t" ]] && return 0
+    [[ -z "$ev" || "$ev" == null || "$ev" == "[]" ]] && return 0
+    jq -e 'type == "array" and (index("all") | not)' <<< "$ev" >/dev/null 2>&1 || return 0
+    cat=$(_notify_trigger_category_id "$t")
+    _notify_trigger_urgent "$t" && urgent=true
+    jq -e --arg t "$t" --arg c "$cat" --argjson u "$urgent" \
+        'any(.[]; . == $t or ($c != "" and . == $c) or ($u and . == "urgent"))' <<< "$ev" >/dev/null 2>&1
+}
+
+# What a channel takes, for people: "everything", or the selectors with labels.
+_notify_events_label() {   # <events JSON>
+    local ev="${1:-null}"
+    if [[ -z "$ev" || "$ev" == null || "$ev" == "[]" ]] || jq -e 'type != "array" or index("all")' <<< "$ev" >/dev/null 2>&1; then
+        echo "everything"; return 0
+    fi
+    jq -r 'join(", ")' <<< "$ev"
+}
+
+_notify_smtp_events() {
+    [[ -f "${SMTP_CFG:-/nonexistent}" ]] || { echo null; return 0; }
+    vault_read smtp.json 2>/dev/null | jq -c '.events // null' 2>/dev/null || echo null
+}
+
+# Everything a notification goes to: SMTP and the channels of alerts.json,
+# each only for the events it takes. Best-effort: a channel that fails never
+# stops the others, nor the command that raised the notification. The PAM,
+# cron and deploy-webhook helpers send through here too — before 5.15.0 they
+# reached SMTP alone.
+_notify_fanout() {   # <subject> <body> [trigger]
+    local subject="$1" body="$2" trigger="${3:-}"
+    declare -f log_event >/dev/null 2>&1 || log_event() { :; }
+    declare -f _alerts_deliver >/dev/null 2>&1 || source "${CIPI_LIB}/alerts.sh" 2>/dev/null || true
+    if declare -f _smtp_send >/dev/null 2>&1 && _notify_events_take "$(_notify_smtp_events)" "$trigger"; then
+        _smtp_send "$subject" "$body" 2>/dev/null || true
+    fi
+    if declare -f _alerts_deliver >/dev/null 2>&1; then
+        _alerts_deliver "$subject" "$body" "$trigger" || true
+    fi
+    return 0
+}
+
+# cipi notification events [<channel> [<selectors>|all]] [--json]
+_notify_events_command() {
+    declare -f _alerts_list >/dev/null 2>&1 || source "${CIPI_LIB}/alerts.sh"
+    local id="" sel="" json=false a
+    for a in "$@"; do
+        case "$a" in
+            --json) json=true ;;
+            --events=*) sel="${a#--events=}" ;;
+            --*) error "Unknown option: ${a}"; exit 1 ;;
+            *) if [[ -z "$id" ]]; then id="$a"; elif [[ -z "$sel" ]]; then sel="$a"; fi ;;
+        esac
+    done
+    if [[ -z "$id" ]]; then
+        _notify_events_list "$json"
+        return 0
+    fi
+    _notify_is_channel "$id" || { error "Channel '${id}' not found (cipi notification)"; exit 1; }
+    if [[ -z "$sel" ]]; then
+        local ev
+        ev=$(_notify_channel_events "$id")
+        if [[ "$json" == true ]]; then
+            jq -n --arg id "$id" --argjson e "$ev" '{id: $id, events: $e}'
+        else
+            echo -e "  ${BOLD}${id}${NC} takes: $(_notify_events_label "$ev")"
+        fi
+        return 0
+    fi
+    _notify_set_events "$id" "$sel"
+    if [[ "$json" == true ]]; then
+        jq -n --arg id "$id" --argjson e "$(_notify_channel_events "$id")" '{id: $id, events: $e}'
+    fi
+}
+
+_notify_channel_events() {   # <id> → JSON array|null
+    if [[ "$1" == smtp ]]; then
+        _notify_smtp_events
+    else
+        vault_read alerts.json 2>/dev/null | jq -c --arg id "$1" '(.channels[]? | select(.id == $id) | .events) // null' 2>/dev/null | head -1
+    fi
+}
+
+# The selectors as JSON (array|null) on stdout, or the command stops on the
+# first one that is not a category, a trigger, urgent or all. Not in a
+# subshell when the refusal must stop the command: call it bare, or check $?.
+_notify_events_checked() {   # <selectors|all>
+    local ev bad
+    if ev=$(_notify_events_parse "${1:-}" 2>/dev/null); then
+        printf '%s\n' "$ev"
+        return 0
+    fi
+    bad=$(_notify_events_parse "${1:-}" 2>&1 >/dev/null || true)
+    error "Not a category, a trigger, urgent or all: '${bad}'"
+    echo "  Categories: urgent $(_notify_categories | cut -d'|' -f1 | tr '\n' ' ')" >&2
+    echo "  Triggers:   cipi notification triggers" >&2
+    exit 1
+}
+
+# Sets what a channel takes. The channel must exist; every selector is
+# checked before anything is written.
+_notify_set_events() {   # <id> <selectors|all>
+    local id="$1" sel="$2" ev
+    _notify_is_channel "$id" || { error "Channel '${id}' not found"; exit 1; }
+    _notify_events_checked "$sel" >/dev/null
+    ev=$(_notify_events_parse "$sel")
+    if [[ "$id" == smtp ]]; then
+        [[ -f "$SMTP_CFG" ]] || { error "SMTP is not configured"; exit 1; }
+        vault_read smtp.json | jq --argjson e "$ev" 'if $e == null then del(.events) else .events = $e end' | vault_write smtp.json
+    else
+        _alerts_ensure_config
+        vault_read alerts.json | jq --arg id "$id" --argjson e "$ev" \
+            '.channels |= map(if .id == $id then (if $e == null then del(.events) else .events = $e end) else . end)' \
+            | vault_write alerts.json
+    fi
+    log_action "NOTIFICATION EVENTS: ${id} → $(_notify_events_label "$ev")"
+    success "Channel '${id}' takes: $(_notify_events_label "$ev")"
+}
+
+_notify_events_list() {   # <json true|false>
+    local rows='[]' ch
+    if [[ -f "${SMTP_CFG:-/nonexistent}" ]]; then
+        rows=$(jq -c --argjson e "$(_notify_smtp_events)" '. + [{id: "smtp", type: "smtp", events: $e}]' <<< "$rows")
+    fi
+    if [[ -f "${ALERTS_CFG:-/nonexistent}" ]]; then
+        ch=$(vault_read alerts.json 2>/dev/null | jq -c '[.channels[]? | {id, type, events: (.events // null)}]' 2>/dev/null) || ch='[]'
+        rows=$(jq -c --argjson c "${ch:-[]}" '. + $c' <<< "$rows")
+    fi
+    if [[ "$1" == true ]]; then
+        jq -n --argjson r "$rows" --argjson c "$(_notify_categories_json)" \
+            '{channels: $r, categories: $c, selectors: (["all", "urgent"] + [$c[].id])}'
+        return 0
+    fi
+    echo -e "\n${BOLD}What each channel takes${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if [[ "$(jq 'length' <<< "$rows")" == 0 ]]; then
+        echo -e "  ${DIM}No channels yet — cipi notification add <type> <id> …${NC}\n"
+        return 0
+    fi
+    local id type ev
+    while IFS=$'\t' read -r id type ev; do
+        printf "  %-16s %-12s %s\n" "$id" "$type" "$(_notify_events_label "$ev")"
+    done < <(jq -r '.[] | [.id, .type, (.events | tojson)] | @tsv' <<< "$rows")
+    echo ""
+    echo -e "  ${DIM}Change: cipi notification events <channel> security,deploy | urgent | backup_fail,… | all${NC}"
+    echo -e "  ${DIM}Categories: $(_notify_categories | cut -d'|' -f1 | tr '\n' ' ')${NC}"
+    echo ""
+}
+
 _notify_default_triggers_json() {
     _notify_trigger_catalog | cut -d'|' -f1 | jq -R -s '
         split("\n") | map(select(length > 0)) | reduce .[] as $t ({}; .[$t] = true)
@@ -184,8 +412,8 @@ _notify_list() {
 
     echo -e "\n${BOLD}Notification triggers${NC}${smtp_hint}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo -e "${DIM}  A trigger that is on reaches every enabled channel: SMTP, Resend, SES, Slack,${NC}"
-    echo -e "${DIM}  Discord, Mattermost, Google Chat, Telegram, ntfy, Pushover, webhook (cipi notification).${NC}"
+    echo -e "${DIM}  A trigger that is on reaches every enabled channel that takes it: SMTP, Resend, SES, Slack,${NC}"
+    echo -e "${DIM}  Discord, Mattermost, Google Chat, Telegram, ntfy, Pushover, webhook (cipi notification events).${NC}"
     echo -e "${DIM}  Events are always logged to /var/log/cipi/events.log.${NC}\n"
 
     local cur_cat="" line id cat label on
@@ -240,7 +468,8 @@ _notify_smtp_row() {
     local _sj; _sj=$(vault_read smtp.json)
     jq -c '{id: "smtp", type: "smtp", enabled: (.enabled // false), from: (.from // null),
             to: ((.to // "") | split(",") | map(gsub(" "; "")) | map(select(. != ""))),
-            host: (.host // null), port: ((.port // "587") | tostring), tls: (.tls != false)}' <<< "$_sj"
+            host: (.host // null), port: ((.port // "587") | tostring), tls: (.tls != false),
+            events: (.events // null)}' <<< "$_sj"
 }
 
 # cipi notification [status] [--json]: every channel, SMTP included, and the triggers.
@@ -257,17 +486,19 @@ _notify_status() {
         smtp=$(_notify_smtp_row || echo null)
         chans=$(_alerts_list --json | jq -c '.channels')
         jq -n --argjson s "$smtp" --argjson c "$chans" --argjson on "$on" --argjson t "$total" \
-            --arg types "smtp $(_alert_types)" \
-            '{channels: ((if $s == null then [] else [$s] end) + $c), triggers: {enabled: $on, total: $t},
-              types: ($types | split(" "))}'
+            --arg types "smtp $(_alert_types)" --argjson cats "$(_notify_categories_json)" \
+            '{channels: ((if $s == null then [] else [$s] end) + ($c | map(.events = (.events // null)))),
+              triggers: {enabled: $on, total: $t},
+              types: ($types | split(" ")),
+              categories: $cats, selectors: (["all", "urgent"] + [$cats[].id])}'
         return 0
     fi
-    echo -e "\n${BOLD}Notifications${NC} ${DIM}— every enabled trigger reaches every enabled channel${NC}"
+    echo -e "\n${BOLD}Notifications${NC} ${DIM}— an enabled trigger reaches every enabled channel that takes it${NC}"
     echo -e "\n${BOLD}SMTP${NC}"
     if [[ -f "$SMTP_CFG" ]]; then
         local _sj; _sj=$(vault_read smtp.json)
         local st="${YELLOW}disabled${NC}"; [[ "$(jq -r '.enabled // false' <<< "$_sj")" == true ]] && st="${GREEN}enabled${NC}"
-        echo -e "  ${st}  $(jq -r '.host' <<< "$_sj"):$(jq -r '.port // 587' <<< "$_sj")  $(jq -r '.from // ""' <<< "$_sj") → $(jq -r '.to // ""' <<< "$_sj")"
+        echo -e "  ${st}  $(jq -r '.host' <<< "$_sj"):$(jq -r '.port // 587' <<< "$_sj")  $(jq -r '.from // ""' <<< "$_sj") → $(jq -r '.to // ""' <<< "$_sj")  ${DIM}takes $(_notify_events_label "$(jq -c '.events // null' <<< "$_sj")")${NC}"
     else
         echo -e "  ${DIM}not configured — cipi notification add smtp --host= --user= --password= --from= --to=${NC}"
     fi
@@ -309,7 +540,9 @@ _notify_triggers_json() {
     local cfg; cfg=$(vault_read notifications.json)
     _notify_trigger_catalog | jq -R -s --argjson cfg "$cfg" '
         [split("\n")[] | select(length > 0) | split("|")
-         | {id: .[0], category: .[1], label: (.[2:] | join("|")),
+         | {id: .[0], category: .[1],
+            category_id: (.[1] | ascii_downcase | gsub("[^a-z0-9]+"; "-") | gsub("^-+|-+$"; "")),
+            label: (.[2:] | join("|")),
             enabled: ($cfg.triggers[.[0]] != false)}]
         | {triggers: ., enabled: (map(select(.enabled)) | length), total: length}'
 }
@@ -361,28 +594,52 @@ notifications_command() {
     local sub="${1:-status}"; shift || true
     declare -f alerts_channel_command &>/dev/null || source "${CIPI_LIB}/alerts.sh"
     declare -f smtp_command &>/dev/null || source "${CIPI_LIB}/smtp.sh"
+    # --events= on add and update: what the channel takes, set once the
+    # channel itself is saved (a refused channel exits before it).
+    local _ev_arg="" _ev_set=false a
+    local -a _rest=()
+    if [[ "$sub" == add || "$sub" == update || "$sub" == edit ]]; then
+        for a in "$@"; do
+            if [[ "$a" == --events=* ]]; then _ev_arg="${a#--events=}"; _ev_set=true; else _rest+=("$a"); fi
+        done
+        set -- "${_rest[@]+"${_rest[@]}"}"
+        # Checked before the channel is touched: a typo changes nothing.
+        if [[ "$_ev_set" == true ]]; then _notify_events_checked "$_ev_arg" >/dev/null; fi
+    fi
     case "$sub" in
         status|show) _notify_status "$@" ;;
         channels)    _notify_status "$@" ;;
+        events|routes|route) _notify_events_command "$@" ;;
         add)
             if [[ "${1:-}" == smtp ]]; then
                 shift
                 # An id after the type is accepted and ignored: SMTP is one channel.
                 [[ -n "${1:-}" && "${1:-}" != --* ]] && shift
                 _smtp_configure "$@"
+                if [[ "$_ev_set" == true && -f "$SMTP_CFG" ]]; then _notify_set_events smtp "$_ev_arg"; fi
             else
+                local _new_id="${2:-}"
                 _alerts_add "$@"
+                if [[ "$_ev_set" == true ]]; then _notify_set_events "$_new_id" "$_ev_arg"; fi
             fi ;;
         update|edit)
+            local _upd_id="${1:-}"
             if [[ "${1:-}" == smtp ]]; then
                 shift
-                # Whatever is not given keeps its value; --host first makes the
-                # call non-interactive even when only --to or --tls changes.
                 [[ -f "$SMTP_CFG" ]] || { error "SMTP is not configured: cipi notification add smtp --host= …"; exit 1; }
-                _smtp_configure "--host=$(vault_read smtp.json | jq -r '.host // ""')" "$@"
-            else
+                # Only --events: nothing else of SMTP to save (nor to test).
+                if [[ $# -gt 0 ]]; then
+                    # Whatever is not given keeps its value; --host first makes the
+                    # call non-interactive even when only --to or --tls changes.
+                    _smtp_configure "--host=$(vault_read smtp.json | jq -r '.host // ""')" "$@"
+                fi
+            elif [[ $# -gt 1 || "$_ev_set" != true ]]; then
                 _alerts_update "$@"
-            fi ;;
+            else
+                _notify_is_channel "$_upd_id" || { error "Channel '${_upd_id}' not found"; exit 1; }
+            fi
+            if [[ "$_ev_set" == true ]]; then _notify_set_events "$_upd_id" "$_ev_arg"; fi
+            ;;
         remove|rm|delete)
             if [[ "${1:-}" == smtp ]]; then shift; _smtp_delete "$@"; else _alerts_remove "$@"; fi ;;
         test)
@@ -404,7 +661,7 @@ notifications_command() {
         disable-all|all-off) _notify_disable_all ;;
         reset) _notify_reset ;;
         *)
-            error "Use: cipi notification [status] | add <type> <id> … | update <id> … | remove|test|enable|disable <id> | triggers … | smtp …"
+            error "Use: cipi notification [status] | add <type> <id> … | update <id> … | remove|test|enable|disable <id> | events [<id> <selectors>] | triggers … | smtp …"
             echo "      types: smtp $(_alert_types)"
             exit 1
             ;;

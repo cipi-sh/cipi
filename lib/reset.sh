@@ -51,7 +51,7 @@ reset_db_root_password() {
         mariadb)
             local old_pass
             old_pass=$(db_get_root_password mariadb)
-            "$(db_mysql_client)" -u root -p"${old_pass}" -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${new_pass}'; FLUSH PRIVILEGES;" 2>/dev/null \
+            db_mysql_as_root "$old_pass" "$(db_mysql_client)" -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${new_pass}'; FLUSH PRIVILEGES;" 2>/dev/null \
                 || { error "Failed to change $(db_mysql_label) root password"; exit 1; }
             local tmp
             tmp=$(mktemp)

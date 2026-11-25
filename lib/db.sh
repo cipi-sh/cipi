@@ -349,7 +349,7 @@ _db_unlink() {
 _db_mariadb_exec() {
     local dbr; dbr=$(db_get_root_password mariadb)
     [[ -z "$dbr" || "$dbr" == "null" ]] && { error "$(db_mysql_label) root password not configured (reset with: cipi reset db-password)"; return 1; }
-    "$(db_mysql_client)" -u root -p"$dbr" "$@"
+    db_mysql_as_root "$dbr" "$(db_mysql_client)" "$@"
 }
 
 _db_pgsql_exec() {
@@ -426,7 +426,7 @@ db_dump_database() {
     case "$engine" in
         mariadb)
             local dbr; dbr=$(db_get_root_password mariadb)
-            mysqldump -u root -p"$dbr" --single-transaction --routines --triggers "$name" 2>/dev/null | gzip >"$outfile"
+            db_mysql_as_root "$dbr" mysqldump --single-transaction --routines --triggers "$name" 2>/dev/null | gzip >"$outfile"
             ;;
         pgsql)
             local dbr; dbr=$(db_get_root_password pgsql)
@@ -460,7 +460,7 @@ db_list_databases() {
         mariadb)
             local dbr; dbr=$(db_get_root_password mariadb)
             [[ -z "$dbr" || "$dbr" == "null" ]] && return 1
-            "$(db_mysql_client)" -u root -p"$dbr" -N -B -e \
+            db_mysql_as_root "$dbr" "$(db_mysql_client)" -N -B -e \
                 "SELECT schema_name FROM information_schema.schemata
                  WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys')
                  ORDER BY schema_name;" 2>/dev/null
@@ -488,7 +488,7 @@ db_list_tables() {
         mariadb)
             local dbr; dbr=$(db_get_root_password mariadb)
             [[ -z "$dbr" || "$dbr" == "null" ]] && return 1
-            "$(db_mysql_client)" -u root -p"$dbr" -N -B -e \
+            db_mysql_as_root "$dbr" "$(db_mysql_client)" -N -B -e \
                 "SELECT table_name FROM information_schema.tables
                  WHERE table_schema = '${name}' AND table_type = 'BASE TABLE'
                  ORDER BY table_name;" 2>/dev/null
@@ -539,7 +539,7 @@ db_dump_database_ex() {
                     done
                 done <<< "$excludes"
             done < <(db_list_tables mariadb "$name")
-            mysqldump -u root -p"$dbr" --single-transaction --routines --triggers \
+            db_mysql_as_root "$dbr" mysqldump --single-transaction --routines --triggers \
                 "${ignore[@]}" "$name" 2>/dev/null | gzip >"$outfile"
             ;;
         pgsql)
@@ -681,7 +681,7 @@ db_restore_database() {
             ( set -o pipefail
               _db_dump_cat "$file" "$reader" 2>>"$err" \
                 | _db_mysql_restore_filter "$flavor" 2>>"$err" \
-                | "$cli" -u root -p"$dbr" "$name" >/dev/null 2>>"$err" ) || rc=$?
+                | db_mysql_as_root "$dbr" "$cli" "$name" >/dev/null 2>>"$err" ) || rc=$?
             ;;
         pgsql)
             local dbr; dbr=$(db_get_root_password pgsql)
@@ -900,7 +900,7 @@ SQL
     _db_server_write_cnf "$flavor" || return 1
     systemctl enable "$unit" >/dev/null 2>&1 || true
     systemctl restart "$unit" || return 1
-    "$cli" -u root -p"$pass" -N -e "SELECT VERSION();" >/dev/null 2>&1
+    db_mysql_as_root "$pass" "$cli" -N -e "SELECT VERSION();" >/dev/null 2>&1
 }
 
 # server.json: which server runs on port 3306, and whether it is installed.
@@ -1049,7 +1049,7 @@ _db_switch_run() {   # <from> <to>
     _db_switch_record "$to" true "$pass"
     [[ "$to" == "mysql" ]] && _db_switch_blacklist_mysql
 
-    local ver; ver=$("$(_db_server_client "$to")" -u root -p"$pass" -N -e "SELECT VERSION();" 2>/dev/null | sed -n 1p) || ver=""
+    local ver; ver=$(db_mysql_as_root "$pass" "$(_db_server_client "$to")" -N -e "SELECT VERSION();" 2>/dev/null | sed -n 1p) || ver=""
     log_action "DB SWITCH: ${from} → ${to} done (${ver:-?}); ${from} data kept in ${kept}"
     cipi_notify \
         "Cipi: port 3306 now runs ${lt} on $(hostname)" \
@@ -1094,7 +1094,7 @@ _db_switch_rollback() {   # <from> <to> <ts> <root password> <reason>
         systemctl restart "$(_db_server_unit "$from")" 2>/dev/null || true
     fi
     _db_switch_record "$from" true "$pass"
-    if "$(_db_server_client "$from")" -u root -p"$pass" -N -e "SELECT 1;" >/dev/null 2>&1; then
+    if db_mysql_as_root "$pass" "$(_db_server_client "$from")" -N -e "SELECT 1;" >/dev/null 2>&1; then
         warn "$(_db_server_label "$from") is back on port 3306, as it was"
     else
         error "$(_db_server_label "$from") is not answering yet. Its data directory is ${data}; its packages: $(_db_server_install_pkgs "$from")"
@@ -1498,17 +1498,23 @@ _db_list() {
                 local dbr rows
                 dbr=$(db_get_root_password mariadb) || { error "Cannot read $(db_mysql_label) credentials from vault"; exit 1; }
                 [[ -z "$dbr" || "$dbr" == "null" ]] && { error "$(db_mysql_label) root password not configured (reset with: cipi reset db-password)"; exit 1; }
-                if ! rows=$("$(db_mysql_client)" -u root -p"$dbr" -N -e "
+                # Only stdout is rows: whatever the client says on stderr (a
+                # warning, a notice) is shown when the query fails, never read
+                # as a database. -B: tab-separated, nothing else.
+                local qerr; qerr=$(mktemp) || exit 1
+                if ! rows=$(db_mysql_as_root "$dbr" "$(db_mysql_client)" -N -B -e "
                     SELECT s.schema_name,
                            COALESCE(ROUND(SUM(t.data_length + t.index_length) / 1024 / 1024, 2), 0)
                     FROM information_schema.schemata s
                     LEFT JOIN information_schema.tables t ON t.table_schema = s.schema_name
                     WHERE s.schema_name NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
                     GROUP BY s.schema_name
-                    ORDER BY s.schema_name;" 2>&1); then
-                    error "$(db_mysql_label) query failed: ${rows}"
+                    ORDER BY s.schema_name;" 2>"$qerr"); then
+                    error "$(db_mysql_label) query failed: $(grep -v 'Using a password on the command line' "$qerr" | head -3)"
+                    rm -f "$qerr"
                     exit 1
                 fi
+                rm -f "$qerr"
                 while IFS=$'\t' read -r db sz; do
                     [[ -z "$db" ]] && continue
                     local u
@@ -1522,15 +1528,20 @@ _db_list() {
                 done <<< "$rows"
                 ;;
             pgsql)
-                local rows
+                local rows qerr
+                # stderr apart here too: PostgreSQL warns on stderr at connect
+                # time (a collation version mismatch after a glibc upgrade).
+                qerr=$(mktemp) || exit 1
                 if ! rows=$(_db_pgsql_exec -tAc "
                     SELECT datname || E'\t' || COALESCE(ROUND(pg_database_size(datname)/1024.0/1024.0, 2)::text, '0')
                     FROM pg_database
                     WHERE datistemplate = false AND datname NOT IN ('postgres')
-                    ORDER BY datname;" 2>&1); then
-                    error "PostgreSQL query failed: ${rows}"
+                    ORDER BY datname;" 2>"$qerr"); then
+                    error "PostgreSQL query failed: $(head -3 "$qerr")"
+                    rm -f "$qerr"
                     exit 1
                 fi
+                rm -f "$qerr"
                 while IFS=$'\t' read -r db sz; do
                     db=$(echo "$db" | xargs)
                     sz=$(echo "$sz" | xargs)

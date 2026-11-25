@@ -763,6 +763,20 @@ db_mysql_client() {
 db_mysql_unit()  { [[ "$(db_mysql_flavor)" == "mysql" ]] && echo mysql || echo mariadb; }
 db_mysql_label() { [[ "$(db_mysql_flavor)" == "mysql" ]] && echo MySQL || echo MariaDB; }
 
+# A MySQL/MariaDB client program (mysql, mariadb, mysqldump) run as the root
+# user of the server on port 3306, its password in an option file the program
+# reads from a pipe — never on its command line. On the command line (-p…)
+# it sat in the process list, which every user of the server reads (each
+# app's too), until the client overwrote it; and MySQL's clients (after
+# `cipi db switch mysql`) say so on stderr at every call — "mysql: [Warning]
+# Using a password on the command line interface can be insecure." — a line
+# `cipi db list` then read as the name of a database. `-u root` stays on the
+# command line, where an option file cannot change it.
+db_mysql_as_root() {   # <root password> <program> [options…]
+    local pw="$1" prog="$2"; shift 2
+    "$prog" --defaults-extra-file=<(printf '[client]\npassword="%s"\n' "${pw//\\/\\\\}") -u root "$@"
+}
+
 # Major version of the installed Deployer binary (e.g. "8"). Empty if `dep` is
 # missing/unreadable. Used to gate the PHP >= 8.3 requirement: only Deployer 8+
 # rejects older PHP — under Deployer 7 those apps still deploy fine.

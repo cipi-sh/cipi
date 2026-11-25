@@ -220,11 +220,11 @@ esac
 mkdir -p "$CIPI_LOG" 2>/dev/null || true
 echo "[${TIMESTAMP}] [${DISPLAY_FROM:-$RHOST}] [key:${SSH_KEY_NAME}] ${SUBJECT}" >> "$EVENTS_LOG" 2>/dev/null || true
 
-# ── Send email (only if SMTP configured) ─────────────────────
+# ── Notify (SMTP and the other channels, each if it takes the trigger) ──
 
 readonly SMTP_CFG="${CIPI_CONFIG}/smtp.json"
 
-[[ -f "$SMTP_CFG" ]] || exit 0
+[[ -f "$SMTP_CFG" || -f "${CIPI_CONFIG}/alerts.json" ]] || exit 0
 
 source "${CIPI_LIB}/vault.sh" 2>/dev/null || exit 0
 source "${CIPI_LIB}/notifications.sh" 2>/dev/null || true
@@ -234,7 +234,10 @@ if [[ -n "$NOTIFY_TRIGGER" ]] && declare -f _notify_trigger_enabled &>/dev/null 
     exit 0
 fi
 
-if declare -f _smtp_send &>/dev/null; then
+# In the background: a login never waits on a mail server or a webhook.
+if declare -f _notify_fanout &>/dev/null; then
+    _notify_fanout "$SUBJECT" "$BODY" "$NOTIFY_TRIGGER" >/dev/null 2>&1 &
+elif declare -f _smtp_send &>/dev/null; then
     _smtp_send "$SUBJECT" "$BODY" 2>/dev/null &
 fi
 

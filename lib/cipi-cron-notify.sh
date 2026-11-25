@@ -2,7 +2,7 @@
 #############################################
 # Cipi — Cron wrapper with error notification
 # Usage: cipi-cron-notify <label> <command...>
-# Runs command; on failure sends email via cipi smtp (if configured).
+# Runs command; on failure notifies every channel that takes cron_fail.
 #############################################
 set -uo pipefail
 
@@ -34,11 +34,13 @@ ${OUTPUT:-<no output>}"
     mkdir -p "$CIPI_LOG" 2>/dev/null || true
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [local] [key:n/a] ${SUBJECT}" >> "${CIPI_LOG}/events.log" 2>/dev/null || true
 
-    # Send email (only if SMTP configured and trigger enabled)
+    # Every channel that takes cron_fail (SMTP and the others), when the trigger is on.
     if declare -f _notify_trigger_enabled &>/dev/null && ! _notify_trigger_enabled "cron_fail"; then
         exit $RC
     fi
-    if declare -f _smtp_send &>/dev/null; then
+    if declare -f _notify_fanout &>/dev/null; then
+        _notify_fanout "$SUBJECT" "$BODY" cron_fail
+    elif declare -f _smtp_send &>/dev/null; then
         _smtp_send "$SUBJECT" "$BODY" 2>/dev/null || true
     fi
 fi

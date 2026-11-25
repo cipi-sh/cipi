@@ -5,6 +5,11 @@
 # sudo-rs (Ubuntu 25.10+) allows '*' only as the final argument token.
 # Use "db restore *" (not "db restore * *") for multi-arg commands.
 #
+# 5.15.0 adds the visitor's address behind Cloudflare (`nginx real-ip`) to
+# the panel's Firewall tab: its state, on (`cloudflare`), the ranges fetched
+# again, off (`off --yes`: the panel asks first, with what `off` warns of).
+# Each with its arguments spelled out, nothing after them.
+#
 # 5.14.0 adds the panel's Firewall tab: one read of UFW, fail2ban and
 # CrowdSec (`firewall status --json`), opening a port (`firewall allow`,
 # never `deny`), removing what allow made, blocking an address, the fail2ban
@@ -144,6 +149,10 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi nginx show *, \
                                /usr/local/bin/cipi nginx set *, \
                                /usr/local/bin/cipi nginx reset *, \
+                               /usr/local/bin/cipi nginx real-ip status --json, \
+                               /usr/local/bin/cipi nginx real-ip cloudflare, \
+                               /usr/local/bin/cipi nginx real-ip refresh, \
+                               /usr/local/bin/cipi nginx real-ip off --yes, \
                                /usr/local/bin/cipi node list, \
                                /usr/local/bin/cipi node status *, \
                                /usr/local/bin/cipi node restart *, \

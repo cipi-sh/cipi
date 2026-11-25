@@ -1033,7 +1033,8 @@ echo '{}' > "$RI/zt.json"
 grep -q 'if \[\[ -f "$NGINX_REALIP_CRON" \]\]; then' "${LIB}/zt.sh" && grep -A4 'if \[\[ -f "$NGINX_REALIP_CRON" \]\]; then' "${LIB}/zt.sh" | grep -q 'rm -f "$ZT_CRON"$' && pass "cipi zt disable leaves Cloudflare's real_ip when real-ip turned it on" || fail "zt disable would remove real-ip"
 grep -q 'cipi nginx real-ip cloudflare' "${LIB}/crowdsec.sh" && grep -q 'cipi nginx real-ip cloudflare' "${LIB}/firewall.sh" && pass "CrowdSec's refusal behind a proxy names the command" || fail "crowdsec hint"
 grep -q '_help_cmd "cipi nginx real-ip cloudflare"' "${ROOT}/cipi" && grep -q 'real-ip)        sub="cloudflare status refresh off"' "${LIB}/completion.sh" && pass "help and completion: nginx real-ip" || fail "help real-ip"
-sud=$(sed -n '/SUDOEOF/,/^SUDOEOF/p' "${LIB}/cipi-api-sudoers.sh"); grep -q 'real-ip' <<< "$sud" && fail "the panel's sudoers must not reach real-ip" || pass "real-ip is for the terminal: not in the panel's sudoers"
+# 5.15.0 lets the panel's Firewall tab run it, each form spelled out (verify-5.15.0.sh).
+sud=$(sed -n '/SUDOEOF/,/^SUDOEOF/p' "${LIB}/cipi-api-sudoers.sh"); grep -qE 'real-ip (\*|off,|off$)' <<< "$sud" && fail "the panel's sudoers reach real-ip too widely" || pass "real-ip in the panel's sudoers: only its spelled-out forms"
 
 # ── a server whose port 3306 runs MySQL: messages say mysql ──
 echo "-- db: the engine a message names"

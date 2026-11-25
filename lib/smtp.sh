@@ -149,13 +149,16 @@ _smtp_bool_flag() {
 }
 
 _smtp_save_config() {
-    local host="$1" port="$2" user="$3" pass="$4" from="$5" to="$6" tls="$7" enabled="$8"
+    local host="$1" port="$2" user="$3" pass="$4" from="$5" to="$6" tls="$7" enabled="$8" ev="null"
+    # What the channel takes (cipi notification events) is kept across a reconfigure.
+    [[ -f "$SMTP_CFG" ]] && ev=$(vault_read smtp.json 2>/dev/null | jq -c '.events // null' 2>/dev/null)
+    [[ -n "$ev" ]] || ev="null"
     jq -n \
         --arg h "$host" --arg p "$port" --arg u "$user" --arg s "$pass" \
-        --arg f "$from" --arg t "$to" \
+        --arg f "$from" --arg t "$to" --argjson ev "$ev" \
         --argjson tl "$([[ "$tls" == "on" ]] && echo true || echo false)" \
         --argjson e "$([[ "$enabled" == "on" ]] && echo true || echo false)" \
-        '{host:$h,port:$p,user:$u,password:$s,from:$f,to:$t,tls:$tl,enabled:$e}' \
+        '{host:$h,port:$p,user:$u,password:$s,from:$f,to:$t,tls:$tl,enabled:$e} + (if $ev == null then {} else {events:$ev} end)' \
         | vault_write smtp.json
     _smtp_write_rc || { error "Failed to write /etc/msmtprc"; return 1; }
     return 0
@@ -415,6 +418,11 @@ cipi_notify() {
         return 0
     fi
     body="${body}\n\n---\nPerformed by: ${client_ip}\nSSH Key: ${key_name}"
+    # Each channel only for the events it takes (cipi notification events).
+    if declare -f _notify_fanout &>/dev/null; then
+        _notify_fanout "$subject" "$body" "$trigger"
+        return 0
+    fi
     _smtp_send "$subject" "$body" 2>/dev/null || true
     # Chat/webhook channels (Slack, Discord, ntfy, custom). Best-effort and
     # never blocking: a slow webhook must not slow down the command that

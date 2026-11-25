@@ -266,7 +266,12 @@ cat > "${D}/bin/dbclient" <<STUB
 me=\$(basename "\$0")
 [[ "\$me" == mariadb ]] && ! grep -qx mariadb-server "${D}/pkgs" && exit 1
 [[ "\$me" == mysql ]] && ! grep -qx mysql-server "${D}/pkgs" && ! grep -qx mariadb-server "${D}/pkgs" && exit 1
-pw=""; for a in "\$@"; do [[ "\$a" == -p* ]] && pw="\${a#-p}"; done
+# The password on the command line (-p…), or — Cipi 5.15.0 on — in the option
+# file the client is given first (db_mysql_as_root).
+pw=""; for a in "\$@"; do
+    [[ "\$a" == -p* ]] && pw="\${a#-p}"
+    [[ "\$a" == --defaults-extra-file=* ]] && pw=\$(sed -n 's/^password="\(.*\)"\$/\1/p' "\${a#--defaults-extra-file=}")
+done
 if [[ -z "\$pw" ]]; then
     sql=\$(cat); echo "\$me: \$sql" >> "${D}/sql"
     p=\$(sed -n "s/.*ALTER USER 'root'@'localhost' .*BY '\\([^']*\\)'.*/\\1/p" <<< "\$sql"); [[ -n "\$p" ]] && echo "\$p" > "${D}/root.pass"; exit 0

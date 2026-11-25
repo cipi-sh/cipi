@@ -771,21 +771,41 @@ _nginx_realip_disable() {
     success "real-ip is off — nginx sees the address of each connection"
 }
 
-_nginx_realip_status() {
-    parse_args "$@"
-    local state by ranges=0 refreshed=""
+# The state as JSON: `cipi nginx real-ip status --json`, and `real_ip` in
+# `cipi firewall status --json` (the panel's Firewall tab).
+#   can_disable — `off` would turn it off: on, and kept by this command alone
+#                 (Zero Trust needs it; a configuration Cipi did not write is
+#                 not Cipi's to remove);
+#   bans_active — CrowdSec or fail2ban runs: with a domain still proxied,
+#                 turning it off lets them ban Cloudflare (what `off` warns of).
+_nginx_realip_json() {
+    local state by ranges=0 refreshed="" bans=false
     read -r state by <<< "$(_nginx_realip_state)"
     [[ -s "$ZT_REALIP" ]] && ranges=$(grep -c '^set_real_ip_from ' "$ZT_REALIP" 2>/dev/null || true)
     [[ -s "${ZT_IPS_DIR}/v4" ]] && refreshed=$(date -u -r "${ZT_IPS_DIR}/v4" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)
+    if systemctl is-active --quiet crowdsec 2>/dev/null || systemctl is-active --quiet fail2ban 2>/dev/null; then
+        bans=true
+    fi
+    jq -n -c --arg state "$state" --arg by "$by" --argjson ranges "${ranges:-0}" --arg refreshed "$refreshed" \
+          --argjson nightly "$([[ -f "$NGINX_REALIP_CRON" || -f "$ZT_CRON" ]] && echo true || echo false)" \
+          --argjson bans "$bans" \
+          '{enabled: ($state == "on"), provider: (if $state == "on" and $by != "other" then "cloudflare" else null end),
+            header: (if $state == "on" and $by != "other" then "CF-Connecting-IP" else null end),
+            kept_by: (if $by == "" then null else $by end), ranges: $ranges,
+            refreshed_at: (if $refreshed == "" then null else $refreshed end), nightly_refresh: $nightly,
+            can_disable: ($state == "on" and $by == "real-ip"), bans_active: $bans}'
+}
+
+_nginx_realip_status() {
+    parse_args "$@"
+    local state by ranges=0 refreshed=""
     if [[ "${ARG_json:-}" == "true" ]]; then
-        jq -n --arg state "$state" --arg by "$by" --argjson ranges "${ranges:-0}" --arg refreshed "$refreshed" \
-              --argjson nightly "$([[ -f "$NGINX_REALIP_CRON" || -f "$ZT_CRON" ]] && echo true || echo false)" \
-              '{enabled: ($state == "on"), provider: (if $state == "on" and $by != "other" then "cloudflare" else null end),
-                header: (if $state == "on" and $by != "other" then "CF-Connecting-IP" else null end),
-                kept_by: (if $by == "" then null else $by end), ranges: $ranges,
-                refreshed_at: (if $refreshed == "" then null else $refreshed end), nightly_refresh: $nightly}'
+        _nginx_realip_json | jq .
         return 0
     fi
+    read -r state by <<< "$(_nginx_realip_state)"
+    [[ -s "$ZT_REALIP" ]] && ranges=$(grep -c '^set_real_ip_from ' "$ZT_REALIP" 2>/dev/null || true)
+    [[ -s "${ZT_IPS_DIR}/v4" ]] && refreshed=$(date -u -r "${ZT_IPS_DIR}/v4" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)
     echo -e "\n${BOLD}nginx — the visitor's address${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     case "$state $by" in

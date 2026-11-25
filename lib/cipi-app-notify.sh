@@ -106,11 +106,13 @@ fi
 mkdir -p "$CIPI_LOG" 2>/dev/null || true
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [local] [key:n/a] ${SUBJECT}" >> "${CIPI_LOG}/events.log" 2>/dev/null || true
 
-# Send email (only if SMTP configured and trigger enabled)
+# Every channel that takes the trigger (SMTP and the others), when it is on.
 if [[ -n "$NOTIFY_TRIGGER" ]] && declare -f _notify_trigger_enabled &>/dev/null && ! _notify_trigger_enabled "$NOTIFY_TRIGGER"; then
     exit 0
 fi
-if declare -f _smtp_send &>/dev/null; then
+if declare -f _notify_fanout &>/dev/null; then
+    _notify_fanout "$SUBJECT" "$BODY" "$NOTIFY_TRIGGER"
+elif declare -f _smtp_send &>/dev/null; then
     _smtp_send "$SUBJECT" "$BODY" 2>/dev/null || true
 fi
 

@@ -470,13 +470,14 @@ _cipi_complete() {
         smtp|mail|email)          [[ $pos -eq 1 ]] && sub="configure status test disable enable delete" ;;
         notification|notifications|notify|triggers)
             case $pos in
-                1) sub="status add update remove test enable disable triggers smtp --json" ;;
+                1) sub="status add update remove test enable disable events triggers smtp --json" ;;
                 2) case "$w1" in
                        add)     sub="smtp resend ses slack discord mattermost googlechat telegram ntfy pushover webhook" ;;
                        test)    sub="smtp all" ;;
                        remove|enable|disable|update) sub="smtp" ;;
                        triggers) sub="list set enable disable enable-all disable-all reset --json" ;;
                        smtp)    sub="configure status test disable enable delete" ;;
+                       events)  sub="smtp --json" ;;
                    esac ;;
                 *) case "$w1" in
                        add) case "$w2" in
@@ -486,9 +487,10 @@ _cipi_complete() {
                                 telegram) sub="--token= --chat-id=" ;;
                                 pushover) sub="--token= --user=" ;;
                                 ntfy)     sub="--url= --priority=" ;;
-                                webhook)  sub="--url= --secret=" ;;
-                                *)        sub="--url=" ;;
+                                webhook)  sub="--url= --secret= --events=" ;;
+                                *)        sub="--url= --events=" ;;
                             esac ;;
+                       events) [[ $pos -eq 3 ]] && sub="all urgent security deploy backup monitor health" ;;
                    esac ;;
             esac ;;
         monitor)

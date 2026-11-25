@@ -380,7 +380,7 @@ if me == "apt-mark":
     for p in a[1:]:
         if p in inst: inst[p] = a[0]
     save(); sys.exit(0)
-opts = [x for x in a if x.startswith("-")]; words = [x for x in a if not x.startswith("-") and not x.startswith("DPkg::")]
+opts = [x for x in a if x.startswith("-")]; words = [x for x in a if not x.startswith("-") and "::" not in x]
 # A local .deb ("apt-get install ./trivy_0.76.2_amd64.deb") is its package, by name.
 words = [os.path.basename(w).split("_")[0] if w.endswith(".deb") else w for w in words]
 for w in words:
@@ -579,8 +579,9 @@ done <<< "$(_pkg_upstream)"
     || fail "no pin for:${nopin} — run scripts/package-pins.sh (needs network) and commit the result"
 [[ "$(_pkg_up_pin sec-zap amd64)" == *"|efe799aaa3627db683b43f00c9c210aea0b75c00cc8f0a0f0434d12bb3ddde5a" \
    && "$(_pkg_up_pin sec-nikto arm64)" == *"|d201dac320fc5187eac75e723dd07a716196ec5a" \
-   && "$(_pkg_up_pin sec-trivy arm64)" == *"/trivy_0.76.2_arm64.deb|0c576cd78352a2084435d393ea31565a3637cc129dd052c422f1e72fd678ee76" ]] \
-    && pass "…ZAP 2.17.0 (ZapVersions.xml), Nikto 2.6.1 (tag commit), Trivy 0.76.2 (Aqua's apt index)" || fail "known pins"
+   && "$(_pkg_up_pin sec-trivy arm64)" == *"/trivy_0.76.2_Linux-ARM64.deb|0c576cd78352a2084435d393ea31565a3637cc129dd052c422f1e72fd678ee76" ]] \
+    && pass "…ZAP 2.17.0 (ZapVersions.xml), Nikto 2.6.1 (tag commit), Trivy 0.76.2 (the release's checksums)" || fail "known pins"
+! _pkg_pins | cut -d'|' -f3 | grep -qv '^https://github\.com/' && pass "…every download is a GitHub release asset or tag (they stay where they are)" || fail "a pin outside github.com: $(_pkg_pins | cut -d'|' -f3 | grep -v '^https://github.com/')"
 
 # The test's own world: a mirror for curl, git, gem and pip that make what
 # the real ones would, and pins for the mirror's files.
@@ -726,7 +727,7 @@ o=$(pk install sec-zap --yes); r=$?
 [[ $r -ne 0 && "$(mark openjdk-21-jre-headless)" == absent && "$(mark java-common)" == absent && "$o" == *"was not installed"* && ! -e "${K}/opt/sec-zap/current" ]] \
     && pass "a first install whose download fails: the Java apt installed for it goes back" || fail "fresh fail (${r}): ${o} / $(mark openjdk-21-jre-headless)"
 mv "$M/zap.keep" "$M/ZAP_2.17.0_Linux.tar.gz"
-[[ -e "${K}/lock" ]] && grep -q '_pkg_lock; _pkg_install' "${LIB}/package.sh" && grep -q 'apt-get -o DPkg::Lock::Timeout=300 "\$@" 9>&-' "${LIB}/package.sh" \
+[[ -e "${K}/lock" ]] && grep -q '_pkg_lock; _pkg_install' "${LIB}/package.sh" && grep -q 'apt-get -o DPkg::Lock::Timeout=300 -o Dpkg::Use-Pty=0 "\$@" 9>&-' "${LIB}/package.sh" \
     && pass "install and remove take a lock, which apt's children do not inherit" || fail "lock"
 ( flock 8; sleep 3 ) 8>"${K}/lock" &
 sleep 0.3; SECONDS=0; o=$(pk install pandoc --yes); r=$?; wait
@@ -741,6 +742,9 @@ grep -q "GEM_HOME=${K}/opt/sec-wpscan/3.8.28" "${K}/opt/sec-wpscan/3.8.28/cipi-b
     && pass "…wpscan 3.8.28 in a gem home of its own, behind a wrapper" || fail "wpscan gem home"
 o=$(pk install semgrep --yes); [[ $? -eq 0 && "$(mark python3-venv)" == manual && -x "${K}/localbin/semgrep" ]] && grep -q "pip install .*semgrep==1.185.0" "${K}/calls" \
     && pass "sec-semgrep: semgrep==1.185.0 in a virtualenv of its own" || fail "semgrep: ${o}"
+grep -q "^PATH=\"${K}/opt/sec-semgrep/1.185.0/bin:\$PATH\" exec ${K}/opt/sec-semgrep/1.185.0/bin/semgrep \"\$@\"\$" "${K}/opt/sec-semgrep/1.185.0/cipi-bin/semgrep" \
+    && [[ "$(readlink "${K}/localbin/semgrep")" == "${K}/opt/sec-semgrep/current/cipi-bin/semgrep" ]] \
+    && pass "…started through a wrapper with its virtualenv first on PATH (pysemgrep, semgrep-core are its own)" || fail "semgrep wrapper: $(cat "${K}/opt/sec-semgrep/1.185.0/cipi-bin/semgrep" 2>&1)"
 o=$(pk install sec-trivy --yes); [[ $? -eq 0 && "$(mark trivy)" == manual && "$(upj sec-trivy | jq -r .installed)" == true ]] \
     && pass "sec-trivy: the pinned .deb, installed by apt" || fail "trivy: ${o}"
 o=$(pk remove trivy --yes); [[ $? -eq 0 && "$(mark trivy)" == absent ]] && pass "…and purged by apt" || fail "trivy remove: ${o}"

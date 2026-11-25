@@ -86,28 +86,30 @@ EOF
 # /usr/local/bin — a command that is already there and is not Cipi's is left
 # alone. A .deb is installed by apt. The apt packages an entry needs (a Java
 # runtime, Ruby, Perl modules) come and go with it; build tools are there
-# for the build only.
+# for the build only. ZAP needs Java 17 or later: 21, 17, or whatever the
+# release calls its default once those are gone.
 #
 # id|method|version|apt dependencies|apt build-only|commands (name=path)|description
 _pkg_upstream() {
     cat <<'EOF'
 sec-nuclei|zip|3.11.1|||nuclei=nuclei|Template-based vulnerability scanner (nuclei) for Hackly DAST, path discovery and pentests
-sec-zap|tar|2.17.0|openjdk-21-jre-headless/openjdk-17-jre-headless||zap.sh=zap.sh|OWASP ZAP, headless, with a Java runtime, for Hackly baseline and pentest scans
+sec-zap|tar|2.17.0|openjdk-21-jre-headless/openjdk-17-jre-headless/default-jre-headless||zap.sh=zap.sh|OWASP ZAP, headless, with a Java runtime, for Hackly baseline and pentest scans
 sec-nikto|git|2.6.1|perl libnet-ssleay-perl libio-socket-ssl-perl libxml-writer-perl||nikto=cipi-bin/nikto|Nikto web server scanner, 2.6 with JSON reports (Ubuntu ships 2.1.5), for Hackly pentests
 sec-wpscan|gem|3.8.28|ruby libcurl4t64/libcurl4|ruby-dev build-essential zlib1g-dev|wpscan=cipi-bin/wpscan|WPScan WordPress scanner for Hackly pentests of WordPress targets
 sec-trivy|deb|0.76.2|||trivy=/usr/bin/trivy|Trivy dependency and misconfiguration scanner for Hackly repository scans (SCA)
-sec-semgrep|venv|1.185.0|python3-venv||semgrep=bin/semgrep|Semgrep static analysis for Hackly repository scans (SAST)
-sec-checkov|venv|3.3.26|python3-venv||checkov=bin/checkov|Checkov infrastructure-as-code scanner for Hackly repository scans
+sec-semgrep|venv|1.185.0|python3-venv||semgrep=cipi-bin/semgrep|Semgrep static analysis for Hackly repository scans (SAST)
+sec-checkov|venv|3.3.26|python3-venv||checkov=cipi-bin/checkov|Checkov infrastructure-as-code scanner for Hackly repository scans
 EOF
 }
 
 # id|arch (amd64, arm64, or all)|URL|SHA-256 of the download (git: commit of the tag)
 #
 # Where they come from (scripts/package-pins.sh fetches and compares them):
-# sec-nuclei the release's nuclei_<v>_checksums.txt; sec-zap ZapVersions.xml
-# of zaproxy/zap-admin; sec-trivy the SHA256 lines of Aqua's apt index
-# (trivy-repo, deb/dists/generic); sec-nikto refs/tags/2.6.1^{}. The 5.14.0
-# pins were also checked against the downloaded files. An entry without a
+# sec-nuclei and sec-trivy the release's <name>_<v>_checksums.txt; sec-zap
+# ZapVersions.xml of zaproxy/zap-admin; sec-nikto refs/tags/2.6.1^{}. The
+# 5.14.0 pins were also checked against the downloaded files. Every download
+# is a GitHub release asset, which stays where it is: Aqua's apt repository
+# has the same Trivy .deb (same SHA-256) but keeps only the latest few. An entry without a
 # hash cannot be installed, and tests/verify-5.14.0.sh fails until it has one.
 _pkg_pins() {
     cat <<'EOF'
@@ -115,8 +117,8 @@ sec-nuclei|amd64|https://github.com/projectdiscovery/nuclei/releases/download/v3
 sec-nuclei|arm64|https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_arm64.zip|8044e3d9768ba0a744b2872c1a87e813006f013da97ca9f50f7661a4203bec07
 sec-zap|all|https://github.com/zaproxy/zaproxy/releases/download/v2.17.0/ZAP_2.17.0_Linux.tar.gz|efe799aaa3627db683b43f00c9c210aea0b75c00cc8f0a0f0434d12bb3ddde5a
 sec-nikto|all|https://github.com/sullo/nikto.git|d201dac320fc5187eac75e723dd07a716196ec5a
-sec-trivy|amd64|https://aquasecurity.github.io/trivy-repo/deb/pool/main/t/trivy/trivy_0.76.2_amd64.deb|7edaf64c8a2a0ae02137f776c6e56adf285fc36ec76b045274afdc462f20f092
-sec-trivy|arm64|https://aquasecurity.github.io/trivy-repo/deb/pool/main/t/trivy/trivy_0.76.2_arm64.deb|0c576cd78352a2084435d393ea31565a3637cc129dd052c422f1e72fd678ee76
+sec-trivy|amd64|https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.deb|7edaf64c8a2a0ae02137f776c6e56adf285fc36ec76b045274afdc462f20f092
+sec-trivy|arm64|https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-ARM64.deb|0c576cd78352a2084435d393ea31565a3637cc129dd052c422f1e72fd678ee76
 EOF
 }
 
@@ -167,9 +169,10 @@ package_command() {
 }
 
 # fd 9 is the lock of _pkg_lock: not handed to apt, whose maintainer scripts
-# may start something that outlives this command.
+# may start something that outlives this command. No pty for dpkg: its
+# "(Reading database ... 5%" progress would fill the panel's job output.
 _pkg_apt() {
-    DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 "$@" 9>&-
+    DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 -o Dpkg::Use-Pty=0 "$@" 9>&-
 }
 
 # One install or remove at a time: the panel's queue and a shell can meet, and
@@ -608,6 +611,12 @@ _pkg_up_wrappers() {
         sec-wpscan)
             printf '#!/bin/sh\n# Cipi: WPScan %s (cipi package)\nexport GEM_HOME=%s GEM_PATH=%s\nexec %s/bin/wpscan "$@"\n' \
                 "${dest##*/}" "$dest" "$dest" "$dest" > "${out}/cipi-bin/wpscan" ;;
+        sec-semgrep|sec-checkov)
+            # The virtualenv first on PATH, as when it is activated: semgrep
+            # starts its own helpers (pysemgrep, semgrep-core) by name, and
+            # must find its own — not what a pipx install left in /usr/local/bin.
+            printf '#!/bin/sh\n# Cipi: %s %s (cipi package)\nPATH="%s/bin:$PATH" exec %s/bin/%s "$@"\n' \
+                "$(_pkg_up_name "$id")" "${dest##*/}" "$dest" "$dest" "$(_pkg_up_name "$id")" > "${out}/cipi-bin/$(_pkg_up_name "$id")" ;;
     esac
     chmod 755 "${out}/cipi-bin/"* 2>/dev/null || true
 }
@@ -801,6 +810,8 @@ _pkg_up_install() {
             step "Installing $(_pkg_up_name "$id") ${version} from PyPI..."
             "$(_pkg_python)" -m venv "$dest" || _pkg_up_fail
             "${dest}/bin/pip" install -q --no-cache-dir --disable-pip-version-check "$(_pkg_up_name "$id")==${version}" || _pkg_up_fail
+            [[ -x "${dest}/bin/$(_pkg_up_name "$id")" ]] || { error "pip installed $(_pkg_up_name "$id") ${version} without its command"; _pkg_up_fail; }
+            _pkg_up_wrappers "$id" "$dest" "$dest"
             ;;
         gem)
             step "Installing $(_pkg_up_name "$id") ${version} from RubyGems..."

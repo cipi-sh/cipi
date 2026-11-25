@@ -761,6 +761,179 @@ grep -q 'browsershot fonts-cjk pdftk libreoffice pandoc tesseract' "${LIB}/compl
 grep -q '_help_cmd "cipi firewall block <ip|cidr>"' "${ROOT}/cipi" && grep -q '_help_cmd "cipi firewall status"' "${ROOT}/cipi" && pass "help: status, block" || fail "help"
 grep -q 'sub="status list allow deny remove block unblock attempts"' "${LIB}/completion.sh" && pass "completion" || fail "completion"
 
+# ── cipi nginx show|set|reset: an app's own directives ───────
+# nginx and systemctl are stubs: `nginx -t` reads the files the vhosts
+# include and calls a line starting with `boom` an unknown directive.
+echo "-- nginx: an app's own directives"
+NG="${TMP:?}/ngx"; mkdir -p "$NG/sites" "$NG/bin" "$NG/cfg" "$NG/log"
+printf '%s\n' '{"shop":{"domain":"shop.test","aliases":[],"php":"8.4"},"docs":{"domain":"docs.test","custom":"true","docroot":"public","php":"8.4"},"front":{"domain":"front.test","php":"8.4","redirect":{"enabled":true,"to":"https://new.test","code":301}}}' > "$NG/apps.json"
+cat > "$NG/bin/nginx" <<NGINXSTUB
+#!/bin/bash
+[[ "\${1:-}" == "-t" ]] || exit 0
+[[ -f "$NG/broken" ]] && { echo "nginx: [emerg] unexpected end of file in /etc/nginx/nginx.conf:9" >&2; exit 1; }
+rc=0
+for v in "$NG"/sites/*; do
+    [[ -f "\$v" ]] || continue
+    while IFS= read -r inc; do
+        [[ -f "\$inc" ]] || { echo "nginx: [emerg] open() \"\$inc\" failed (2: No such file or directory)" >&2; rc=1; continue; }
+        n=\$(grep -n '^boom' "\$inc" | head -1 | cut -d: -f1)
+        [[ -n "\$n" ]] && { echo "nginx: [emerg] unknown directive \"boom\" in \$inc:\$n" >&2; rc=1; }
+    done < <(sed -n 's/^ *include \(.*\/custom\/.*\);\$/\1/p' "\$v")
+done
+(( rc == 0 )) && echo "nginx: configuration file /etc/nginx/nginx.conf test is successful" >&2
+exit \$rc
+NGINXSTUB
+printf '#!/bin/bash\necho "$*" >> "%s/systemctl.log"\n' "$NG" > "$NG/bin/systemctl"
+chmod +x "$NG/bin/nginx" "$NG/bin/systemctl"
+cat > "$NG/h.sh" <<NGINXHARNESS
+export CIPI_LIB="${LIB}" CIPI_CONFIG="$NG/cfg" CIPI_LOG="$NG/log" PATH="$NG/bin:\$PATH"
+RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
+source "${LIB}/common.sh" 2>/dev/null
+vault_read() { cat "$NG/apps.json"; }
+vault_write() { local t; t=\$(cat); printf '%s\n' "\$t" > "$NG/apps.json"; }
+ensure_apps_json_api_access() { :; }; _ensure_nginx_octane_map() { :; }
+app_log_dir_ensure() { :; }; app_log_links_default() { :; }
+cipi_notify() { :; }; log_action() { echo "\$*" >> "$NG/actions.log"; }; curl() { return 0; }
+source "${LIB}/routes.sh"
+source "${LIB}/nginx.sh"
+eval "\$(declare -f _create_nginx_vhost _create_nginx_vhost_http _nginx_vhost_tls nginx_custom_show | sed 's|/etc/nginx/sites-available/|$NG/sites/|g')"
+_nginx_custom_dir() { echo "$NG/custom"; }
+NGINXHARNESS
+NH="source '$NG/h.sh';"
+ngx() { bash -c "$NH nginx_command \"\$@\"" _ "$@" 2>&1; }
+ngx_api() { SUDO_USER=www-data bash -c "$NH nginx_command \"\$@\"" _ "$@" 2>&1; }
+b64() { printf '%s' "$1" | base64 -w0; }
+for a in shop docs front; do bash -c "$NH _create_nginx_vhost $a $a.test 8.4" >/dev/null 2>&1; done
+[[ -s "$NG/sites/shop" ]] && ! grep -q '/custom/' "$NG/sites/shop" && pass "nginx: no directives, no include in the vhost" || fail "nginx: an include without directives, or no vhost"
+out=$(ngx show shop); grep -q 'No directives of its own' <<< "$out" && pass "nginx show: says there are none" || fail "nginx show empty: ${out}"
+[[ "$(ngx show shop --json | jq -r '[.app, .config, .active, .bytes] | @tsv')" == $'shop\t\tfalse\t0' ]] && pass "nginx show --json: empty, not active" || fail "nginx show --json empty"
+
+GOOD='client_max_body_size 512M;
+location ^~ /downloads/ {
+    add_header Cache-Control "public, max-age=31536000, immutable";
+    access_log off;
+}'
+printf '%s\n' "$GOOD" > "$NG/good.conf"
+out=$(ngx set shop --file="$NG/good.conf"); rc=$?
+[[ $rc -eq 0 ]] && grep -q "saved and live" <<< "$out" && pass "nginx set --file: saved" || fail "nginx set: ${out}"
+grep -qF "    include $NG/custom/shop.conf;" "$NG/sites/shop" && pass "nginx set: the vhost includes the app's file" || fail "nginx set: no include"
+[[ "$(grep -n 'include .*custom/shop.conf' "$NG/sites/shop" | cut -d: -f1)" -lt "$(grep -n '^    location / {' "$NG/sites/shop" | head -1 | cut -d: -f1)" ]] && pass "nginx set: inside the server block, before location /" || fail "nginx set: include misplaced"
+[[ "$(cat "$NG/custom/shop.conf")" == "$GOOD" ]] && pass "nginx set: the file holds the text as given" || fail "nginx set: file content"
+[[ "$(jq -r '.shop.nginx_custom' "$NG/apps.json" | base64 -d)" == "$GOOD" ]] && pass "nginx set: kept in apps.json" || fail "nginx set: apps.json"
+grep -q '^reload nginx' "$NG/systemctl.log" && pass "nginx set: nginx reloaded" || fail "nginx set: no reload"
+[[ "$(ngx show shop --json | jq -r '[.active, (.config | length > 20)] | @tsv')" == $'true\ttrue' ]] && pass "nginx show --json: the text, active" || fail "nginx show --json after set"
+grep -q 'No change' <<< "$(ngx set shop --file="$NG/good.conf")" && pass "nginx set: the same text twice changes nothing" || fail "nginx set: no-change"
+bash -c "$NH _create_nginx_vhost shop shop.test 8.4" >/dev/null 2>&1
+grep -qF "include $NG/custom/shop.conf;" "$NG/sites/shop" && pass "nginx: the directives survive a regeneration of the vhost" || fail "nginx: lost at regeneration"
+printf '%s\n' 'gzip_static on;' | bash -c "$NH nginx_command set docs --file=-" >/dev/null 2>&1
+grep -qF "include $NG/custom/docs.conf;" "$NG/sites/docs" && pass "nginx set --file=-: stdin, a custom app's vhost" || fail "nginx set stdin/custom"
+ngx set front --file="$NG/good.conf" >/dev/null
+grep -qF "include $NG/custom/front.conf;" "$NG/sites/front" && grep -q 'return 301' "$NG/sites/front" && pass "nginx: included under an app-wide redirect too" || fail "nginx: app redirect vhost"
+
+# nginx refuses: nothing changes, and its reason is shown without the path
+reloads=$(wc -l < "$NG/systemctl.log")
+printf 'expires 1d;\nboom now;\n' > "$NG/bad.conf"
+out=$(ngx set shop --file="$NG/bad.conf"); rc=$?
+[[ $rc -ne 0 ]] && grep -q 'nginx refused the directives' <<< "$out" && pass "nginx set: refused by nginx -t" || fail "nginx set bad: rc=${rc} ${out}"
+grep -q 'line 2: unknown directive "boom"' <<< "$out" && ! grep -q "$NG/custom" <<< "$out" && pass "nginx set: nginx's reason, by line, without the path" || fail "nginx reason: ${out}"
+[[ "$(cat "$NG/custom/shop.conf")" == "$GOOD" && "$(jq -r '.shop.nginx_custom' "$NG/apps.json" | base64 -d)" == "$GOOD" ]] && pass "nginx set: refused, the file and apps.json are as before" || fail "nginx set: not reverted"
+[[ "$(wc -l < "$NG/systemctl.log")" == "$reloads" ]] && pass "nginx set: refused, nginx not reloaded" || fail "nginx set: reloaded a refused config"
+touch "$NG/broken"; out=$(ngx set shop --file="$NG/bad.conf"); rc=$?; rm -f "$NG/broken"
+[[ $rc -ne 0 ]] && grep -q 'already invalid' <<< "$out" && [[ "$(cat "$NG/custom/shop.conf")" == "$GOOD" ]] && pass "nginx set: a configuration already broken is not touched" || fail "nginx preflight: ${out}"
+
+# from the API: a subset, and never a file of the server
+out=$(ngx_api set shop --file=/etc/shadow); [[ $? -ne 0 ]] && grep -q 'for the terminal' <<< "$out" && pass "API: --file refused" || fail "API --file: ${out}"
+out=$(ngx_api edit shop); [[ $? -ne 0 ]] && grep -q 'for a terminal' <<< "$out" && pass "API: edit refused" || fail "API edit: ${out}"
+out=$(ngx edit shop < /dev/null); [[ $? -ne 0 ]] && grep -q 'needs a terminal' <<< "$out" && pass "nginx edit: needs a terminal" || fail "edit no tty: ${out}"
+out=$(ngx_api set shop --content-b64="$(b64 "$GOOD
+expires 7d;")"); [[ $? -eq 0 ]] && grep -q 'expires 7d' "$NG/custom/shop.conf" && pass "API: allowed directives are saved" || fail "API set good: ${out}"
+api_refused() {   # <text> <what>
+    local o r; o=$(ngx_api set shop --content-b64="$(b64 "$1")"); r=$?
+    if [[ $r -ne 0 ]] && grep -q 'Not accepted from the API' <<< "$o" && grep -q 'expires 7d' "$NG/custom/shop.conf"; then pass "API refuses: $2"; else fail "API took: $2 — ${o}"; fi
+}
+api_refused 'access_log /etc/cron.d/x;' "access_log to a path"
+api_refused 'error_log /tmp/x;' "error_log"
+api_refused '"error_log" /tmp/x;' "a quoted directive name"
+api_refused 'include /etc/shadow;' "include"
+api_refused 'server_name other.test;' "server_name"
+api_refused 'listen 8080;' "listen"
+api_refused 'location /x { proxy_pass http://127.0.0.1:6379; }' "proxy_pass"
+api_refused 'location ~ \.php$ { fastcgi_pass unix:/run/php/other.sock; }' "fastcgi_pass"
+api_refused 'root /etc;' "root outside the app"
+api_refused 'alias /home/other/current/;' "alias in another app"
+api_refused 'alias /home/shop/../other/;' "alias with .."
+api_refused 'root /home/shop/$arg_x;' "root with a variable"
+api_refused '}
+server { listen 80; server_name other.test; }' "closing the server block"
+api_refused '# {
+}
+listen 81;' "a brace hidden in a comment"
+api_refused 'return 200 "x' "an open quote"
+api_refused 'ssl_certificate /etc/cipi/x.pem;' "ssl_certificate"
+api_refused 'auth_basic_user_file /etc/shadow;' "auth_basic_user_file"
+api_refused 'made_up_directive on;' "a directive nobody listed"
+out=$(ngx set shop --file="$NG/good.conf" --strict); [[ $? -eq 0 ]] && pass "nginx set --strict: the API's check, from the terminal" || fail "--strict good: ${out}"
+printf 'access_log /var/log/x.log;\n' > "$NG/root.conf"
+out=$(ngx set shop --file="$NG/root.conf" --strict); [[ $? -ne 0 ]] && pass "nginx set --strict: refuses what the API would" || fail "--strict bad"
+out=$(ngx set shop --file="$NG/root.conf"); [[ $? -eq 0 ]] && grep -q 'access_log /var/log/x.log' "$NG/custom/shop.conf" && pass "nginx set at the terminal: the whole language" || fail "root set: ${out}"
+out=$(ngx_api set shop --content-b64='not base64!'); [[ $? -ne 0 ]] && pass "API: --content-b64 must be base64" || fail "b64 check"
+head -c 40000 /dev/zero | tr '\0' '#' > "$NG/big.conf"
+out=$(ngx set shop --file="$NG/big.conf"); [[ $? -ne 0 ]] && grep -q 'too long' <<< "$out" && pass "nginx set: 32 KB at most" || fail "size: ${out}"
+printf 'expires 1d;\001\n' > "$NG/ctl.conf"
+out=$(ngx set shop --file="$NG/ctl.conf"); [[ $? -ne 0 ]] && grep -q 'control character' <<< "$out" && pass "nginx set: no control characters" || fail "control char: ${out}"
+
+out=$(ngx_api reset shop); [[ $? -eq 0 ]] && [[ ! -e "$NG/custom/shop.conf" ]] && ! grep -q 'custom/shop.conf' "$NG/sites/shop" && [[ "$(jq -r '.shop | has("nginx_custom")' "$NG/apps.json")" == "false" ]] && pass "nginx reset: the file, the include and the setting are gone" || fail "nginx reset: ${out}"
+grep -q 'no directives of its own' <<< "$(ngx reset shop)" && pass "nginx reset: nothing to remove is not an error" || fail "nginx reset twice"
+out=$(ngx_api set shop --content-b64=""); [[ $? -eq 0 ]] && pass "API: an empty text is accepted (nothing to keep)" || fail "empty b64: ${out}"
+out=$(ngx show nosuchapp); [[ $? -ne 0 ]] && grep -q 'not found' <<< "$out" && pass "nginx show: unknown app" || fail "unknown app: ${out}"
+grep -q 'NGINX CUSTOM SET: shop' "$NG/actions.log" && grep -q 'NGINX CUSTOM RESET: shop' "$NG/actions.log" && pass "nginx: changes are logged" || fail "nginx: no log"
+grep -q '"$(_nginx_custom_file "$app")"; reload_nginx' "${LIB}/app.sh" && pass "app delete removes the app's directives file" || fail "app delete keeps the file"
+sud=$(sed -n '/SUDOEOF/,/^SUDOEOF/p' "${LIB}/cipi-api-sudoers.sh")
+grep -q 'cipi nginx show \*' <<< "$sud" && grep -q 'cipi nginx set \*' <<< "$sud" && grep -q 'cipi nginx reset \*' <<< "$sud" && ! grep -q 'cipi nginx edit\|cipi nginx upgrade\|cipi nginx default-server' <<< "$sud" && pass "the panel's sudoers: nginx show, set, reset — nothing else of nginx" || fail "sudoers nginx"
+grep -q '_help_cmd "cipi nginx edit <app>"' "${ROOT}/cipi" && grep -q 'sub="show edit set reset default-server upgrade security"' "${LIB}/completion.sh" && pass "help and completion: nginx show, edit, set, reset" || fail "help nginx"
+bash -n "${LIB}/nginx-lint.sh" && sed -n "/<<'CIPINGINXLINT'/,/^CIPINGINXLINT\$/p" "${LIB}/nginx-lint.sh" | sed '1d;$d' | python3 -c "import ast, sys; ast.parse(sys.stdin.read())" 2>/dev/null && pass "nginx-lint.sh parses, and so does the Python in it" || fail "lint compile"
+[[ ! -e "${LIB}/cipi-nginx-lint.py" ]] && ! ls "${LIB}"/*.py 2>/dev/null | grep -q nginx && pass "the check is in a lib/*.sh: self-update of any version installs it" || fail "the lint is a file self-update does not copy"
+printf '%s' 'if ($http_user_agent ~* "(bot|crawler)") { return 403; }
+location ~* \.(?:jpg|png)$ { expires 30d; }
+types { application/wasm wasm; }
+set $x "${host}y";
+location @missing { return 404 "gone; really {no}"; }' | bash -c "source '${LIB}/nginx-lint.sh'; _nginx_custom_lint shop" >/dev/null && pass "lint: if, regex locations, types, \${var}, braces in quotes" || fail "lint good"
+
+# ── deploy audit: the commit's subject, read from the app's clone ──
+echo "-- deploy audit: commit subjects"
+if command -v git >/dev/null 2>&1; then
+    CT="${TMP:?}/ct"; mkdir -p "$CT/home/shop" "$CT/log"
+    git init -q --bare "$CT/home/shop/.dep/repo" && git init -q "$CT/work"
+    ( cd "$CT/work" && git config user.email t@t && git config user.name T \
+        && echo 1 > a && git add a && git commit -q -m "Fix checkout tax rounding" \
+        && echo 2 > a && git commit -q -am "$(printf 'feat: <b>bold</b> \033[31mred\033[0m\n\nbody')" \
+        && echo 3 > a && git commit -q -am "$(head -c 300 /dev/zero | tr '\0' x)" \
+        && git -c push.negotiate=false push -q "$CT/home/shop/.dep/repo" HEAD:refs/heads/main ) >/dev/null 2>&1
+    S1=$(git -C "$CT/work" rev-parse HEAD~2); S2=$(git -C "$CT/work" rev-parse HEAD~1); S3=$(git -C "$CT/work" rev-parse HEAD)
+    now=$(date -u '+%Y-%m-%dT%H:%M:%SZ'); i=0
+    for c in "$S1" "$S2" "$S3" 0123456789abcdef0123456789abcdef01234567 ""; do
+        i=$((i + 1)); printf '{"seq":%d,"ts":"%s","app":"shop","event":"published","release":"%d","commit":"%s"}\n' "$i" "$now" "$i" "$c"
+    done > "$CT/log/deploys.jsonl"
+    cat > "$CT/run.sh" <<AUDITRUN
+set -uo pipefail
+CIPI_LOG="$CT/log"; error() { echo "ERR \$*" >&2; }; warn() { echo "WARN \$*" >&2; }
+app_as() { shift; ( cd / && "\$@" ); }
+eval "\$(sed -n '/^_deploy_commit_subjects() {/,/^}/p;/^_deploy_audit_show() {/,/^}/p' "${LIB}/deploy.sh")"
+_deploy_app_home() { echo "$CT/home/\$1"; }
+ARG_json=true ARG_days=90 _deploy_audit_show shop
+AUDITRUN
+    js=$(bash "$CT/run.sh" 2>&1)
+    [[ "$(jq -r '.[0].subject' <<< "$js")" == "Fix checkout tax rounding" ]] && pass "audit --json: each record carries its commit's subject" || fail "audit subject: ${js:0:200}"
+    [[ "$(jq -r '.[1].subject' <<< "$js")" == "feat: <b>bold</b>  [31mred [0m" ]] && pass "audit --json: the first line only, control characters taken out" || fail "audit subject 2: $(jq -c '.[1].subject' <<< "$js")"
+    [[ "$(jq -r '.[2].subject | length' <<< "$js")" == "200" ]] && pass "audit --json: a subject is cut at 200 characters" || fail "audit subject length"
+    [[ "$(jq -c '[.[3], .[4]] | map(has("subject"))' <<< "$js")" == "[false,false]" ]] && pass "audit --json: a commit the clone does not have, or no commit: no subject" || fail "audit missing commit"
+    [[ "$(jq -r 'length' <<< "$js")" == "5" && "$(jq -r '.[0] | has("seq") and has("commit")' <<< "$js")" == "true" ]] && pass "audit --json: the records are otherwise as they were" || fail "audit records changed"
+    mv "$CT/home/shop/.dep" "$CT/home/shop/.dep-x"
+    [[ "$(bash "$CT/run.sh" 2>&1 | jq -c 'map(has("subject")) | any')" == "false" ]] && pass "audit --json: without a clone, the records and no subject" || fail "audit without clone"
+else
+    echo "  (git not installed: commit subjects not checked)"
+fi
+
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="
 [[ $FAIL -eq 0 ]]

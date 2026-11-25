@@ -403,10 +403,15 @@ _cipi_complete() {
 
         nginx)
             case $pos in
-                1) sub="default-server upgrade security" ;;
+                1) sub="show edit set reset default-server upgrade security" ;;
                 2) case "$w1" in
                        default-server) sub="status on off" ;;
                        upgrade)        sub="--yes" ;;
+                       show|edit|set|reset) sub="$(_cipi_apps)" ;;
+                   esac ;;
+                3) case "$w1" in
+                       show) sub="--json" ;;
+                       set)  sub="--file=" ;;
                    esac ;;
             esac ;;
 

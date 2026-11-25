@@ -610,6 +610,213 @@ nginx_command() {
             ;;
         status) _nginx_default_server_report ;;
         security) _nginx_security_report ;;
-        *) error "Use: cipi nginx default-server on|off|status | security | upgrade [--yes]"; exit 1 ;;
+        show)  nginx_custom_show "$@" ;;
+        edit)  nginx_custom_edit "$@" ;;
+        set)   nginx_custom_set "$@" ;;
+        reset|unset|clear) nginx_custom_reset "$@" ;;
+        *) error "Use: cipi nginx show|edit|set|reset <app> | default-server on|off|status | security | upgrade [--yes]"; exit 1 ;;
     esac
+}
+
+# ── An app's own nginx directives ─────────────────────────────
+#   cipi nginx show <app> [--json]
+#   cipi nginx edit <app>                      in $EDITOR, at a terminal
+#   cipi nginx set <app> --file=<path>         (- for stdin)
+#   cipi nginx set <app> --content-b64=<…>     what the API sends
+#   cipi nginx reset <app>
+#
+# The vhost of an app is Cipi's: it is written again at every alias, SSL,
+# PHP, basic auth or routing change, so an edit of /etc/nginx/sites-available
+# does not last. What lasts is this: directives kept in apps.json and included
+# in the app's server block (lib/app.sh, nginx_custom_render) — headers,
+# caching, limits, rewrites, locations of your own. A location Cipi already
+# defines cannot be defined twice: nginx says so, and nothing changes.
+#
+# Every change is tested with `nginx -t` before nginx reloads; refused, the
+# app's settings and its vhost go back to what they were and nginx's reason
+# is shown. From the API (SUDO_USER=www-data) only the directives in
+# lib/nginx-lint.sh are taken: the whole language would make a token root.
+
+[[ -z "${_NGINX_CUSTOM_MAX:-}" ]] && readonly _NGINX_CUSTOM_MAX=32768
+
+_nginx_custom_from_api() { [[ "${SUDO_USER:-}" == "www-data" ]]; }
+
+_nginx_custom_require() {
+    local app="${1:-}" what="$2"
+    [[ -n "$app" && "$app" != --* ]] || { error "Usage: cipi nginx ${what}"; exit 1; }
+    declare -f _create_nginx_vhost >/dev/null 2>&1 || source "${CIPI_LIB}/app.sh"
+    app_exists "$app" || { error "App '${app}' not found"; exit 1; }
+}
+
+# _nginx_custom_lint <app> < text — the API's subset (lib/nginx-lint.sh).
+declare -f _nginx_custom_lint >/dev/null 2>&1 || source "${CIPI_LIB}/nginx-lint.sh"
+
+# nginx's own words about the app's file, without the path: "line 3: unknown directive "foo"".
+_nginx_custom_reason() {
+    local file="$1" out="$2"
+    printf '%s\n' "$out" | grep -F "$file" | head -5 \
+        | sed -e 's/^nginx: \[[a-z]*\] //' -e "s#^\\(.*\\) in ${file}:\\([0-9][0-9]*\\)\$#line \\2: \\1#" -e "s#${file}#the app's directives#g" \
+        | tr -d '\000-\010\013-\037\177' | cut -c1-300
+}
+
+# Save the text (empty: none) as the app's directives and reload nginx with
+# them. Refused by nginx: everything back as it was, 1.
+_nginx_custom_apply() {
+    local app="$1" text="$2" before out file reason
+    declare -f _routes_app_json >/dev/null 2>&1 || source "${CIPI_LIB}/routes.sh"
+    _routes_preflight || return 1
+    before=$(_routes_app_json "$app")
+    file=$(_nginx_custom_file "$app")
+    if [[ -z "${text//[[:space:]]/}" ]]; then
+        app_unset "$app" nginx_custom
+    else
+        app_set "$app" nginx_custom "$(printf '%s' "$text" | base64 -w0)"
+    fi
+    _create_nginx_vhost "$app" "$(app_get "$app" domain)" "$(app_get "$app" php)"
+    if out=$(nginx -t 2>&1); then
+        systemctl reload nginx || { error "systemctl reload nginx failed"; return 1; }
+        [[ "$(app_get "$app" suspended)" == "true" ]] && \
+            warn "'${app}' is suspended — the directives are saved and take effect on: cipi app unsuspend ${app}"
+        return 0
+    fi
+    error "nginx refused the directives — nothing changed"
+    reason=$(_nginx_custom_reason "$file" "$out")
+    [[ -n "$reason" ]] && printf '%s\n' "$reason" | sed 's/^/  /' >&2
+    app_save "$app" "$before" || true
+    _create_nginx_vhost "$app" "$(app_get "$app" domain)" "$(app_get "$app" php)"
+    nginx -t >/dev/null 2>&1 || warn "nginx -t still fails after putting the vhost back — run: nginx -t"
+    return 1
+}
+
+# Checks that do not need nginx: size, control characters, and from the API
+# (or with --strict) the allowed subset. Problems on stderr, 1.
+_nginx_custom_check() {
+    local app="$1" text="$2" problems
+    if (( $(printf '%s' "$text" | wc -c) > _NGINX_CUSTOM_MAX )); then
+        error "The directives are too long ($(( _NGINX_CUSTOM_MAX / 1024 )) KB at most)"; return 1
+    fi
+    if printf '%s' "$text" | LC_ALL=C grep -q $'[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]'; then
+        error "The directives hold a control character"; return 1
+    fi
+    if _nginx_custom_from_api || [[ "${ARG_strict:-}" == "true" ]]; then
+        if ! problems=$(printf '%s' "$text" | _nginx_custom_lint "$app"); then
+            error "Not accepted from the API — the whole nginx language is for 'cipi nginx edit ${app}' at the server"
+            printf '%s\n' "$problems" | sed 's/^/  /' >&2
+            return 1
+        fi
+    fi
+}
+
+nginx_custom_show() {
+    local app="${1:-}"; _nginx_custom_require "$app" "show <app> [--json]"; shift
+    parse_args "$@"
+    local text file active=false
+    text=$(nginx_custom_get "$app"; printf x); text="${text%x}"
+    file=$(_nginx_custom_file "$app")
+    [[ -s "$file" ]] && grep -qF "include ${file};" "/etc/nginx/sites-available/${app}" 2>/dev/null && active=true
+    if [[ "${ARG_json:-}" == "true" ]]; then
+        jq -n --arg app "$app" --arg config "$text" --arg file "$file" --argjson active "$active" \
+              --argjson max "$_NGINX_CUSTOM_MAX" \
+              --argjson suspended "$([[ "$(app_get "$app" suspended)" == "true" ]] && echo true || echo false)" \
+              '{app: $app, config: $config, bytes: ($config | utf8bytelength), max_bytes: $max, file: $file, active: $active, suspended: $suspended}'
+        return 0
+    fi
+    echo -e "\n${BOLD}nginx — ${app}${NC} ${DIM}(${file})${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if [[ -z "${text//[[:space:]]/}" ]]; then
+        echo -e "  ${DIM}No directives of its own — add them with: cipi nginx edit ${app}${NC}\n"
+        return 0
+    fi
+    printf '%s\n' "${text%$'\n'}"
+    [[ "$active" == "true" ]] || echo -e "\n  ${YELLOW}Saved, not in the vhost right now${NC} ${DIM}(suspended app?)${NC}"
+    echo ""
+}
+
+nginx_custom_set() {
+    local app="${1:-}"; _nginx_custom_require "$app" "set <app> --file=<path|-> | --content-b64=<base64>"; shift
+    unset ARG_file ARG_content_b64 ARG_strict
+    parse_args "$@"
+    local text
+    if [[ -n "${ARG_content_b64+x}" ]]; then
+        [[ "${ARG_content_b64}" =~ ^[A-Za-z0-9+/=]*$ ]] || { error "--content-b64 is not base64"; exit 1; }
+        text=$(printf '%s' "${ARG_content_b64}" | base64 -d 2>/dev/null; printf x) || { error "--content-b64 is not base64"; exit 1; }
+        text="${text%x}"
+    elif [[ -n "${ARG_file:-}" ]]; then
+        _nginx_custom_from_api && { error "--file is for the terminal — the API sends --content-b64"; exit 1; }
+        if [[ "${ARG_file}" == "-" ]]; then
+            text=$(head -c $(( _NGINX_CUSTOM_MAX + 1 )); printf x)
+        else
+            [[ -f "${ARG_file}" && -r "${ARG_file}" ]] || { error "Cannot read ${ARG_file}"; exit 1; }
+            text=$(head -c $(( _NGINX_CUSTOM_MAX + 1 )) -- "${ARG_file}"; printf x)
+        fi
+        text="${text%x}"
+    else
+        error "Usage: cipi nginx set <app> --file=<path|-> | --content-b64=<base64>"; exit 1
+    fi
+    text="${text//$'\r'/}"
+    _nginx_custom_check "$app" "$text" || exit 1
+    local current
+    current=$(nginx_custom_get "$app"; printf x); current="${current%x}"
+    if [[ "$text" == "$current" ]]; then
+        info "No change: these are already the directives of '${app}'"
+        return 0
+    fi
+    _nginx_custom_apply "$app" "$text" || exit 1
+    if [[ -z "${text//[[:space:]]/}" ]]; then
+        success "Directives of '${app}' removed"
+        log_action "NGINX CUSTOM RESET: ${app}"
+    else
+        success "Directives of '${app}' saved and live ($(printf '%s' "$text" | wc -c) bytes)"
+        log_action "NGINX CUSTOM SET: ${app}"
+    fi
+}
+
+nginx_custom_reset() {
+    local app="${1:-}"; _nginx_custom_require "$app" "reset <app>"; shift
+    if [[ -z "$(app_get "$app" nginx_custom)" ]]; then
+        info "'${app}' has no directives of its own"
+        return 0
+    fi
+    _nginx_custom_apply "$app" "" || exit 1
+    success "Directives of '${app}' removed"
+    log_action "NGINX CUSTOM RESET: ${app}"
+}
+
+nginx_custom_edit() {
+    local app="${1:-}"; _nginx_custom_require "$app" "edit <app>"
+    _nginx_custom_from_api && { error "cipi nginx edit is for a terminal — the API uses: cipi nginx set"; exit 1; }
+    [[ -t 0 && -t 1 ]] || { error "cipi nginx edit needs a terminal — in a script: cipi nginx set ${app} --file=<path>"; exit 1; }
+    local tmp text current
+    current=$(nginx_custom_get "$app"; printf x); current="${current%x}"
+    tmp=$(mktemp /tmp/cipi-nginx-XXXXXX.conf) || { error "mktemp failed"; exit 1; }
+    chmod 600 "$tmp"
+    if [[ -n "${current//[[:space:]]/}" ]]; then
+        printf '%s\n' "${current%$'\n'}" > "$tmp"
+    else
+        cat > "$tmp" <<'TEMPLATE'
+# nginx directives of this app — included in its server block.
+# Lines starting with # are comments. Save an empty file to have none.
+#
+# client_max_body_size 512M;
+# location ^~ /downloads/ {
+#     add_header Cache-Control "public, max-age=31536000, immutable";
+# }
+TEMPLATE
+    fi
+    while true; do
+        ${EDITOR:-nano} "$tmp" || { rm -f "$tmp"; error "The editor exited with an error — nothing changed"; exit 1; }
+        text=$(cat "$tmp"; printf x); text="${text%x}"; text="${text//$'\r'/}"
+        # Only comments and blank lines: nothing to include.
+        grep -qvE '^[[:space:]]*(#.*)?$' "$tmp" || text=""
+        if [[ "${text%$'\n'}" == "${current%$'\n'}" ]]; then
+            rm -f "$tmp"; info "No change"; return 0
+        fi
+        if _nginx_custom_check "$app" "$text" && _nginx_custom_apply "$app" "$text"; then
+            rm -f "$tmp"
+            if [[ -z "$text" ]]; then success "Directives of '${app}' removed"; log_action "NGINX CUSTOM RESET: ${app}"
+            else success "Directives of '${app}' saved and live"; log_action "NGINX CUSTOM SET: ${app}"; fi
+            return 0
+        fi
+        confirm_yes "Open the editor again?" || { rm -f "$tmp"; warn "Nothing changed"; exit 1; }
+    done
 }

@@ -141,6 +141,9 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi proxy add *, \
                                /usr/local/bin/cipi proxy remove *, \
                                /usr/local/bin/cipi proxy list *, \
+                               /usr/local/bin/cipi nginx show *, \
+                               /usr/local/bin/cipi nginx set *, \
+                               /usr/local/bin/cipi nginx reset *, \
                                /usr/local/bin/cipi node list, \
                                /usr/local/bin/cipi node status *, \
                                /usr/local/bin/cipi node restart *, \

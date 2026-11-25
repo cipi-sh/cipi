@@ -278,8 +278,9 @@ eval "$(sed -n '/^_pkg_catalog()/,/^}/p' "$PKG")"
 eval "$(grep -E '^_pkg_(ids|apt_for|bins_for|desc_for)\(\)' "$PKG")"
 eval "$(sed -n '/^_pkg_resolve()/,/^}/p' "$PKG")"
 ids=$(_pkg_ids | tr '\n' ' ')
-[[ "$(_pkg_ids | wc -l | tr -d ' ')" == "4" ]] \
-    && pass "catalog has 4 entries (${ids})" || fail "unexpected catalog size: ${ids}"
+# 5.14.0 widened the catalog: the four entries of 5.2.2 are still there.
+(( $(_pkg_ids | wc -l | tr -d ' ') >= 4 )) \
+    && pass "catalog has the 5.2.2 entries at least (${ids})" || fail "unexpected catalog size: ${ids}"
 for want in image-optimizers ffmpeg imagemagick poppler-utils; do
     grep -qw "$want" <<< "$ids" && pass "catalog has ${want}" || fail "catalog missing ${want}"
 done
@@ -322,7 +323,8 @@ if sed -n '/^_pkg_install()/,/^}/p' "$PKG" | grep -q '_pkg_preview'; then
 else
     fail "install runs apt without a preview"
 fi
-if sed -n '/^_pkg_remove()/,/^}/p' "$PKG" | grep -q 'autoremove -s'; then
+# 5.14.0: the orphans are computed by _pkg_orphans (apt-get autoremove -s).
+if sed -n '/^_pkg_remove()/,/^}/p' "$PKG" | grep -qE 'autoremove -s|_pkg_orphans' && grep -q 'autoremove -s' "$PKG"; then
     pass "autoremove is previewed, not run blind"
 else
     fail "autoremove would run without showing what it takes"
@@ -352,13 +354,15 @@ for t in package_install package_remove; do
 done
 grep -q 'cipi package list' "${LIB}/cipi-api-sudoers.sh" \
     && pass "panel may list packages" || fail "sudoers omits package list"
-for forbidden in "package install" "package remove"; do
-    if grep -q "cipi ${forbidden}" "${LIB}/cipi-api-sudoers.sh"; then
-        fail "sudoers grants '${forbidden}' to www-data (root apt via the panel)"
-    else
-        pass "sudoers withholds '${forbidden}'"
-    fi
+# Until 5.14.0 the panel could only list. Since 5.14.0 it installs and
+# removes too — the catalog is closed, and from the panel --force and
+# --autoremove are ignored (verify-5.14.0.sh checks that behaviour).
+for granted in "package install" "package remove"; do
+    grep -q "cipi ${granted}" "${LIB}/cipi-api-sudoers.sh" \
+        && pass "sudoers grants '${granted}' (5.14.0)" || fail "sudoers omits '${granted}'"
 done
+grep -q '_pkg_from_panel' "$PKG" \
+    && pass "package.sh knows when the panel is asking" || fail "no panel guard in package.sh"
 if grep -qE 'package install|package_command' "${ROOT}/setup.sh" "${LIB}/self-update.sh" 2>/dev/null; then
     fail "setup.sh or self-update installs optional packages"
 else

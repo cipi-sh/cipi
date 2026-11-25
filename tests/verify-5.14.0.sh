@@ -10,7 +10,11 @@
 #    never undone — --force gets past them at the shell, never from the panel;
 #  - `ban unban` matches the whole address and takes nothing but one;
 #  - `crowdsec enable` from the panel: checks hold, --allow allowlists it;
-#  - the panel's sudoers, and compliance reading the GUI's 2FA policy.
+#  - the panel's sudoers, and compliance reading the GUI's 2FA policy;
+#  - `cipi package`: the wider catalog (browsershot, fonts-cjk, avif, pdftk,
+#    libreoffice, pandoc, tesseract), install and remove from the panel, and a
+#    removal that takes nothing another package needs. apt, dpkg and apt-mark
+#    are one Python model of installed packages, marks and dependencies.
 # ufw, fail2ban-client, cscli, systemctl and sshd are stubs: ufw keeps its
 # "### tuple ###" lines the way ufw 0.36 writes them.
 # Run from repo root: bash tests/verify-5.14.0.sh
@@ -315,6 +319,220 @@ if command -v sqlite3 >/dev/null 2>&1 || php -m 2>/dev/null | grep -qi pdo_sqlit
 else
     echo "  (neither sqlite3 nor PHP with pdo_sqlite: the compliance check is not run)"
 fi
+
+# ── cipi package: the wider catalog, from the panel too ──────
+# apt, dpkg and apt-mark as one model: installed packages with their mark
+# (manual/auto), what each package depends on, and what apt has a candidate
+# for. Orphans are auto packages nothing installed needs — as apt computes them.
+K="${TMP}/pkg"; mkdir -p "${K}/bin" "${K}/lib" "${K}/cfg" "${K}/log"
+cp -r "${LIB}/." "${K}/lib/"
+cat > "${K}/aptsim" <<'STUB'
+#!/usr/bin/env python3
+import json, os, sys
+K = os.environ["PKG_SIM"]; st = json.load(open(K + "/state.json"))
+me = os.path.basename(sys.argv[0]); a = sys.argv[1:]
+with open(K + "/calls", "a") as fh: fh.write(me + " " + " ".join(a) + "\n")
+inst, deps, avail, bins = st["installed"], st["deps"], st["avail"], st.get("bins", {})
+def save(): json.dump(st, open(K + "/state.json", "w"))
+def needed(installed):
+    keep = {p for p, m in installed.items() if m == "manual"}; todo = list(keep)
+    while todo:
+        for d in deps.get(todo.pop(), []):
+            if d in installed and d not in keep: keep.add(d); todo.append(d)
+    return keep
+def orphans(installed): return sorted(set(installed) - needed(installed))
+def closure(names):
+    out, todo = [], list(names)
+    while todo:
+        p = todo.pop(0)
+        if p in inst or p in out: continue
+        out.append(p); todo += deps.get(p, [])
+    return out
+def revdeps(names, installed):
+    gone, changed = set(names), True
+    while changed:
+        changed = False
+        for p in installed:
+            if p not in gone and any(d in gone for d in deps.get(p, [])): gone.add(p); changed = True
+    return gone - set(names)
+def binsync():
+    for p, bs in bins.items():
+        for b in bs:
+            f = K + "/bin/" + b
+            if p in inst: open(f, "w").write("#!/bin/sh\n"); os.chmod(f, 0o755)
+            elif os.path.exists(f): os.remove(f)
+if me == "dpkg-query":
+    print("installed" if a[-1] in inst else "not-installed", end=""); sys.exit(0 if a[-1] in inst else 1)
+if me == "apt-cache":
+    n = a[-1]; print(n + ":\n  Installed: (none)\n  Candidate: " + ("1.0-1" if n in avail else "(none)") + "\n  Version table:"); sys.exit(0)
+if me == "apt-mark":
+    if a[0] == "showmanual":
+        for p in a[1:]:
+            if inst.get(p) == "manual": print(p)
+        sys.exit(0)
+    for p in a[1:]:
+        if p in inst: inst[p] = a[0]
+    save(); sys.exit(0)
+opts = [x for x in a if x.startswith("-")]; words = [x for x in a if not x.startswith("-") and not x.startswith("DPkg::")]
+sim = "-s" in opts; cmd, names = words[0], words[1:]
+if cmd == "update": sys.exit(0)
+if cmd == "install":
+    if any(n not in avail and n not in inst for n in names): print("E: Unable to locate package"); sys.exit(100)
+    new = closure(names)
+    if sim:
+        for p in new: print("Inst " + p + " (1.0-1 Ubuntu:noble [amd64])")
+        print("After this operation, 42.0 MB of additional disk space will be used."); sys.exit(0)
+    for p in new: inst[p] = "auto"
+    for n in names: inst[n] = "manual"
+    save(); binsync(); sys.exit(0)
+if cmd in ("purge", "remove"):
+    gone = set(n for n in names if n in inst); gone |= revdeps(gone, inst)
+    if "--autoremove" in opts:
+        rest = {p: m for p, m in inst.items() if p not in gone}; gone |= set(orphans(rest))
+    if sim:
+        for p in sorted(gone): print("Purg " + p + " [1.0-1]")
+        sys.exit(0)
+    for p in gone: inst.pop(p, None)
+    save(); binsync(); sys.exit(0)
+if cmd == "autoremove":
+    o = orphans(inst)
+    if sim:
+        for p in o: print("Remv " + p + " [1.0-1]")
+        sys.exit(0)
+    for p in o: inst.pop(p, None)
+    save(); binsync(); sys.exit(0)
+sys.exit(0)
+STUB
+chmod +x "${K}/aptsim"; for c in apt-get apt-cache dpkg-query apt-mark; do ln -sf ../aptsim "${K}/bin/${c}"; done
+printf '#!/bin/bash\necho "Filesystem 1024-blocks Used Available Capacity Mounted"\necho "/dev/sda1 50000000 1000 ${STUB_FREE_KB:-9000000} 1%% /var"\n' > "${K}/bin/df"; chmod +x "${K}/bin/df"
+# A server: php-imagick needs libcairo2 (installed as its dependency), an old
+# kernel waits for autoremove, and "reports" (an app tool of the admin) needs ffmpeg.
+pkg_world() {
+    local release="${1:-noble}"
+    python3 - "$K" "$release" <<'PY'
+import json, sys
+K, rel = sys.argv[1], sys.argv[2]
+cat = ["libnss3","libnspr4","libdrm2","libxkbcommon0","libxcomposite1","libxdamage1","libxfixes3","libxrandr2","libgbm1",
+       "libpango-1.0-0","libcairo2","fonts-liberation","fonts-noto-color-emoji","fonts-noto-cjk","pdftk-java","default-jre-headless",
+       "libreoffice-writer-nogui","libreoffice-calc-nogui","libreoffice-core-nogui","pandoc","libavif-bin","ffmpeg","libavcodec",
+       "tesseract-ocr","tesseract-ocr-eng","tesseract-ocr-ita","tesseract-ocr-deu","tesseract-ocr-fra","tesseract-ocr-spa",
+       "jpegoptim","optipng","pngquant","gifsicle","webp","imagemagick","poppler-utils"]
+# 24.04 names the time_t-renamed libraries with t64; a later release may not.
+t64 = ["libatk1.0-0","libatk-bridge2.0-0","libcups2","libasound2"]
+avail = cat + ([p + "t64" for p in t64] if rel == "noble" else t64)
+st = {"installed": {"php8.5-imagick": "manual", "libcairo2": "auto", "linux-image-old": "auto", "reports": "manual", "ffmpeg": "manual", "libavcodec": "auto"},
+      "deps": {"php8.5-imagick": ["libcairo2"], "pdftk-java": ["default-jre-headless"], "libreoffice-writer-nogui": ["libreoffice-core-nogui"],
+               "libreoffice-calc-nogui": ["libreoffice-core-nogui"], "ffmpeg": ["libavcodec"], "reports": ["ffmpeg"], "tesseract-ocr": ["tesseract-ocr-eng"]},
+      "avail": avail,
+      "bins": {"pandoc": ["pandoc"], "pdftk-java": ["pdftk"], "libreoffice-core-nogui": ["soffice"], "libavif-bin": ["avifenc"],
+               "tesseract-ocr": ["tesseract"], "ffmpeg": ["ffmpeg", "ffprobe"]}}
+json.dump(st, open(K + "/state.json", "w"))
+PY
+    : > "${K}/calls"; rm -f "${K}/bin/pandoc" "${K}/bin/pdftk" "${K}/bin/soffice" "${K}/bin/avifenc" "${K}/bin/tesseract"
+    printf '#!/bin/sh\n' > "${K}/bin/ffmpeg"; printf '#!/bin/sh\n' > "${K}/bin/ffprobe"; chmod +x "${K}/bin/ffmpeg" "${K}/bin/ffprobe"
+}
+cat > "${K}/run.sh" <<RUN
+set -euo pipefail
+RED=""; GREEN=""; YELLOW=""; CYAN=""; DIM=""; NC=""; BOLD=""
+export CIPI_LIB="${K}/lib" CIPI_CONFIG="${K}/cfg" CIPI_LOG="${K}/log" PKG_SIM="${K}"
+export PATH="${K}/bin:\${PATH}"
+source "${K}/lib/common.sh"; source "${K}/lib/package.sh"
+cipi_notify() { echo "notify \$3" >> "${K}/calls"; }
+show_help() { :; }
+"\$@"
+RUN
+pk()  { bash "${K}/run.sh" package_command "$@" </dev/null 2>&1; }
+inst() { python3 -c 'import json,sys; s=json.load(open(sys.argv[1]+"/state.json")); print(" ".join(sorted(s["installed"])))' "$K"; }
+mark() { python3 -c 'import json,sys; s=json.load(open(sys.argv[1]+"/state.json")); print(s["installed"].get(sys.argv[2],"absent"))' "$K" "$1"; }
+
+eval "$(sed -n '/^_pkg_catalog()/,/^}/p' "${LIB}/package.sh")"
+eval "$(grep -E '^_pkg_(ids|apt_for|bins_for|desc_for|kind_for)\(\)' "${LIB}/package.sh")"
+ids=" $(_pkg_ids | tr '\n' ' ')"
+for want in image-optimizers avif ffmpeg imagemagick poppler-utils browsershot fonts-cjk pdftk libreoffice pandoc tesseract; do
+    [[ "$ids" == *" ${want} "* ]] || fail "catalog misses ${want}"
+done
+[[ "$(_pkg_ids | wc -l | tr -d ' ')" == 11 ]] && pass "catalog: 11 entries (${ids# })" || fail "catalog size: ${ids}"
+[[ "$(_pkg_kind_for browsershot)" == libraries && "$(_pkg_kind_for fonts-cjk)" == libraries && "$(_pkg_kind_for pdftk)" == tools ]] \
+    && pass "browsershot and fonts-cjk are libraries (nothing on PATH), the rest tools" || fail "kinds"
+bad=""; while IFS='|' read -r id apt bins desc; do
+    [[ -n "$id" && -n "$apt" && -n "$desc" && "$id" =~ ^[a-z0-9-]+$ ]] || bad="${bad} ${id}"
+    for p in $apt; do [[ "$p" =~ ^[a-z0-9.+/-]+$ && "$p" != *snapd* && "$p" != chromium* && "$p" != *wkhtmlto* ]] || bad="${bad} ${p}"; done
+done <<< "$(_pkg_catalog)"
+[[ -z "$bad" ]] && pass "every entry: an id, apt names, a description; no chromium, snapd or wkhtmltopdf" || fail "catalog entries:${bad}"
+grep -q 'libasound2t64/libasound2' "${LIB}/package.sh" && grep -q 'libatk-bridge2.0-0t64/libatk-bridge2.0-0' "${LIB}/package.sh" \
+    && pass "the time_t-renamed libraries are listed with both names (24.04, and a release that drops t64)" || fail "t64 alternatives"
+
+o=$(pk install chromium); [[ $? -ne 0 && "$o" == *"snapd"* && "$o" == *"cipi package install browsershot"* ]] && pass "chromium refused, pointing at browsershot" || fail "chromium: ${o}"
+o=$(pk install wkhtmltopdf); [[ $? -ne 0 && "$o" == *"archived upstream"* ]] && pass "wkhtmltopdf refused, and why" || fail "wkhtmltopdf: ${o}"
+o=$(pk install nginx); [[ $? -ne 0 && "$o" == *"not in the Cipi package allowlist"* ]] && pass "anything else refused" || fail "nginx: ${o}"
+
+pkg_world noble
+j=$(pk list --json)
+jq -e '.packages | length == 11' <<< "$j" >/dev/null && pass "list --json: 11 entries" || fail "list json: ${j}"
+jq -e '.packages[] | select(.id == "browsershot") | .kind == "libraries" and .binaries == [] and .installed == false and .partial == false and (.missing | index("libnss3")) and (.missing | index("libcairo2") | not)' <<< "$j" >/dev/null \
+    && pass "…browsershot: libraries, not partial (libcairo2 belongs to php-imagick), missing listed" || fail "browsershot json: $(jq -c '.packages[] | select(.id=="browsershot")' <<< "$j")"
+jq -e '.packages[] | select(.id == "ffmpeg") | .installed == true and .binaries == ["ffmpeg","ffprobe"] and .kind == "tools"' <<< "$j" >/dev/null \
+    && pass "…ffmpeg: installed, its binaries" || fail "ffmpeg json"
+
+o=$(pk install browsershot); [[ $? -ne 0 && "$o" == *"never implicit: pass --yes"* && "$(mark libnss3)" == absent ]] \
+    && pass "install without a terminal and without --yes: refused, nothing installed" || fail "implicit install: ${o}"
+o=$(pk install browsershot --yes); r=$?
+[[ $r -eq 0 && "$(mark libasound2t64)" == manual && "$(mark libatk-bridge2.0-0t64)" == manual && "$(mark libnss3)" == manual ]] \
+    && pass "install browsershot --yes on 24.04: the t64 names" || fail "browsershot noble (${r}): ${o}"
+[[ "$o" == *"npm install puppeteer"* && "$o" == *"noSandbox"* && "$o" == *"browsershot installed"* ]] && pass "…and says where Chrome comes from, and the sandbox" || fail "browsershot notes: ${o}"
+grep -q "notify package_install" "${K}/calls" && pass "…package_install notified" || fail "notify"
+[[ "$(pk list --json | jq -r '.packages[] | select(.id=="browsershot") | .installed')" == true ]] && pass "…then listed as installed" || fail "browsershot state"
+[[ "$(pk list --json | jq -r '.packages[] | select(.id=="browsershot") | .packages | index("libasound2t64") != null')" == true ]] && pass "…by the names actually installed" || fail "installed names"
+
+o=$(pk remove browsershot --yes); r=$?
+[[ $r -eq 0 && "$(mark libnss3)" == absent && "$(mark libasound2t64)" == absent ]] && pass "remove browsershot: its libraries go" || fail "remove browsershot (${r}): ${o}"
+[[ "$(mark libcairo2)" == auto && "$(mark php8.5-imagick)" == manual ]] && pass "…libcairo2 stays: php-imagick needs it (back to a dependency)" || fail "libcairo2: $(mark libcairo2)"
+[[ "$(mark linux-image-old)" == auto ]] && pass "…the orphan that was already there is left alone" || fail "old orphan removed"
+grep -q "notify package_remove" "${K}/calls" && pass "…package_remove notified" || fail "notify remove"
+
+pkg_world resolute
+o=$(pk install browsershot --yes); r=$?
+[[ $r -eq 0 && "$(mark libasound2)" == manual && "$(mark libatk-bridge2.0-0)" == manual && "$(mark libasound2t64)" == absent ]] \
+    && pass "install browsershot on a release without t64 names: the plain ones" || fail "browsershot resolute (${r}): ${o}"
+python3 -c 'import json,sys; p=sys.argv[1]+"/state.json"; s=json.load(open(p)); s["avail"].remove("libgbm1"); json.dump(s,open(p,"w"))' "$K"
+pkg_world noble; python3 -c 'import json,sys; p=sys.argv[1]+"/state.json"; s=json.load(open(p)); s["avail"].remove("libgbm1"); json.dump(s,open(p,"w"))' "$K"
+o=$(pk install browsershot --yes); [[ $? -ne 0 && "$o" == *"no candidate for: libgbm1"* && "$(mark libnss3)" == absent ]] \
+    && pass "a library apt has no candidate for: nothing installed, and which" || fail "no candidate: ${o}"
+
+pkg_world noble
+o=$(pk remove browsershot); [[ $? -eq 0 && "$o" == *"not installed"* ]] && pass "remove what is not there: a no-op" || fail "remove absent: ${o}"
+o=$(pk install pdftk --yes); [[ $? -eq 0 && "$o" == *"pdftk installed — pdftk available"* && "$(mark default-jre-headless)" == auto ]] && pass "install pdftk: pdftk-java and its Java runtime" || fail "pdftk: ${o}"
+o=$(pk remove pdftk --yes); [[ $? -eq 0 && "$(mark pdftk-java)" == absent && "$(mark default-jre-headless)" == absent && "$(mark linux-image-old)" == auto ]] \
+    && pass "remove pdftk: with the Java runtime only it needed; older orphans stay" || fail "remove pdftk: ${o}"
+o=$(pk install libreoffice --yes); [[ $? -eq 0 && "$o" == *"soffice available"* && "$o" == *"queue worker"* ]] && pass "install libreoffice: soffice, and where to run it" || fail "libreoffice: ${o}"
+o=$(pk install tesseract-ocr-ita --yes); [[ $? -eq 0 && "$(mark tesseract-ocr-spa)" == manual ]] && pass "a member name installs its entry (tesseract-ocr-ita → tesseract)" || fail "member: ${o}"
+o=$(pk install pandoc --yes); [[ $? -eq 0 && -x "${K}/bin/pandoc" ]] && pass "install pandoc" || fail "pandoc: ${o}"
+
+o=$(pk remove ffmpeg --yes); r=$?
+[[ $r -ne 0 && "$o" == *"would also remove: reports"* && "$(mark ffmpeg)" == manual ]] && pass "remove ffmpeg that another package needs: refused, nothing changed" || fail "revdep (${r}): ${o}"
+o=$(SUDO_USER=www-data bash "${K}/run.sh" package_command remove ffmpeg --yes --force </dev/null 2>&1); [[ $? -ne 0 && "$(mark ffmpeg)" == manual ]] \
+    && pass "…from the panel --force does not get past it" || fail "panel force remove: ${o}"
+o=$(pk remove ffmpeg --yes --force); [[ $? -eq 0 && "$(mark ffmpeg)" == absent && "$(mark reports)" == absent && "$(mark libavcodec)" == absent ]] \
+    && pass "…at the server --force does, taking what depends on it" || fail "shell force remove: ${o}"
+
+pkg_world noble
+o=$(STUB_FREE_KB=1000 SUDO_USER=www-data bash "${K}/run.sh" package_command install pandoc --yes --force </dev/null 2>&1); [[ $? -ne 0 && "$(mark pandoc)" == absent ]] \
+    && pass "panel: low disk refuses whatever --force says" || fail "panel disk: ${o}"
+o=$(STUB_FREE_KB=1000 bash "${K}/run.sh" package_command install pandoc --force </dev/null 2>&1); [[ $? -eq 0 && "$(mark pandoc)" == manual ]] \
+    && pass "shell: --force past the disk check (and the question)" || fail "shell disk: ${o}"
+o=$(SUDO_USER=www-data bash "${K}/run.sh" package_command remove pandoc --yes --autoremove </dev/null 2>&1); [[ $? -eq 0 && "$(mark pandoc)" == absent && "$(mark linux-image-old)" == auto ]] \
+    && pass "panel: --autoremove ignored, older orphans stay" || fail "panel autoremove: ${o}"
+pk install pandoc --yes >/dev/null; o=$(pk remove pandoc --yes --autoremove); [[ $? -eq 0 && "$(mark linux-image-old)" == absent ]] \
+    && pass "shell: --autoremove takes the older orphans too" || fail "shell autoremove: ${o}"
+
+pkg_world noble; pk install fonts-cjk --yes >/dev/null
+o=$(pk remove fonts-cjk); [[ $? -ne 0 && "$(mark fonts-noto-cjk)" == manual ]] \
+    && pass "remove without --yes and no terminal: refused, the library marked manual again" || fail "remove implicit: ${o} / $(mark fonts-noto-cjk)"
+
+sud=$(sed -n '/SUDOEOF/,/^SUDOEOF/p' "${LIB}/cipi-api-sudoers.sh")
+grep -q 'cipi package install \*' <<< "$sud" && grep -q 'cipi package remove \*' <<< "$sud" && pass "the panel's sudoers: package install, remove" || fail "sudoers package"
+grep -q '_help_note "Libraries and fonts: browsershot' "${ROOT}/cipi" && pass "help: the new entries" || fail "help package"
+grep -q 'browsershot fonts-cjk pdftk libreoffice pandoc tesseract' "${LIB}/completion.sh" && pass "completion: the new entries" || fail "completion package"
 
 # ── help, completion ─────────────────────────────────────────
 grep -q '_help_cmd "cipi firewall block <ip|cidr>"' "${ROOT}/cipi" && grep -q '_help_cmd "cipi firewall status"' "${ROOT}/cipi" && pass "help: status, block" || fail "help"

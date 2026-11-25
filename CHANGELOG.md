@@ -6,7 +6,7 @@ All notable changes to Cipi are documented in this file.
 
 ## [5.14.0] — 2026-11-25
 
-The firewall from the panel. A server's Firewall tab (cipi/gui 4.6.0, cipi/api 1.44.0) shows UFW, fail2ban and CrowdSec together and changes what is safe to change from a browser: ports, blocked addresses, the fail2ban threshold, bans, CrowdSec and its allowlist. What keeps the server reachable stays out of its reach. The same panel release lets an admin require two-factor authentication for every account; `cipi compliance` reads that policy.
+The firewall from the panel. A server's Firewall tab (cipi/gui 4.6.0, cipi/api 1.44.0) shows UFW, fail2ban and CrowdSec together and changes what is safe to change from a browser: ports, blocked addresses, the fail2ban threshold, bans, CrowdSec and its allowlist. What keeps the server reachable stays out of its reach. The same panel release lets an admin require two-factor authentication for every account; `cipi compliance` reads that policy. And the optional packages grow from four entries to eleven — Browsershot's libraries among them — which the panel can now install and remove.
 
 ### Added
 
@@ -23,6 +23,23 @@ The firewall from the panel. A server's Firewall tab (cipi/gui 4.6.0, cipi/api 1
 - **The panel's whitelist** (`/etc/sudoers.d/cipi-api`) allows `firewall status --json`, `firewall allow|remove|block|unblock|attempts`, `ban unban`, `crowdsec enable`, `crowdsec disable --force` (`--force` there only skips the question), `crowdsec allow|unallow`. Not `firewall deny` (the panel opens ports and blocks addresses; it does not deny ports), not `crowdsec rescue` (break-glass belongs at the server) or `refresh`.
 - **`cipi compliance`, control `gui_2fa`, reads the panel's 2FA policy** (cipi/gui 4.6.0, Team → Two-factor authentication): required and everyone enrolled → pass; required with accounts still to enrol → warn, naming them (the panel takes them to the setup at their next request); not required and accounts without 2FA → fail, as before, now saying where to require it.
 
+- **Seven new optional packages** (`cipi package list`), on the same rule as the first four — stateless, from Ubuntu's repositories, a real Laravel or PHP package behind each:
+
+  | Entry | apt | For |
+  | --- | --- | --- |
+  | `browsershot` | the shared libraries and fonts Chrome needs (`libnss3`, `libgbm1`, `libasound2t64`, `fonts-liberation`, `fonts-noto-color-emoji`, …) | spatie/browsershot, spatie/laravel-pdf. Chrome itself comes with Puppeteer, per app (`npm install puppeteer`) |
+  | `fonts-cjk` | `fonts-noto-cjk` | Chinese, Japanese and Korean text in PDFs and images |
+  | `avif` | `libavif-bin` (`avifenc`) | AVIF in spatie/laravel-image-optimizer |
+  | `pdftk` | `pdftk-java` | mikehaertl/php-pdftk: forms, merge, split (pulls a headless Java runtime) |
+  | `libreoffice` | `libreoffice-writer-nogui`, `libreoffice-calc-nogui` (`soffice`) | DOCX, XLSX, ODT to PDF |
+  | `pandoc` | `pandoc` | ueberdosis/pandoc |
+  | `tesseract` | `tesseract-ocr` with English, Italian, German, French and Spanish | thiagoalessio/tesseract_ocr |
+
+  `browsershot` and `fonts-cjk` are *libraries*: nothing to find on PATH, every item checked with dpkg instead. An apt item may name two packages, `libasound2t64/libasound2`: the first one apt has a candidate for is installed, either one installed counts — 24.04 renamed those libraries for the 64-bit `time_t` transition, a later release may drop the suffix, and the catalog keeps real package names dpkg can see, never virtual ones. After an install Cipi says what the app still has to do: Puppeteer and the sandbox for Browsershot (Ubuntu 24.04+ restricts the user namespaces Chrome's sandbox uses), a queue worker and one profile per conversion for LibreOffice, the languages for Tesseract.
+- **`chromium` and `wkhtmltopdf` stay out**, and the refusal says why and what instead: Chromium on Ubuntu is a snapd transitional package (→ `browsershot` and Puppeteer's Chrome); wkhtmltopdf is archived upstream, its Qt WebKit unpatched (→ `browsershot`).
+- **`cipi package list --json`** adds `kind` (`tools` | `libraries`), `binaries` and `missing` per entry, and `packages` names what is installed (`libasound2t64` on 24.04). `partial` no longer counts libraries other packages pulled in: a library entry is partial only when one of its items was installed on purpose.
+- **The panel installs and removes optional packages** (cipi/gui 4.6.0, cipi/api 1.44.0: `POST|DELETE /api/packages/{id}`): its sudoers allow `package install *` and `package remove *`. The catalog is what makes this safe — a name outside it is refused before apt sees it. From the panel (sudo as `www-data`) `--force` is ignored, so the 1 GB free-space check holds, and so is `--autoremove`.
+
 ### Changed
 
 - **`cipi firewall deny` goes ahead of every allow** (`ufw prepend`, `ufw insert 1` where it is missing). UFW stops at the first rule that matches: a deny added after an allow of the same port let the traffic in all the same. It also takes `--from=` and `--proto=`.
@@ -31,6 +48,11 @@ The firewall from the panel. A server's Firewall tab (cipi/gui 4.6.0, cipi/api 1
   - `block` refuses a range that takes in the address of the SSH session giving the command, and so does `deny --from=` on the SSH port; ranges wider than /8 (IPv4) or /16 (IPv6) are refused.
   - `allow` to everyone refuses to reopen what a Zero Trust lock keeps closed (`cipi zt lock http|ssh`): it says which `cipi zt unlock` does it.
   - `--force` gets past these at the server's shell. Coming from the panel (sudo as `www-data`) it is ignored, whatever the panel sends; so is `crowdsec enable --force`, which skips the RAM and real_ip checks — the panel gets them as they are. Enabled from the panel, CrowdSec does not look for an SSH session to allowlist (there is none).
+- **`cipi package remove` takes the entry and nothing another package needs**, computed before anything changes and shown with the question:
+  - a tool: its packages and the dependencies only they needed (`pdftk` takes its Java runtime). A removal that would take another package with it — one that depends on the entry — is refused, nothing changed; `--force` at the server goes ahead;
+  - libraries: marked as automatically installed, then only those nothing uses any more go (`browsershot` leaves `libcairo2` to the php-imagick that needs it); put back as they were on abort. Libraries other packages pulled in were never the entry's: an entry with only those is "not installed";
+  - orphans that were already there are left alone. They used to be listed and offered on every removal; `--autoremove` at the server still takes them.
+- **`cipi package install` and `remove` without a terminal need `--yes`** ("never implicit"), instead of reading an empty answer as no.
 - `firewall allow`, `deny`, `remove`, `block`, `unblock` are written to `cipi.log`, and say when the rule was already there, when it did not exist, and when UFW is inactive.
 
 ### Fixed
@@ -42,7 +64,7 @@ The firewall from the panel. A server's Firewall tab (cipi/gui 4.6.0, cipi/api 1
 ### Upgrade
 
 - `cipi self-update` rewrites the panel's whitelist, as on every update; no migration. Then `cipi api update` (cipi/api 1.44.0) on every managed server and `cipi gui update` (cipi/gui 4.6.0) on the panel's — the Firewall tab needs all three, and a token with `firewall-view` / `firewall-manage` (`cipi api token create`; a `--full-access` token has them).
-- `tests/verify-5.14.0.sh` (94 checks) runs the firewall commands against a ufw stub that keeps its rules as ufw 0.36 does, and fail2ban, cscli, systemctl and sshd stubs: the JSON, both families, comments, removals, `prepend` and its `insert 1` fallback, the protected ports (sshd's own), the session and Zero Trust guards, `--force` from the shell and from the panel, the threshold, `ban unban` on near-identical addresses, CrowdSec's state and decisions, the sudoers (visudo, 40 commands per rule) and the compliance control on a panel database. **Not verified on a real server:** ufw 0.36's `prepend` on Ubuntu 24.04 and 26.04 with IPv4 and IPv6 rules, `ufw --force delete` by rule, `crowdsec enable` started from the panel's queue.
+- `tests/verify-5.14.0.sh` (133 checks) runs the firewall commands against a ufw stub that keeps its rules as ufw 0.36 does, and fail2ban, cscli, systemctl and sshd stubs: the JSON, both families, comments, removals, `prepend` and its `insert 1` fallback, the protected ports (sshd's own), the session and Zero Trust guards, `--force` from the shell and from the panel, the threshold, `ban unban` on near-identical addresses, CrowdSec's state and decisions, the sudoers (visudo, 40 commands per rule) and the compliance control on a panel database. For `cipi package`, apt, dpkg and apt-mark are one model of installed packages, their marks and dependencies: the catalog, both names of the renamed libraries (24.04 and a release without the suffix), a library with no candidate, installs and removals with what they leave (a library another package needs, older orphans, a reverse dependency), `--force` and `--autoremove` from the shell and from the panel, and an abort putting the marks back; `tests/verify-5.2.2.sh` follows the panel's new rights. **Not verified on a real server:** ufw 0.36's `prepend` on Ubuntu 24.04 and 26.04 with IPv4 and IPv6 rules, `ufw --force delete` by rule, `crowdsec enable` started from the panel's queue; the new packages' apt names were checked against packages.ubuntu.com, not installed on 24.04 and 26.04 — nor Chrome started by Browsershot against the `browsershot` libraries.
 
 ## [5.13.1] — 2026-11-24
 

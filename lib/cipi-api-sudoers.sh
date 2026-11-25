@@ -186,6 +186,8 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi search disable *, \
                                /usr/local/bin/cipi package list, \
                                /usr/local/bin/cipi package list *, \
+                               /usr/local/bin/cipi package install *, \
+                               /usr/local/bin/cipi package remove *, \
                                /usr/local/bin/cipi php list, \
                                /usr/local/bin/cipi php list *, \
                                /usr/local/bin/cipi php install *, \

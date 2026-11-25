@@ -5,6 +5,16 @@
 # sudo-rs (Ubuntu 25.10+) allows '*' only as the final argument token.
 # Use "db restore *" (not "db restore * *") for multi-arg commands.
 #
+# 5.14.0 adds the panel's Firewall tab: one read of UFW, fail2ban and
+# CrowdSec (`firewall status --json`), opening a port (`firewall allow`,
+# never `deny`), removing what allow made, blocking an address, the fail2ban
+# threshold, unbanning, and CrowdSec — enable (a job; the panel passes its
+# own address with --allow), disable (--force there only skips the
+# question), its allowlist. `firewall` and `crowdsec enable` ignore --force
+# when sudo comes from www-data: the ports the server is reached on, the
+# Zero Trust locks and CrowdSec's RAM and real_ip checks hold for the panel.
+# Not here: `crowdsec rescue` (on-box break-glass) and `crowdsec refresh`.
+#
 # 5.12.0 adds `cipi notification`: every channel (SMTP, Resend, SES, Slack,
 # Discord, Mattermost, Google Chat, Telegram, ntfy, Pushover, webhook) and
 # the triggers, read and changed from the panel. Secrets are passed as flags,
@@ -131,6 +141,9 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi proxy add *, \
                                /usr/local/bin/cipi proxy remove *, \
                                /usr/local/bin/cipi proxy list *, \
+                               /usr/local/bin/cipi nginx show *, \
+                               /usr/local/bin/cipi nginx set *, \
+                               /usr/local/bin/cipi nginx reset *, \
                                /usr/local/bin/cipi node list, \
                                /usr/local/bin/cipi node status *, \
                                /usr/local/bin/cipi node restart *, \
@@ -176,6 +189,8 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi search disable *, \
                                /usr/local/bin/cipi package list, \
                                /usr/local/bin/cipi package list *, \
+                               /usr/local/bin/cipi package install *, \
+                               /usr/local/bin/cipi package remove *, \
                                /usr/local/bin/cipi php list, \
                                /usr/local/bin/cipi php list *, \
                                /usr/local/bin/cipi php install *, \
@@ -216,6 +231,18 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi app fix-permissions *, \
                                /usr/local/bin/cipi api ip-whitelist, \
                                /usr/local/bin/cipi api ip-whitelist *, \
+                               /usr/local/bin/cipi firewall status --json, \
+                               /usr/local/bin/cipi firewall allow *, \
+                               /usr/local/bin/cipi firewall remove *, \
+                               /usr/local/bin/cipi firewall block *, \
+                               /usr/local/bin/cipi firewall unblock *, \
+                               /usr/local/bin/cipi firewall attempts *, \
+                               /usr/local/bin/cipi ban unban *, \
+                               /usr/local/bin/cipi crowdsec enable, \
+                               /usr/local/bin/cipi crowdsec enable *, \
+                               /usr/local/bin/cipi crowdsec disable --force, \
+                               /usr/local/bin/cipi crowdsec allow *, \
+                               /usr/local/bin/cipi crowdsec unallow *, \
                                /usr/local/bin/cipi-read-app-logs *, \
                                /bin/cat /etc/cipi/apps.json
 SUDOEOF

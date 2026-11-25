@@ -108,15 +108,15 @@ _help_topic_header() {
     fi
 }
 
+# The topics, in alphabetical order (what "Unknown help topic" lists).
 _help_topics_list() {
-    cat <<'EOF'
-app  use  node  domains  www  redirect  proxy  deploy  worker  schedule  health  monitor  metrics  db  search  service  ssl
-php  frankenphp  package  auth  basicauth  ssh  firewall  ban  crowdsec  zt  scan  compliance  backup  sync
-git  ini  yml  nginx  api  gui  notification  smtp  reset  credentials  server  updates  valkey  completion
-EOF
+    printf '%s\n' "${_HELP_TOPICS[@]}" | LC_ALL=C sort
 }
 
-# The order of `cipi help` and `cipi help all`.
+# The topics, in the order `cipi help all` prints them: the server first, then
+# what is done most. `cipi help` — the list of commands — is alphabetical
+# whatever this order is; where a command is in two topics, the first one
+# here gives it its description (unless the other is its own).
 _HELP_TOPICS=(server updates service app use domains www redirect proxy auth basicauth deploy worker schedule
               health monitor metrics db search node api gui git sync ssh ssl php frankenphp package firewall ban
               crowdsec zt scan compliance backup ini yml nginx smtp notification valkey reset credentials completion)
@@ -151,7 +151,11 @@ _help_index() {
             if (!(name in pick) || ($3 == f[1] && tp[pick[name]] != f[1])) pick[name] = r
             tp[r] = $3
         }
-        END { for (k = 1; k <= r; k++) if (pick[nm[k]] == k) print nm[k] "\t" ds[k] }'
+        END { for (k = 1; k <= r; k++) if (pick[nm[k]] == k) print nm[k] "\t" ds[k] }' \
+    | LC_ALL=C sort -t "$(printf '\t')" -k1,1
+    # Alphabetical, like `php artisan list`. In the C locale a space sorts
+    # before every letter: "db" comes before "db backup", and the commands
+    # of a namespace stay together ("app …" all before "auth").
 }
 
 show_help() {
@@ -182,6 +186,8 @@ show_help() {
                                       "    --json" "Machine-readable output, where a command has it" \
                                       "    --yes" "Go on without asking, where a command asks first"
     echo ""
+    # _help_index is sorted: the commands that stand alone come out in
+    # alphabetical order, then the namespaces, each with its own in order.
     echo -e "${YELLOW}Available commands:${NC}"
     _help_index | awk -F '\t' -v g="$GREEN" -v y="$YELLOW" -v nc="$NC" -v cols="$cols" '
         { name[NR] = $1; desc[NR] = $2; split($1, w, " "); ns[NR] = w[1]; count[w[1]]++
@@ -657,18 +663,29 @@ show_help_topic() {
             echo ""
             _help_cmd "cipi package list"                "Allowlist + what is installed  ${DIM}[--json]${NC}"
             _help_cmd "cipi package install <name>"      "Install one entry  ${DIM}[--yes] [--force]${NC}"
-            _help_cmd "cipi package remove <name>"       "Purge it  ${DIM}[--yes] [--autoremove]${NC}"
+            _help_cmd "cipi package remove <name>"       "Purge it, and what only it needed  ${DIM}[--yes] [--autoremove]${NC}"
             echo ""
-            _help_note "Allowlist: image-optimizers  ffmpeg  imagemagick  poppler-utils"
+            _help_note "Tools: image-optimizers  avif  ffmpeg  imagemagick  poppler-utils  pdftk"
+            _help_note "       libreoffice  pandoc  tesseract"
+            _help_note "Libraries and fonts: browsershot (what Puppeteer's Chrome needs)  fonts-cjk"
+            _help_note "Security scanners (Hackly): sec-recon (nmap, dig, whois)  sec-gitleaks, and"
+            _help_note "  upstream: sec-nuclei  sec-zap  sec-nikto  sec-wpscan  sec-trivy  sec-semgrep"
+            _help_note "  sec-checkov — or by command: 'cipi package install nuclei'"
             _help_note "A single package inside a group also works (e.g. 'webp', 'jpegoptim')."
-            _help_note "Closed on purpose: stateless binaries from Ubuntu repos only — no daemon,"
-            _help_note "no port, no state. Anything else is a service (cipi search, cipi db install)."
-            _help_note "install shows what apt intends to pull, and asks, before it runs."
+            _help_note "Closed on purpose: stateless binaries, libraries and fonts from Ubuntu's"
+            _help_note "repositories — no daemon, no port, no state. Anything else is a service"
+            _help_note "(cipi search, cipi db install). The panel may install and remove them too."
+            _help_note "Upstream entries are pinned in Cipi: one version, its SHA-256 (a git tag: its"
+            _help_note "commit); a download that does not match is refused. They live in"
+            _help_note "/opt/cipi/packages/<id>, linked into /usr/local/bin; a newer pin comes with a"
+            _help_note "Cipi update, and 'cipi package list' shows it — install again to update."
+            _help_note "install shows what apt intends to pull, and asks, before it runs; remove"
+            _help_note "takes nothing another package needs, and leaves older orphans alone."
             _help_note "Already in the base stack: the Imagick PHP extension, Ghostscript,"
-            _help_note "fonts-dejavu-core (Recommends of php-imagick) and Node 20."
+            _help_note "fonts-dejavu-core (Recommends of php-imagick) and Node."
             _help_note "Chromium is not here: on Ubuntu it only exists as a snapd transitional"
-            _help_note "package. For browsershot use Puppeteer's own Chromium or Google's repo."
-            _help_note "ffmpeg belongs in a queue worker, never in a web request."
+            _help_note "package. Browsershot: 'browsershot' for the libraries, Chrome from Puppeteer."
+            _help_note "ffmpeg, libreoffice and tesseract belong in a queue worker, never in a web request."
             echo ""
             ;;
 
@@ -828,10 +845,20 @@ show_help_topic() {
         firewall|ufw)
             _help_topic_header "Firewall"
             echo ""
-            _help_cmd "cipi firewall allow <port>"     "Allow port"
-            _help_cmd "cipi firewall list"             "Firewall rules"
-            _help_cmd "cipi firewall attempts"         "Failed SSH logins before a ban (default 3)"
+            _help_cmd "cipi firewall status"           "UFW, fail2ban and CrowdSec at a glance  ${DIM}[--json]${NC}"
+            _help_cmd "cipi firewall list"             "Firewall rules  ${DIM}[--json]${NC}"
+            _help_cmd "cipi firewall allow <port>"     "Open a port or a range  ${DIM}[--from=IP|CIDR] [--proto=tcp|udp]${NC}"
+            _help_cmd "cipi firewall deny <port>"      "Refuse it, ahead of every allow  ${DIM}[--from=] [--proto=]${NC}"
+            _help_cmd "cipi firewall remove <port>"    "Drop an allow  ${DIM}[--from=] [--proto=tcp|udp|any] [--deny]${NC}"
+            _help_cmd "cipi firewall block <ip|cidr>"  "Refuse every port to an address"
+            _help_cmd "cipi firewall unblock <ip|cidr>" "Drop a block"
+            _help_cmd "cipi firewall attempts"         "Failed SSH logins before a ban (default 3)  ${DIM}[--json]${NC}"
             _help_cmd "cipi firewall attempts <n>"     "Set it  ${DIM}1-100 | default${NC}"
+            echo ""
+            _help_note "The ports this server is reached on — its SSH port, 80, 443 — are never denied to"
+            _help_note "everyone or removed here, a block never takes in this SSH session, and an allow"
+            _help_note "never undoes a Zero Trust lock: --force does it at the shell, never from the panel."
+            _help_note "The panel's Firewall tab runs these (cipi/api 1.44, cipi/gui 4.6)."
             echo ""
             ;;
 
@@ -839,7 +866,7 @@ show_help_topic() {
             _help_topic_header "Ban"
             echo ""
             _help_cmd "cipi ban list"                  "List banned IPs (fail2ban + CrowdSec if enabled)"
-            _help_cmd "cipi ban unban <IP>"            "Unban an IP from both"
+            _help_cmd "cipi ban unban <IP>"            "Unban an IP from both  ${DIM}(a CIDR: CrowdSec ranges)${NC}"
             echo ""
             ;;
 
@@ -898,7 +925,7 @@ show_help_topic() {
         crowdsec)
             _help_topic_header "CrowdSec"
             echo ""
-            _help_cmd "cipi crowdsec enable"           "Install engine + firewall bouncer"
+            _help_cmd "cipi crowdsec enable"           "Install engine + firewall bouncer  ${DIM}[--allow=IP|CIDR]${NC}"
             _help_cmd "cipi crowdsec disable"          "Flush rules, then remove (fail2ban stays)"
             _help_cmd "cipi crowdsec status"           "Engine / bouncer / rescue / decisions"
             _help_cmd "cipi crowdsec allow <ip|cidr>"  "Never ban this address"
@@ -1044,6 +1071,22 @@ show_help_topic() {
         nginx)
             _help_topic_header "Nginx"
             echo ""
+            _help_cmd "cipi nginx show <app>"            "The app's own nginx directives  ${DIM}[--json]${NC}"
+            _help_cmd "cipi nginx edit <app>"            "Edit them in \$EDITOR, test, reload"
+            _help_cmd "cipi nginx set <app> --file=<path>" "The same from a file (- for stdin)"
+            _help_cmd "cipi nginx reset <app>"           "Remove them"
+            _help_note "Headers, caching, limits, rewrites, locations of your own: kept by Cipi and"
+            _help_note "included in the app's server block, so they survive every change of the"
+            _help_note "vhost. Tested with nginx -t first; refused, nothing changes. From the API"
+            _help_note "a subset only (no access_log path, include, listen, server_name, *_pass)."
+            echo ""
+            _help_cmd "cipi nginx real-ip cloudflare"    "Behind Cloudflare's proxy: the visitor's real address"
+            _help_cmd "cipi nginx real-ip status"        "Whether it is on, and how many ranges  ${DIM}[--json]${NC}"
+            _help_cmd "cipi nginx real-ip off"           "Back to the address of each connection  ${DIM}[--yes]${NC}"
+            _help_note "For domains proxied by Cloudflare (orange cloud) without a tunnel: the access"
+            _help_note "log, fail2ban, CrowdSec and the app see the visitor, not Cloudflare. Only requests"
+            _help_note "from Cloudflare's ranges are believed; the ranges are refreshed every night."
+            echo ""
             _help_cmd "cipi nginx default-server status" "Who answers requests matching no app"
             _help_cmd "cipi nginx default-server on"     "Close unmatched requests (444)"
             _help_cmd "cipi nginx default-server off"    "Let the first vhost answer them again"
@@ -1120,7 +1163,7 @@ show_help_topic() {
 
         *)
             error "Unknown help topic: ${topic}"
-            echo -e "  Topics: $(_help_topics_list | tr '\n' ' ' | sed 's/  */ /g')"
+            echo -e "  Topics: $(_help_topics_list | tr '\n' ' ' | sed 's/ *$//')"
             echo -e "  Or run: ${CYAN}cipi help${NC} / ${CYAN}cipi help all${NC}"
             exit 1
             ;;

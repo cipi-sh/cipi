@@ -558,13 +558,23 @@ _cmp_check_gui_2fa() {
         return 0
     fi
     jq . <<<"$rows" > "$(_cmp_ev gui-users.json)" 2>/dev/null || true
-    local total without
+    local total without enforced=""
     total=$(jq 'length' <<<"$rows")
     without=$(jq -r '[.[] | select((.two_factor_enabled | tostring) as $e | ($e != "1" and $e != "true")) | .email] | join(", ")' <<<"$rows")
-    if [[ -n "$without" ]]; then
-        _cmp_result fail "GUI user(s) without 2FA" "Enable Google Authenticator 2FA from Settings for: ${without}"
+    # cipi/gui 4.6+: an admin can require 2FA for every account (Team →
+    # Two-factor authentication). Panels before it have no such row.
+    enforced=$(_cmp_sqlite_json "$db" "SELECT value FROM cipi_settings WHERE key = 'enforce_2fa'" 2>/dev/null \
+        | jq -r '.[0].value // empty' 2>/dev/null) || enforced=""
+    [[ "$enforced" == "1" ]] && echo "enforce_2fa=1" > "$(_cmp_ev gui-2fa-policy.txt)" 2>/dev/null || true
+    if [[ -n "$without" && "$enforced" == "1" ]]; then
+        _cmp_result warn "2FA required for every GUI account; not set up yet: ${without}" \
+            "The panel takes them to the 2FA setup before anything else at their next request. Sign-ins through SSO rely on the identity provider's MFA."
+    elif [[ -n "$without" ]]; then
+        _cmp_result fail "GUI user(s) without 2FA" "Enable Google Authenticator 2FA from Settings for: ${without} — or require it for every account: Team → Two-factor authentication (cipi/gui 4.6+)"
+    elif [[ "$enforced" == "1" ]]; then
+        _cmp_result pass "all ${total} GUI user(s) have 2FA enabled, and the panel requires it"
     else
-        _cmp_result pass "all ${total} GUI user(s) have 2FA enabled"
+        _cmp_result pass "all ${total} GUI user(s) have 2FA enabled" "New accounts may still skip it: require it for every account in Team → Two-factor authentication (cipi/gui 4.6+)"
     fi
 }
 

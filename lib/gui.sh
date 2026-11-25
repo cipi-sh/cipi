@@ -1096,7 +1096,7 @@ gui_reset_user() {
     fi
 
     log_action "GUI ADMIN USER RESET"
-    success "GUI admin user reset (2FA disabled — re-enable from Settings after login)"
+    success "GUI admin user reset (2FA disabled — re-enable from Settings after login; a panel that requires 2FA asks for its setup at sign-in)"
     unset password
 }
 

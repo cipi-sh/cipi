@@ -610,6 +610,399 @@ nginx_command() {
             ;;
         status) _nginx_default_server_report ;;
         security) _nginx_security_report ;;
-        *) error "Use: cipi nginx default-server on|off|status | security | upgrade [--yes]"; exit 1 ;;
+        real-ip|realip) nginx_realip_command "$@" ;;
+        show)  nginx_custom_show "$@" ;;
+        edit)  nginx_custom_edit "$@" ;;
+        set)   nginx_custom_set "$@" ;;
+        reset|unset|clear) nginx_custom_reset "$@" ;;
+        *) error "Use: cipi nginx show|edit|set|reset <app> | real-ip cloudflare|off|status | default-server on|off|status | security | upgrade [--yes]"; exit 1 ;;
     esac
+}
+
+# ── The visitor's address behind Cloudflare ───────────────────
+#   cipi nginx real-ip cloudflare     trust Cloudflare's edge for the visitor's address
+#   cipi nginx real-ip status [--json]
+#   cipi nginx real-ip refresh        fetch Cloudflare's ranges again (also every night)
+#   cipi nginx real-ip off [--yes]
+#
+# A domain proxied by Cloudflare (the orange cloud) reaches nginx from
+# Cloudflare's addresses: the access log, fail2ban, CrowdSec and the app all
+# see Cloudflare, not the visitor. With this on, a request that comes from one
+# of Cloudflare's ranges is given the address in its CF-Connecting-IP header
+# (nginx's real_ip module); a request from anywhere else keeps the address of
+# its connection, so the header cannot be forged by connecting to the server
+# directly. It is one setting for the whole server, right for the domains
+# behind Cloudflare and without effect on the others.
+#
+# The work is Zero Trust's (lib/zt.sh), without the tunnel: the same file in
+# conf.d, the same fail2ban ignore list and CrowdSec whitelist for Cloudflare's
+# ranges — a ban on Cloudflare takes every proxied site down — and a refresh
+# of the ranges every night. No Cloudflare token is needed: the list is public.
+
+_nginx_realip_load() {
+    declare -f _zt_apply_realip >/dev/null 2>&1 || source "${CIPI_LIB}/zt.sh"
+}
+
+# on | off, and who keeps it on: real-ip (this command), zero-trust, both, other
+# (a real_ip configuration Cipi did not write).
+_nginx_realip_state() {
+    local on="off" by=""
+    if [[ -s "$ZT_REALIP" ]]; then
+        on="on"
+        local a=false b=false
+        [[ -f "$NGINX_REALIP_CRON" ]] && a=true
+        _zt_enabled 2>/dev/null && b=true
+        if   $a && $b; then by="both"
+        elif $a; then by="real-ip"
+        elif $b; then by="zero-trust"
+        else by="real-ip"; fi
+    elif grep -rqsE '^[[:space:]]*set_real_ip_from[[:space:]]' "$(dirname "$(dirname "$ZT_REALIP")")/nginx.conf" "$(dirname "$ZT_REALIP")" 2>/dev/null; then
+        on="on"; by="other"
+    fi
+    echo "${on} ${by}"
+}
+
+nginx_realip_command() {
+    local action="${1:-status}"; shift || true
+    _nginx_realip_load
+    case "$action" in
+        cloudflare|on|enable) _nginx_realip_enable "$@" ;;
+        off|disable)          _nginx_realip_disable "$@" ;;
+        refresh)              _nginx_realip_refresh "$@" ;;
+        status)               _nginx_realip_status "$@" ;;
+        *) error "Use: cipi nginx real-ip cloudflare|off|status|refresh"; exit 1 ;;
+    esac
+}
+
+_nginx_realip_enable() {
+    local state by had="" out
+    read -r state by <<< "$(_nginx_realip_state)"
+    if [[ "$by" == "other" ]]; then
+        error "nginx already has a real_ip configuration that Cipi did not write (set_real_ip_from in /etc/nginx)"
+        echo "  Remove it first, or keep it: two of them would trust two lists." >&2
+        exit 1
+    fi
+    if ! nginx -t >/dev/null 2>&1; then
+        error "nginx configuration is already invalid — fix it first (nginx -t)"; exit 1
+    fi
+    step "Fetching Cloudflare's address ranges..."
+    _zt_fetch_ips || { error "Could not fetch Cloudflare's ranges (api.cloudflare.com/client/v4/ips) and none are saved"; exit 1; }
+    [[ -f "$ZT_REALIP" ]] && had=$(cat "$ZT_REALIP")
+    _zt_write_realip || { error "Could not write ${ZT_REALIP}"; exit 1; }
+    if ! out=$(nginx -t 2>&1); then
+        # Put back what was there: nginx must never be left unable to reload.
+        if [[ -n "$had" ]]; then printf '%s\n' "$had" > "$ZT_REALIP"; else rm -f "$ZT_REALIP"; fi
+        error "nginx refused the configuration — nothing changed"
+        printf '%s\n' "$out" | grep -v 'test is successful\|syntax is ok' | head -3 | sed 's/^/  /' >&2
+        exit 1
+    fi
+    systemctl reload nginx || { error "systemctl reload nginx failed"; exit 1; }
+    _zt_write_fail2ban_ignore
+    _zt_write_crowdsec_allowlist || true
+    cat > "$NGINX_REALIP_CRON" <<'CRONEOF'
+# Cipi — Cloudflare's address ranges for nginx real_ip, fail2ban and CrowdSec (cipi nginx real-ip).
+23 3 * * * root /usr/local/bin/cipi nginx real-ip refresh >/dev/null 2>&1
+CRONEOF
+    chmod 644 "$NGINX_REALIP_CRON"
+    log_action "NGINX REAL-IP: cloudflare"
+    if [[ "$state" == "on" ]]; then
+        success "Already on — Cloudflare's ranges refreshed ($(_zt_each_cf_cidr | wc -l) ranges)"
+    else
+        success "nginx now takes the visitor's address from Cloudflare ($(_zt_each_cf_cidr | wc -l) ranges, refreshed every night)"
+    fi
+    echo -e "  ${DIM}Logs, fail2ban, CrowdSec and the apps see the visitor for domains proxied by Cloudflare; a direct${NC}"
+    echo -e "  ${DIM}connection keeps its own address. PHP-FPM apps read it as REMOTE_ADDR (\$request->ip(), no${NC}"
+    echo -e "  ${DIM}TrustProxies change); Octane and Node apps in X-Forwarded-For, as before. A firewall ban stops${NC}"
+    echo -e "  ${DIM}direct connections only: a visitor who comes through Cloudflare is blocked at Cloudflare (WAF).${NC}"
+}
+
+_nginx_realip_refresh() {
+    if [[ ! -f "$NGINX_REALIP_CRON" && ! -f "$ZT_REALIP" ]]; then
+        info "real-ip is off — nothing to refresh"
+        return 0
+    fi
+    _zt_refresh
+}
+
+_nginx_realip_disable() {
+    parse_args "$@"
+    local state by
+    read -r state by <<< "$(_nginx_realip_state)"
+    if [[ "$state" == "off" ]]; then
+        rm -f "$NGINX_REALIP_CRON"
+        info "real-ip is already off"
+        return 0
+    fi
+    if [[ "$by" == "other" ]]; then
+        error "The real_ip configuration in /etc/nginx was not written by Cipi — remove it by hand"; exit 1
+    fi
+    if [[ "$by" == "zero-trust" || "$by" == "both" ]]; then
+        # The tunnel delivers every request from Cloudflare: without real_ip all of them are one address.
+        rm -f "$NGINX_REALIP_CRON"
+        warn "Zero Trust is enabled and needs Cloudflare's real_ip: it stays on until 'cipi zt disable'"
+        return 0
+    fi
+    if systemctl is-active --quiet crowdsec 2>/dev/null || systemctl is-active --quiet fail2ban 2>/dev/null; then
+        warn "With a domain still proxied by Cloudflare, every visitor becomes one of Cloudflare's addresses again:"
+        warn "CrowdSec or fail2ban could ban Cloudflare itself and take those sites down."
+        warn "Turn the proxy off in Cloudflare (DNS only) first."
+        if [[ "${ARG_yes:-}" != "true" ]]; then
+            [[ -t 0 ]] || { error "Pass --yes to turn it off without a terminal"; exit 1; }
+            confirm "Turn real-ip off?" || { info "Nothing changed"; return 0; }
+        fi
+    fi
+    local had=""
+    [[ -f "$ZT_REALIP" ]] && had=$(cat "$ZT_REALIP")
+    rm -f "$ZT_REALIP"
+    if ! nginx -t >/dev/null 2>&1; then
+        # A vhost may use what the file defined: nginx stays as it was.
+        [[ -n "$had" ]] && printf '%s\n' "$had" > "$ZT_REALIP"
+        error "nginx refuses its configuration without the file — nothing changed (nginx -t)"; exit 1
+    fi
+    systemctl reload nginx || { error "systemctl reload nginx failed"; exit 1; }
+    rm -f "$ZT_F2B" "$ZT_CS_WL" "$NGINX_REALIP_CRON"
+    if systemctl is-active --quiet fail2ban 2>/dev/null; then
+        fail2ban-client reload >/dev/null 2>&1 || true
+    fi
+    if systemctl is-active --quiet crowdsec 2>/dev/null; then
+        systemctl reload crowdsec 2>/dev/null || true
+    fi
+    log_action "NGINX REAL-IP: off"
+    success "real-ip is off — nginx sees the address of each connection"
+}
+
+_nginx_realip_status() {
+    parse_args "$@"
+    local state by ranges=0 refreshed=""
+    read -r state by <<< "$(_nginx_realip_state)"
+    [[ -s "$ZT_REALIP" ]] && ranges=$(grep -c '^set_real_ip_from ' "$ZT_REALIP" 2>/dev/null || true)
+    [[ -s "${ZT_IPS_DIR}/v4" ]] && refreshed=$(date -u -r "${ZT_IPS_DIR}/v4" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)
+    if [[ "${ARG_json:-}" == "true" ]]; then
+        jq -n --arg state "$state" --arg by "$by" --argjson ranges "${ranges:-0}" --arg refreshed "$refreshed" \
+              --argjson nightly "$([[ -f "$NGINX_REALIP_CRON" || -f "$ZT_CRON" ]] && echo true || echo false)" \
+              '{enabled: ($state == "on"), provider: (if $state == "on" and $by != "other" then "cloudflare" else null end),
+                header: (if $state == "on" and $by != "other" then "CF-Connecting-IP" else null end),
+                kept_by: (if $by == "" then null else $by end), ranges: $ranges,
+                refreshed_at: (if $refreshed == "" then null else $refreshed end), nightly_refresh: $nightly}'
+        return 0
+    fi
+    echo -e "\n${BOLD}nginx — the visitor's address${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    case "$state $by" in
+        "off "*)
+            printf "  %-14s %b\n" "real-ip" "${DIM}off${NC} — the address of each connection"
+            echo -e "\n  ${DIM}Domains behind Cloudflare's proxy show Cloudflare's addresses in the logs and in the app.${NC}"
+            echo -e "  ${DIM}Turn it on with:${NC} ${CYAN}cipi nginx real-ip cloudflare${NC}" ;;
+        "on other")
+            printf "  %-14s %b\n" "real-ip" "${YELLOW}on${NC} — a configuration in /etc/nginx that Cipi did not write" ;;
+        *)
+            printf "  %-14s %b\n" "real-ip" "${GREEN}on${NC} — Cloudflare (CF-Connecting-IP)"
+            printf "  %-14s %s\n" "Ranges" "${ranges} trusted${refreshed:+, fetched ${refreshed/T/ }}"
+            printf "  %-14s %s\n" "Kept by" "$(case "$by" in zero-trust) echo "Zero Trust (cipi zt)";; both) echo "cipi nginx real-ip and Zero Trust";; *) echo "cipi nginx real-ip";; esac)"
+            printf "  %-14s %s\n" "File" "$ZT_REALIP" ;;
+    esac
+    echo ""
+}
+
+# ── An app's own nginx directives ─────────────────────────────
+#   cipi nginx show <app> [--json]
+#   cipi nginx edit <app>                      in $EDITOR, at a terminal
+#   cipi nginx set <app> --file=<path>         (- for stdin)
+#   cipi nginx set <app> --content-b64=<…>     what the API sends
+#   cipi nginx reset <app>
+#
+# The vhost of an app is Cipi's: it is written again at every alias, SSL,
+# PHP, basic auth or routing change, so an edit of /etc/nginx/sites-available
+# does not last. What lasts is this: directives kept in apps.json and included
+# in the app's server block (lib/app.sh, nginx_custom_render) — headers,
+# caching, limits, rewrites, locations of your own. A location Cipi already
+# defines cannot be defined twice: nginx says so, and nothing changes.
+#
+# Every change is tested with `nginx -t` before nginx reloads; refused, the
+# app's settings and its vhost go back to what they were and nginx's reason
+# is shown. From the API (SUDO_USER=www-data) only the directives in
+# lib/nginx-lint.sh are taken: the whole language would make a token root.
+
+[[ -z "${_NGINX_CUSTOM_MAX:-}" ]] && readonly _NGINX_CUSTOM_MAX=32768
+
+_nginx_custom_from_api() { [[ "${SUDO_USER:-}" == "www-data" ]]; }
+
+_nginx_custom_require() {
+    local app="${1:-}" what="$2"
+    [[ -n "$app" && "$app" != --* ]] || { error "Usage: cipi nginx ${what}"; exit 1; }
+    declare -f _create_nginx_vhost >/dev/null 2>&1 || source "${CIPI_LIB}/app.sh"
+    app_exists "$app" || { error "App '${app}' not found"; exit 1; }
+}
+
+# _nginx_custom_lint <app> < text — the API's subset (lib/nginx-lint.sh).
+declare -f _nginx_custom_lint >/dev/null 2>&1 || source "${CIPI_LIB}/nginx-lint.sh"
+
+# nginx's own words about the app's file, without the path: "line 3: unknown directive "foo"".
+_nginx_custom_reason() {
+    local file="$1" out="$2"
+    printf '%s\n' "$out" | grep -F "$file" | head -5 \
+        | sed -e 's/^nginx: \[[a-z]*\] //' -e "s#^\\(.*\\) in ${file}:\\([0-9][0-9]*\\)\$#line \\2: \\1#" -e "s#${file}#the app's directives#g" \
+        | tr -d '\000-\010\013-\037\177' | cut -c1-300
+}
+
+# Save the text (empty: none) as the app's directives and reload nginx with
+# them. Refused by nginx: everything back as it was, 1.
+_nginx_custom_apply() {
+    local app="$1" text="$2" before out file reason
+    declare -f _routes_app_json >/dev/null 2>&1 || source "${CIPI_LIB}/routes.sh"
+    _routes_preflight || return 1
+    before=$(_routes_app_json "$app")
+    file=$(_nginx_custom_file "$app")
+    if [[ -z "${text//[[:space:]]/}" ]]; then
+        app_unset "$app" nginx_custom
+    else
+        app_set "$app" nginx_custom "$(printf '%s' "$text" | base64 -w0)"
+    fi
+    _create_nginx_vhost "$app" "$(app_get "$app" domain)" "$(app_get "$app" php)"
+    if out=$(nginx -t 2>&1); then
+        systemctl reload nginx || { error "systemctl reload nginx failed"; return 1; }
+        [[ "$(app_get "$app" suspended)" == "true" ]] && \
+            warn "'${app}' is suspended — the directives are saved and take effect on: cipi app unsuspend ${app}"
+        return 0
+    fi
+    error "nginx refused the directives — nothing changed"
+    reason=$(_nginx_custom_reason "$file" "$out")
+    [[ -n "$reason" ]] && printf '%s\n' "$reason" | sed 's/^/  /' >&2
+    app_save "$app" "$before" || true
+    _create_nginx_vhost "$app" "$(app_get "$app" domain)" "$(app_get "$app" php)"
+    nginx -t >/dev/null 2>&1 || warn "nginx -t still fails after putting the vhost back — run: nginx -t"
+    return 1
+}
+
+# Checks that do not need nginx: size, control characters, and from the API
+# (or with --strict) the allowed subset. Problems on stderr, 1.
+_nginx_custom_check() {
+    local app="$1" text="$2" problems
+    if (( $(printf '%s' "$text" | wc -c) > _NGINX_CUSTOM_MAX )); then
+        error "The directives are too long ($(( _NGINX_CUSTOM_MAX / 1024 )) KB at most)"; return 1
+    fi
+    if printf '%s' "$text" | LC_ALL=C grep -q $'[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]'; then
+        error "The directives hold a control character"; return 1
+    fi
+    if _nginx_custom_from_api || [[ "${ARG_strict:-}" == "true" ]]; then
+        if ! problems=$(printf '%s' "$text" | _nginx_custom_lint "$app"); then
+            error "Not accepted from the API — the whole nginx language is for 'cipi nginx edit ${app}' at the server"
+            printf '%s\n' "$problems" | sed 's/^/  /' >&2
+            return 1
+        fi
+    fi
+}
+
+nginx_custom_show() {
+    local app="${1:-}"; _nginx_custom_require "$app" "show <app> [--json]"; shift
+    parse_args "$@"
+    local text file active=false
+    text=$(nginx_custom_get "$app"; printf x); text="${text%x}"
+    file=$(_nginx_custom_file "$app")
+    [[ -s "$file" ]] && grep -qF "include ${file};" "/etc/nginx/sites-available/${app}" 2>/dev/null && active=true
+    if [[ "${ARG_json:-}" == "true" ]]; then
+        jq -n --arg app "$app" --arg config "$text" --arg file "$file" --argjson active "$active" \
+              --argjson max "$_NGINX_CUSTOM_MAX" \
+              --argjson suspended "$([[ "$(app_get "$app" suspended)" == "true" ]] && echo true || echo false)" \
+              '{app: $app, config: $config, bytes: ($config | utf8bytelength), max_bytes: $max, file: $file, active: $active, suspended: $suspended}'
+        return 0
+    fi
+    echo -e "\n${BOLD}nginx — ${app}${NC} ${DIM}(${file})${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if [[ -z "${text//[[:space:]]/}" ]]; then
+        echo -e "  ${DIM}No directives of its own — add them with: cipi nginx edit ${app}${NC}\n"
+        return 0
+    fi
+    printf '%s\n' "${text%$'\n'}"
+    [[ "$active" == "true" ]] || echo -e "\n  ${YELLOW}Saved, not in the vhost right now${NC} ${DIM}(suspended app?)${NC}"
+    echo ""
+}
+
+nginx_custom_set() {
+    local app="${1:-}"; _nginx_custom_require "$app" "set <app> --file=<path|-> | --content-b64=<base64>"; shift
+    unset ARG_file ARG_content_b64 ARG_strict
+    parse_args "$@"
+    local text
+    if [[ -n "${ARG_content_b64+x}" ]]; then
+        [[ "${ARG_content_b64}" =~ ^[A-Za-z0-9+/=]*$ ]] || { error "--content-b64 is not base64"; exit 1; }
+        text=$(printf '%s' "${ARG_content_b64}" | base64 -d 2>/dev/null; printf x) || { error "--content-b64 is not base64"; exit 1; }
+        text="${text%x}"
+    elif [[ -n "${ARG_file:-}" ]]; then
+        _nginx_custom_from_api && { error "--file is for the terminal — the API sends --content-b64"; exit 1; }
+        if [[ "${ARG_file}" == "-" ]]; then
+            text=$(head -c $(( _NGINX_CUSTOM_MAX + 1 )); printf x)
+        else
+            [[ -f "${ARG_file}" && -r "${ARG_file}" ]] || { error "Cannot read ${ARG_file}"; exit 1; }
+            text=$(head -c $(( _NGINX_CUSTOM_MAX + 1 )) -- "${ARG_file}"; printf x)
+        fi
+        text="${text%x}"
+    else
+        error "Usage: cipi nginx set <app> --file=<path|-> | --content-b64=<base64>"; exit 1
+    fi
+    text="${text//$'\r'/}"
+    _nginx_custom_check "$app" "$text" || exit 1
+    local current
+    current=$(nginx_custom_get "$app"; printf x); current="${current%x}"
+    if [[ "$text" == "$current" ]]; then
+        info "No change: these are already the directives of '${app}'"
+        return 0
+    fi
+    _nginx_custom_apply "$app" "$text" || exit 1
+    if [[ -z "${text//[[:space:]]/}" ]]; then
+        success "Directives of '${app}' removed"
+        log_action "NGINX CUSTOM RESET: ${app}"
+    else
+        success "Directives of '${app}' saved and live ($(printf '%s' "$text" | wc -c) bytes)"
+        log_action "NGINX CUSTOM SET: ${app}"
+    fi
+}
+
+nginx_custom_reset() {
+    local app="${1:-}"; _nginx_custom_require "$app" "reset <app>"; shift
+    if [[ -z "$(app_get "$app" nginx_custom)" ]]; then
+        info "'${app}' has no directives of its own"
+        return 0
+    fi
+    _nginx_custom_apply "$app" "" || exit 1
+    success "Directives of '${app}' removed"
+    log_action "NGINX CUSTOM RESET: ${app}"
+}
+
+nginx_custom_edit() {
+    local app="${1:-}"; _nginx_custom_require "$app" "edit <app>"
+    _nginx_custom_from_api && { error "cipi nginx edit is for a terminal — the API uses: cipi nginx set"; exit 1; }
+    [[ -t 0 && -t 1 ]] || { error "cipi nginx edit needs a terminal — in a script: cipi nginx set ${app} --file=<path>"; exit 1; }
+    local tmp text current
+    current=$(nginx_custom_get "$app"; printf x); current="${current%x}"
+    tmp=$(mktemp /tmp/cipi-nginx-XXXXXX.conf) || { error "mktemp failed"; exit 1; }
+    chmod 600 "$tmp"
+    if [[ -n "${current//[[:space:]]/}" ]]; then
+        printf '%s\n' "${current%$'\n'}" > "$tmp"
+    else
+        cat > "$tmp" <<'TEMPLATE'
+# nginx directives of this app — included in its server block.
+# Lines starting with # are comments. Save an empty file to have none.
+#
+# client_max_body_size 512M;
+# location ^~ /downloads/ {
+#     add_header Cache-Control "public, max-age=31536000, immutable";
+# }
+TEMPLATE
+    fi
+    while true; do
+        ${EDITOR:-nano} "$tmp" || { rm -f "$tmp"; error "The editor exited with an error — nothing changed"; exit 1; }
+        text=$(cat "$tmp"; printf x); text="${text%x}"; text="${text//$'\r'/}"
+        # Only comments and blank lines: nothing to include.
+        grep -qvE '^[[:space:]]*(#.*)?$' "$tmp" || text=""
+        if [[ "${text%$'\n'}" == "${current%$'\n'}" ]]; then
+            rm -f "$tmp"; info "No change"; return 0
+        fi
+        if _nginx_custom_check "$app" "$text" && _nginx_custom_apply "$app" "$text"; then
+            rm -f "$tmp"
+            if [[ -z "$text" ]]; then success "Directives of '${app}' removed"; log_action "NGINX CUSTOM RESET: ${app}"
+            else success "Directives of '${app}' saved and live"; log_action "NGINX CUSTOM SET: ${app}"; fi
+            return 0
+        fi
+        confirm_yes "Open the editor again?" || { rm -f "$tmp"; warn "Nothing changed"; exit 1; }
+    done
 }

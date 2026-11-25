@@ -1425,7 +1425,7 @@ app_delete() {
         step "Node processes..."; node_app_cleanup "$app"
     fi
     step "Workers...";     supervisorctl stop "${app}-worker-"* 2>/dev/null||true; supervisorctl stop "${app}-octane" 2>/dev/null||true; supervisorctl stop "${app}-reverb" 2>/dev/null||true; supervisorctl stop "${app}-horizon" 2>/dev/null||true; rm -f "/etc/supervisor/conf.d/${app}.conf"; reload_supervisor
-    step "Nginx...";       rm -f "/etc/nginx/sites-enabled/${app}" "/etc/nginx/sites-available/${app}"; reload_nginx
+    step "Nginx...";       rm -f "/etc/nginx/sites-enabled/${app}" "/etc/nginx/sites-available/${app}" "$(_nginx_custom_file "$app")"; reload_nginx
     step "PHP-FPM...";     rm -f "/etc/php/${p}/fpm/pool.d/${app}.conf"; jit_fpm_global_sync "$p" "" "$app" >/dev/null 2>&1 || true; reload_php_fpm "$p" 2>/dev/null||true
     if [[ -n "$(app_get "$app" octane)" ]]; then
         rm -rf "${OCTANE_APP_INI_ROOT:?}/${app}"
@@ -2860,6 +2860,41 @@ HTML
 # certificate — its HTTPS form (nginx_vhost_apply_tls, lib/common.sh). Every
 # regeneration (alias, www, basic auth, redirects, Octane, Reverb, suspend…)
 # therefore keeps HTTPS by itself, wildcard and Origin CA certificates too.
+# ── Custom nginx directives of an app (cipi nginx show|edit|set|reset) ────
+# apps.json holds them (.nginx_custom, base64); the vhost includes the file
+# they are written to. An included file is parsed on its own by nginx: a `}`
+# in it cannot close the server block, and a block it opens must be closed in
+# it — so whatever the text says, it stays inside the app's own server block.
+_nginx_custom_dir()  { echo "/etc/nginx/cipi-custom"; }
+_nginx_custom_file() { echo "$(_nginx_custom_dir)/${1}.conf"; }
+
+# The directives as text; nothing when the app has none.
+nginx_custom_get() {
+    local b
+    b=$(app_get "$1" nginx_custom)
+    [[ -n "$b" ]] || return 0
+    printf '%s' "$b" | base64 -d 2>/dev/null || true
+}
+
+# Write the app's file and print the `include` line for its vhost. Without
+# directives: remove the file, print nothing.
+nginx_custom_render() {
+    local app="$1" dir file text
+    dir=$(_nginx_custom_dir); file=$(_nginx_custom_file "$app")
+    text=$(nginx_custom_get "$app"; printf x); text="${text%x}"
+    if [[ -z "${text//[[:space:]]/}" ]]; then
+        rm -f "$file" 2>/dev/null || true
+        return 0
+    fi
+    mkdir -p "$dir" 2>/dev/null && chmod 755 "$dir" 2>/dev/null || return 1
+    if printf '%s\n' "${text%$'\n'}" > "${file}.tmp" 2>/dev/null && chmod 644 "${file}.tmp" && mv -f "${file}.tmp" "$file"; then
+        printf '    include %s;\n' "$file"
+        return 0
+    fi
+    rm -f "${file}.tmp" 2>/dev/null || true
+    return 1
+}
+
 _create_nginx_vhost() {
     local rc=0
     _create_nginx_vhost_http "$@" || rc=$?
@@ -2972,6 +3007,13 @@ EOF
     proxy_blocks=$(_nginx_proxy_location_blocks "$app" "$auth_block")
     [[ -n "$redirect_blocks" ]] && route_blocks+="${redirect_blocks}"$'\n'
     [[ -n "$proxy_blocks" ]] && route_blocks+="${proxy_blocks}"$'\n'
+
+    # The app's own directives (cipi nginx edit <app>): a file of their own,
+    # included in the server block of every kind of vhost. They are kept in
+    # apps.json like the rules above, so they come back at every regeneration.
+    local custom_include=""
+    declare -f nginx_custom_render >/dev/null 2>&1 && custom_include=$(nginx_custom_render "$app" || true)
+    [[ -n "$custom_include" ]] && route_blocks+="${custom_include}"$'\n'
 
     # App-wide redirect (cipi redirect set <app> --to=URL). Every name of the
     # app answers with a redirect, www host included, so there is one hop only.

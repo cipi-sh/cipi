@@ -136,8 +136,11 @@ _pkg_is_up()     { [[ -n "$1" ]] && _pkg_upstream | awk -F'|' -v i="$1" '$1 == i
 _pkg_up_field()  { _pkg_upstream | awk -F'|' -v i="$1" -v f="$2" '$1 == i { print $f; exit }'; }
 _pkg_up_cmds()   { local c; for c in $(_pkg_up_field "$1" 6); do printf '%s\n' "${c%%=*}"; done; }
 _pkg_up_path()   { local c; for c in $(_pkg_up_field "$1" 6); do [[ "${c%%=*}" == "$2" ]] && { printf '%s' "${c#*=}"; return 0; }; done; return 1; }
-_pkg_up_root()   { printf '%s' "${CIPI_PKG_ROOT:-/opt/cipi/packages}"; }
-_pkg_up_bindir() { printf '%s' "${CIPI_PKG_BIN:-/usr/local/bin}"; }
+# Fixed paths, not read from the environment (tests redefine the functions).
+_pkg_up_root()   { printf '%s' /opt/cipi/packages; }
+_pkg_up_bindir() { printf '%s' /usr/local/bin; }
+_pkg_python()    { printf '%s' python3; }
+_pkg_lock_file() { printf '%s' /run/lock/cipi-package.lock; }
 _pkg_up_dir()    { printf '%s/%s' "$(_pkg_up_root)" "$1"; }
 _pkg_arch()      { dpkg --print-architecture 2>/dev/null || echo amd64; }
 # URL|hash for this machine, or nothing.
@@ -152,8 +155,8 @@ package_command() {
     local sub="${1:-list}"; shift || true
     case "$sub" in
         list|status)    _pkg_list "$@" ;;
-        install|add)    _pkg_install "$@" ;;
-        remove|uninstall|delete) _pkg_remove "$@" ;;
+        install|add)    _pkg_lock; _pkg_install "$@" ;;
+        remove|uninstall|delete) _pkg_lock; _pkg_remove "$@" ;;
         help|--help|-h) show_help package ;;
         *)
             error "Unknown package subcommand: ${sub}"
@@ -163,8 +166,19 @@ package_command() {
     esac
 }
 
+# fd 9 is the lock of _pkg_lock: not handed to apt, whose maintainer scripts
+# may start something that outlives this command.
 _pkg_apt() {
-    DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 "$@"
+    DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 "$@" 9>&-
+}
+
+# One install or remove at a time: the panel's queue and a shell can meet, and
+# an upstream entry is built in place under /opt/cipi/packages.
+_pkg_lock() {
+    { exec 9>"$(_pkg_lock_file)"; } 2>/dev/null || return 0
+    flock -w 300 9 && return 0
+    error "Another cipi package install or remove is still running — try again when it ends"
+    exit 1
 }
 
 # The panel runs these through sudo as www-data. It passes --yes; what it
@@ -173,8 +187,33 @@ _pkg_apt() {
 _pkg_from_panel() { [[ "${SUDO_USER:-}" == "www-data" ]]; }
 _pkg_forced()     { [[ "${ARG_force:-}" == "true" ]] && ! _pkg_from_panel; }
 
+# One line per architecture of a package: installed when one of them is.
+# `cipi package list` asks about some 60 packages several times each: it
+# primes _PKG_DPKG with one dpkg-query instead (each one reads the whole
+# dpkg database — seconds on a server, with the panel waiting).
+declare -gA _PKG_DPKG=()
+_PKG_DPKG_PRIMED=""
 _pkg_dpkg_installed() {
-    [[ "$(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null || true)" == "installed" ]]
+    if [[ -n "$_PKG_DPKG_PRIMED" ]]; then
+        [[ "${_PKG_DPKG[$1]:-}" == installed ]]
+        return
+    fi
+    local st; st=$(dpkg-query -W -f='${db:Status-Status}\n' "$1" 2>/dev/null || true)
+    grep -qx installed <<< "$st"
+}
+_pkg_dpkg_prime() {
+    local names name status out
+    names=$( { _pkg_catalog | cut -d'|' -f2; _pkg_upstream | cut -d'|' -f4,5 | tr '|' ' '
+               _pkg_pins | awk -F'|' '$3 ~ /\.deb$/ { n = $3; sub(/.*\//, "", n); sub(/_.*/, "", n); print n }'
+             } | tr ' /' '\n\n' | sed '/^$/d' | sort -u)
+    # shellcheck disable=SC2086
+    out=$(dpkg-query -W -f='${Package} ${db:Status-Status}\n' $names 2>/dev/null || true)
+    _PKG_DPKG=()
+    while read -r name status; do
+        [[ -n "$name" ]] || continue
+        [[ "$status" == installed || -z "${_PKG_DPKG[$name]:-}" ]] && _PKG_DPKG[$name]="$status"
+    done <<< "$out"
+    _PKG_DPKG_PRIMED=1
 }
 
 # An item ("a" or "a/b"): the alternative that is installed, if one is.
@@ -210,17 +249,17 @@ _pkg_item_name() { _pkg_item_installed "$1" || printf '%s' "${1%%/*}"; }
 
 # Resolve a user-typed name to a catalog id. Accepts a group id, or any single
 # apt package inside a group (either alternative) — `webp` and
-# `image-optimizers` both work — or a command of an upstream entry: `nuclei`
-# and `zap.sh` are sec-nuclei and sec-zap.
+# `image-optimizers` both work — a sec- entry without its prefix (`zap`), or
+# a command of an upstream entry: `nuclei` and `zap.sh` are sec-nuclei, sec-zap.
 _pkg_resolve() {
     local want="$1" id p alt
     for id in $(_pkg_ids); do
-        [[ "$want" == "$id" ]] && { printf '%s' "$id"; return 0; }
+        [[ "$want" == "$id" || "sec-${want}" == "$id" ]] && { printf '%s' "$id"; return 0; }
     done
     local cmds
     for id in $(_pkg_upstream | cut -d'|' -f1); do
         cmds=$(_pkg_up_cmds "$id")
-        if [[ "sec-${want}" == "$id" ]] || grep -qxF -- "$want" <<< "$cmds"; then
+        if grep -qxF -- "$want" <<< "$cmds"; then
             printf '%s' "$id"
             return 0
         fi
@@ -277,13 +316,13 @@ _pkg_state() {
     printf '%s/%s' "$have" "$total"
 }
 
-# Partly installed, as far as it matters: some items but not all — for a
-# library entry, only when one of them was installed on purpose (manual);
-# libraries other packages pulled in do not make it half-installed.
+# Partly installed, as far as it matters: some items but not all, and one of
+# them installed on purpose (manual). What other packages pulled in does not
+# make an entry half-installed: libraries, or dig on a server whose image has
+# it (sec-recon would read as partial before anyone asked for it).
 _pkg_partial() {
     local id="$1" state="$2" p name present=""
     [[ "${state%/*}" != "0" && "${state%/*}" != "${state#*/}" ]] || return 1
-    [[ "$(_pkg_kind_for "$id")" == "tools" ]] && return 0
     for p in $(_pkg_apt_for "$id"); do
         name=$(_pkg_item_installed "$p") && present="${present} ${name}"
     done
@@ -293,78 +332,71 @@ _pkg_partial() {
 
 _pkg_list() {
     parse_args "$@"
+    _pkg_dpkg_prime
+
+    # One row per entry — id, source, kind, apt names, binaries, missing,
+    # state (installed | partial | outdated | absent), pinned version,
+    # installed version, have/total, description — separated by the unit
+    # separator: `read` drops empty fields between tabs.
+    local S=$'\x1f'
+    local rows="" id apt bins desc p names missing state st kind
+    while IFS='|' read -r id apt bins desc; do
+        [[ -n "$id" ]] || continue
+        names=""; missing=""
+        for p in $apt; do
+            names="${names} $(_pkg_item_name "$p")"
+            _pkg_item_installed "$p" >/dev/null || missing="${missing} ${p%%/*}"
+        done
+        state=$(_pkg_state "$id")
+        if [[ "${state%/*}" == "${state#*/}" ]]; then st=installed
+        elif _pkg_partial "$id" "$state"; then st=partial
+        else st=absent; fi
+        kind=tools; [[ -z "$bins" ]] && kind=libraries
+        rows+="${id}${S}ubuntu${S}${kind}${S}${names# }${S}${bins}${S}${missing# }${S}${st}${S}${S}${S}${state}${S}${desc}"$'\n'
+    done <<< "$(_pkg_catalog)"
+    local method version deps build cmds c cur
+    while IFS='|' read -r id method version deps build cmds desc; do
+        [[ -n "$id" ]] || continue
+        names=""; bins=""
+        for p in $deps; do names="${names} $(_pkg_item_name "$p")"; done
+        for c in $cmds; do bins="${bins} ${c%%=*}"; done
+        st=$(_pkg_up_state "$id"); cur=$(_pkg_up_current "$id") || cur=""
+        missing=$(_pkg_up_missing "$id" "$st" | paste -sd' ' -)
+        rows+="${id}${S}upstream${S}tools${S}${names# }${S}${bins# }${S}${missing}${S}${st}${S}${version}${S}${cur}${S}${S}${desc}"$'\n'
+    done <<< "$(_pkg_upstream)"
 
     if [[ "${ARG_json:-}" == "true" ]]; then
-        local items="[]" id state p names missing partial ust cur
-        for id in $(_pkg_ids); do
-            if _pkg_is_up "$id"; then
-                ust=$(_pkg_up_state "$id"); cur=$(_pkg_up_current "$id") || cur=""
-                names=""
-                for p in $(_pkg_up_field "$id" 4); do names="${names} $(_pkg_item_name "$p")"; done
-                items=$(echo "$items" | jq -c \
-                    --arg i "$id" --arg a "${names# }" --arg d "$(_pkg_desc_for "$id")" \
-                    --arg b "$(_pkg_bins_for "$id")" --arg m "$(_pkg_up_missing "$id" | paste -sd' ' -)" \
-                    --arg s "$ust" --arg v "$(_pkg_up_field "$id" 3)" --arg c "$cur" \
-                    '. + [{id:$i, packages:($a | split(" ") | map(select(. != ""))), description:$d, kind:"tools",
-                           binaries:($b | split(" ") | map(select(. != ""))),
-                           missing:($m | split(" ") | map(select(. != ""))),
-                           installed:($s == "installed"), partial:($s == "partial"),
-                           source:"upstream", version:$v,
-                           installed_version:(if $c == "" then null else $c end),
-                           outdated:($s == "outdated")}]')
-                continue
-            fi
-            state=$(_pkg_state "$id")
-            partial=false; _pkg_partial "$id" "$state" && partial=true
-            names=""; missing=""
-            for p in $(_pkg_apt_for "$id"); do
-                names="${names} $(_pkg_item_name "$p")"
-                _pkg_item_installed "$p" >/dev/null || missing="${missing} ${p%%/*}"
-            done
-            items=$(echo "$items" | jq -c \
-                --arg i "$id" --arg a "${names# }" --arg d "$(_pkg_desc_for "$id")" \
-                --arg b "$(_pkg_bins_for "$id")" --arg k "$(_pkg_kind_for "$id")" --arg m "${missing# }" \
-                --arg have "${state%/*}" --arg total "${state#*/}" --argjson partial "$partial" \
-                '. + [{id:$i, packages:($a | split(" ")), description:$d, kind:$k,
-                       binaries:($b | split(" ") | map(select(. != ""))),
-                       missing:($m | split(" ") | map(select(. != ""))),
-                       installed:(($have|tonumber) == ($total|tonumber)),
-                       partial:$partial, source:"ubuntu", version:null,
-                       installed_version:null, outdated:false}]')
-        done
-        jq -n --argjson packages "$items" '{packages: $packages}'
+        jq -R -s '
+            def words: split(" ") | map(select(. != ""));
+            def orNull: if . == "" then null else . end;
+            {packages: [split("\n")[] | select(length > 0) | split("\u001f") | {
+                id: .[0], packages: (.[3] | words), description: .[10], kind: .[2],
+                binaries: (.[4] | words), missing: (.[5] | words),
+                installed: (.[6] == "installed"), partial: (.[6] == "partial"),
+                source: .[1], version: (.[7] | orNull), installed_version: (.[8] | orNull),
+                outdated: (.[6] == "outdated")}]}' <<< "$rows"
         return 0
     fi
 
     echo -e "\n${BOLD}Optional packages${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    local id state have total p names ust cur want
-    for id in $(_pkg_ids); do
-        if _pkg_is_up "$id"; then
-            ust=$(_pkg_up_state "$id"); cur=$(_pkg_up_current "$id") || cur=""; want=$(_pkg_up_field "$id" 3)
-            case "$ust" in
-                installed) printf "  ${GREEN}●${NC} %-18s ${DIM}%s${NC}\n" "$id" "$(_pkg_desc_for "$id")" ;;
-                outdated)  printf "  ${YELLOW}◐${NC} %-18s ${YELLOW}%s${NC}\n" "$id" "${cur} installed, ${want} available — cipi package install ${id}" ;;
-                partial)   printf "  ${YELLOW}◐${NC} %-18s ${DIM}%s${NC}\n" "$id" "missing: $(_pkg_up_missing "$id" | paste -sd' ' -) — cipi package install ${id}" ;;
-                *)         printf "  ${DIM}○${NC} %-18s ${DIM}%s${NC}\n" "$id" "$(_pkg_desc_for "$id")" ;;
-            esac
-            names=""
-            for p in $(_pkg_up_field "$id" 4); do names="${names} $(_pkg_item_name "$p")"; done
-            printf "    ${DIM}%s${NC}\n" "upstream ${want}${names:+ ·${names}}" | fold -s -w 76 | sed '2,$s/^/    /'
-            continue
-        fi
-        state=$(_pkg_state "$id"); have="${state%/*}"; total="${state#*/}"
-        if [[ "$have" == "$total" ]]; then
-            printf "  ${GREEN}●${NC} %-18s ${DIM}%s${NC}\n" "$id" "$(_pkg_desc_for "$id")"
-        elif _pkg_partial "$id" "$state"; then
-            printf "  ${YELLOW}◐${NC} %-18s ${DIM}%s${NC}\n" "$id" "partially installed (${have}/${total})"
-        else
-            printf "  ${DIM}○${NC} %-18s ${DIM}%s${NC}\n" "$id" "$(_pkg_desc_for "$id")"
-        fi
-        names=""
-        for p in $(_pkg_apt_for "$id"); do names="${names} $(_pkg_item_name "$p")"; done
-        printf "    ${DIM}%s${NC}\n" "${names# }" | fold -s -w 76 | sed '2,$s/^/    /'
-    done
+    local source _kind have
+    while IFS="$S" read -r id source _kind names bins missing st version cur have desc; do
+        [[ -n "$id" ]] || continue
+        case "$st" in
+            installed) printf "  ${GREEN}●${NC} %-18s ${DIM}%s${NC}\n" "$id" "$desc" ;;
+            outdated)  printf "  ${YELLOW}◐${NC} %-18s ${YELLOW}%s${NC}\n" "$id" "${cur} installed, ${version} available — cipi package install ${id}" ;;
+            partial)
+                if [[ "$source" == upstream ]]; then
+                    printf "  ${YELLOW}◐${NC} %-18s ${DIM}%s${NC}\n" "$id" "missing: ${missing} — cipi package install ${id}"
+                else
+                    printf "  ${YELLOW}◐${NC} %-18s ${DIM}%s${NC}\n" "$id" "partially installed (${have})"
+                fi ;;
+            *)         printf "  ${DIM}○${NC} %-18s ${DIM}%s${NC}\n" "$id" "$desc" ;;
+        esac
+        [[ "$source" == upstream ]] && names="upstream ${version}${names:+ · ${names}}"
+        printf "    ${DIM}%s${NC}\n" "$names" | fold -s -w 76 | sed '2,$s/^/    /'
+    done <<< "$rows"
     echo ""
     echo -e "  ${CYAN}cipi package install <name>${NC}   ${DIM}/  remove <name>${NC}"
     echo ""
@@ -373,15 +405,16 @@ _pkg_list() {
     echo ""
 }
 
+# $1: KB needed (1 GB), $2: where (/var, where apt works).
 _pkg_check_disk() {
-    local need="${1:-$PKG_MIN_DISK_KB}"
-    local free; free=$(df -Pk /var 2>/dev/null | awk 'NR==2 {print $4}')
+    local need="${1:-$PKG_MIN_DISK_KB}" where="${2:-/var}"
+    local free; free=$(df -Pk "$where" 2>/dev/null | awk 'NR==2 {print $4}')
     [[ "${free:-0}" -ge "$need" ]] && return 0
     if _pkg_forced; then
-        warn "Only $(( ${free:-0} / 1024 ))MB free on /var — continuing because --force"
+        warn "Only $(( ${free:-0} / 1024 ))MB free on ${where} — continuing because --force"
         return 0
     fi
-    error "Less than $((need / 1024))MB free on /var (have $(( ${free:-0} / 1024 ))MB)"
+    error "Less than $((need / 1024))MB free on ${where} (have $(( ${free:-0} / 1024 ))MB)"
     echo "  Codec, office and imaging dependency trees are large. Free some space, or"
     echo "  pass --force at the server."
     return 1
@@ -508,9 +541,11 @@ _pkg_up_state() {
     echo installed
 }
 
-# The commands that do not work: all of them when absent.
+# The commands that do not work: all of them when absent. $2: the state, when
+# the caller has it already.
 _pkg_up_missing() {
-    local id="$1" c st; st=$(_pkg_up_state "$id")
+    local id="$1" c st="${2:-}"
+    [[ -n "$st" ]] || st=$(_pkg_up_state "$id")
     [[ "$st" == installed || "$st" == outdated ]] && return 0
     for c in $(_pkg_up_cmds "$id"); do
         [[ "$st" == partial ]] && _pkg_up_cmd_ok "$id" "$c" && continue
@@ -544,7 +579,10 @@ _pkg_up_foreign() {
 _pkg_up_download() {
     local url="$1" out="$2" want="$3" got
     step "Downloading ${url##*/}..."
-    if ! curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 --connect-timeout 20 -o "$out" "$url"; then
+    # https only, redirects included; a transfer that stalls is given up
+    # (under 1 kB/s for a minute) rather than left hanging in the panel's job.
+    if ! curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --retry-delay 2 \
+            --connect-timeout 20 --speed-limit 1024 --speed-time 60 -o "$out" "$url"; then
         error "Download failed: ${url}"
         return 1
     fi
@@ -574,16 +612,19 @@ _pkg_up_wrappers() {
     chmod 755 "${out}/cipi-bin/"* 2>/dev/null || true
 }
 
-# Build tools installed for this install only: back to dependencies, and
-# whatever that leaves unneeded goes (not orphans that were there before).
-_pkg_up_drop_build() {
-    local build="$1" before="$2" plan
-    [[ -z "$build" ]] && return 0
+# apt packages an entry no longer answers for ($1: build tools after the
+# build, dependencies of an install that failed): back to dependencies, and
+# whatever that leaves unneeded goes — not orphans that were there before
+# ($2), nor what another package needs. $3: what to call them.
+_pkg_up_release() {
+    local pkgs before="$2" what="${3:-the build tools}" plan
+    pkgs=$(tr ' ' '\n' <<< "$1" | sed '/^$/d' | sort -u | paste -sd' ' -)
+    [[ -z "$pkgs" ]] && return 0
     # shellcheck disable=SC2086
-    apt-mark auto $build >/dev/null 2>&1 || true
+    apt-mark auto $pkgs >/dev/null 2>&1 || true
     plan=$(_pkg_minus "$(_pkg_orphans)" "$before")
     [[ -z "$plan" ]] && return 0
-    step "Removing the build tools..."
+    step "Removing ${what}..."
     # shellcheck disable=SC2086
     _pkg_apt purge -y -qq $(tr '\n' ' ' <<< "$plan") || warn "apt-get purge reported a problem"
 }
@@ -622,17 +663,29 @@ _pkg_up_install() {
         exit 1
     fi
 
-    _pkg_check_disk "$PKG_UP_MIN_DISK_KB" || exit 1
+    # Room where it is unpacked (the nearest directory that exists) and
+    # where apt works.
+    local where; where=$(_pkg_up_root)
+    while [[ ! -d "$where" && "$where" == */* && -n "${where%/*}" ]]; do where="${where%/*}"; done
+    _pkg_check_disk "$PKG_UP_MIN_DISK_KB" "$where" || exit 1
+    _pkg_check_disk || exit 1
 
-    local p pick need_deps="" need_build="" unknown=""
+    # What apt has to install, and what is there already only as a dependency
+    # of something else (Java, for pdftk): that is kept for this entry too,
+    # or removing the other package would take it away under this one.
+    local p pick name need_deps="" need_build="" unknown="" hold=""
     if [[ -n "${deps}${build}" ]]; then
         step "Refreshing the package index..."
         _pkg_apt update -qq || warn "apt-get update reported a problem — continuing"
     fi
     for p in $deps; do
-        _pkg_item_installed "$p" >/dev/null && continue
+        if name=$(_pkg_item_installed "$p"); then
+            [[ -n "$(apt-mark showauto "$name" 2>/dev/null)" ]] && hold="${hold} ${name}"
+            continue
+        fi
         if pick=$(_pkg_item_pick "$p"); then need_deps="${need_deps} ${pick}"; else unknown="${unknown} ${p}"; fi
     done
+    hold="${hold# }"
     for p in $build; do
         _pkg_item_installed "$p" >/dev/null && continue
         if pick=$(_pkg_item_pick "$p"); then need_build="${need_build} ${pick}"; else unknown="${unknown} ${p}"; fi
@@ -653,7 +706,11 @@ _pkg_up_install() {
     esac
     [[ -n "$need_deps" ]] && echo -e "  ${DIM}apt       ${need_deps}${NC}"
     [[ -n "$need_build" ]] && echo -e "  ${DIM}apt, for the build only: ${need_build}${NC}"
-    [[ -n "$cur" ]] && echo -e "  ${DIM}replaces  ${cur}${NC}"
+    if [[ -n "$cur" && "$cur" != "$version" ]]; then
+        echo -e "  ${DIM}replaces  ${cur}${NC}"
+    elif [[ -n "$cur" ]]; then
+        echo -e "  ${DIM}repairs   ${cur}, which is incomplete${NC}"
+    fi
     echo ""
 
     if [[ "${ARG_yes:-}" != "true" ]] && ! _pkg_forced; then
@@ -664,6 +721,11 @@ _pkg_up_install() {
         confirm "Install ${id} ${version}?" || { info "Aborted"; return 0; }
     fi
 
+    # What apt installed for the version this replaces (or completes): read
+    # before anything of it is removed.
+    local prev=""
+    [[ -n "$cur" && -f "${dir}/${cur}/.cipi-package" ]] && prev=$(sed -n 's/^apt=//p' "${dir}/${cur}/.cipi-package" 2>/dev/null || true)
+
     local before=""; before=$(_pkg_orphans)
     if [[ -n "${need_deps}${need_build}" ]]; then
         step "Installing ${need_deps}${need_build:+ ${need_build}}..."
@@ -673,15 +735,37 @@ _pkg_up_install() {
             exit 1
         fi
     fi
+    if [[ -n "$hold" ]]; then
+        # shellcheck disable=SC2086
+        apt-mark manual $hold >/dev/null 2>&1 || warn "apt-mark manual failed for: ${hold}"
+    fi
 
+    # Leftovers of an install that was killed (the lock says none is running).
     local dest="${dir}/${version}" work="${dir}/.work-${version}-$$" got
     mkdir -p "$dir"; chmod 755 "$(_pkg_up_root)" "$dir"
-    rm -rf "$dest" "$work"; mkdir -p "$work"
+    rm -rf "$dir"/.work-* "$dir"/.current-* "$dest"; mkdir -p "$work"
+    # What apt installed for the entry, kept with it: remove takes it away.
+    _pkg_up_record() {
+        local added
+        added=$(printf '%s %s %s' "$prev" "$need_deps" "$hold" | tr ' ' '\n' | sed '/^$/d' | sort -u | paste -sd' ' -)
+        {
+            echo "id=${id}"; echo "version=${version}"; echo "method=${method}"
+            echo "pin=${hash:-${version}}"; echo "apt=${added}"; echo "installed=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        } > "${1}/.cipi-package"
+    }
     _pkg_up_fail() {
         rm -rf "$work" "$dest"
-        _pkg_up_drop_build "$need_build" "$before"
+        if [[ "$cur" == "$version" ]]; then
+            # A repair that failed: the entry stays, incomplete, with the record
+            # of what apt installed for it — install again, or remove.
+            mkdir -p "$dest"; _pkg_up_record "$dest"; chmod -R a+rX "$dest"
+            _pkg_up_release "$need_build" "$before"
+        else
+            # Nothing of this version is left (an older one keeps working):
+            # what apt installed for it goes back with the build tools.
+            _pkg_up_release "${need_build} ${need_deps} ${hold}" "$before" "what apt installed for it"
+        fi
         error "${id} ${version} was not installed"
-        [[ -n "$need_deps" ]] && echo "  apt installed ${need_deps} for it: cipi package remove ${id} takes them away"
         exit 1
     }
 
@@ -709,13 +793,13 @@ _pkg_up_install() {
         deb)
             _pkg_up_download "$url" "${work}/${url##*/}" "$hash" || _pkg_up_fail
             step "Installing ${url##*/}..."
-            _pkg_apt install -y -qq "${work}/${url##*/}" || _pkg_up_fail
+            _pkg_apt install -y -qq --allow-downgrades "${work}/${url##*/}" || _pkg_up_fail
             mkdir -p "${work}/out"
             ;;
         venv)
             # A virtualenv is not relocatable: it is built where it stays.
             step "Installing $(_pkg_up_name "$id") ${version} from PyPI..."
-            "${PKG_PYTHON:-python3}" -m venv "$dest" || _pkg_up_fail
+            "$(_pkg_python)" -m venv "$dest" || _pkg_up_fail
             "${dest}/bin/pip" install -q --no-cache-dir --disable-pip-version-check "$(_pkg_up_name "$id")==${version}" || _pkg_up_fail
             ;;
         gem)
@@ -728,17 +812,8 @@ _pkg_up_install() {
     [[ -d "${work}/out" ]] && { mv -T "${work}/out" "$dest" || _pkg_up_fail; }
     rm -rf "$work"
 
-    # What apt installed for it, kept with it: the dependencies of the version
-    # it replaces carry over.
-    local added="$need_deps" prev
-    if [[ -n "$cur" && -f "${dir}/${cur}/.cipi-package" ]]; then
-        prev=$(sed -n 's/^apt=//p' "${dir}/${cur}/.cipi-package")
-        added=$(printf '%s %s' "$prev" "$added" | tr ' ' '\n' | sed '/^$/d' | sort -u | paste -sd' ' -)
-    fi
-    {
-        echo "id=${id}"; echo "version=${version}"; echo "method=${method}"
-        echo "pin=${hash:-${version}}"; echo "apt=${added}"; echo "installed=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    } > "${dest}/.cipi-package"
+    # The dependencies of the version it replaces carry over.
+    _pkg_up_record "$dest"
     chmod -R a+rX "$dest"
 
     ln -sfn "$version" "${dir}/.current-$$" && mv -Tf "${dir}/.current-$$" "${dir}/current"
@@ -755,7 +830,7 @@ _pkg_up_install() {
         rm -rf "$d"
     done
 
-    _pkg_up_drop_build "$need_build" "$before"
+    _pkg_up_release "$need_build" "$before"
 
     local missing=""
     for c in $(_pkg_up_cmds "$id"); do
@@ -790,7 +865,7 @@ _pkg_up_remove() {
         fi
         return 0
     fi
-    [[ -n "$cur" ]] && added=$(sed -n 's/^apt=//p' "${dir}/${cur}/.cipi-package" 2>/dev/null)
+    [[ -n "$cur" ]] && added=$(sed -n 's/^apt=//p' "${dir}/${cur}/.cipi-package" 2>/dev/null || true)
     if [[ "$method" == deb ]] && _pkg_dpkg_installed "$(_pkg_up_debname "$id")"; then
         deb=$(_pkg_up_debname "$id")
     fi

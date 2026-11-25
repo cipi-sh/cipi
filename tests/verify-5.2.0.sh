@@ -463,7 +463,8 @@ else
 fi
 grep -q 'decisions\[\]?' "${LIB}/crowdsec.sh" \
     && pass "crowdsec status counts decisions, not alerts" || fail "crowdsec status counts alerts"
-if awk '/^_ban_unban\(\)/,/^}/' "${LIB}/ban.sh" | grep -q 'decisions list --ip'; then
+# 5.14.0: --ip, or --range for a CIDR ("$flag").
+if awk '/^_ban_unban\(\)/,/^}/' "${LIB}/ban.sh" | grep -qE 'decisions list (--ip|"\$flag")'; then
     pass "unban checks before claiming success"
 else
     fail "unban reports success even when cscli deleted nothing"

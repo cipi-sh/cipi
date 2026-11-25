@@ -364,13 +364,18 @@ def binsync():
 if me == "dpkg":
     print(st.get("arch", "amd64")); sys.exit(0)
 if me == "dpkg-query":
-    print("installed" if a[-1] in inst else "not-installed", end=""); sys.exit(0 if a[-1] in inst else 1)
+    fmt = next((x for x in a if x.startswith("-f=")), ""); names = [x for x in a if not x.startswith("-")]
+    if "${Package}" in fmt:          # one query for many: "name status" per package dpkg knows
+        for n in names:
+            if n in inst: print(n + " installed")
+        sys.exit(0 if all(n in inst for n in names) else 1)
+    print("installed" if names[-1] in inst else "not-installed"); sys.exit(0 if names[-1] in inst else 1)
 if me == "apt-cache":
     n = a[-1]; print(n + ":\n  Installed: (none)\n  Candidate: " + ("1.0-1" if n in avail else "(none)") + "\n  Version table:"); sys.exit(0)
 if me == "apt-mark":
-    if a[0] == "showmanual":
+    if a[0] in ("showmanual", "showauto"):
         for p in a[1:]:
-            if inst.get(p) == "manual": print(p)
+            if inst.get(p) == a[0][4:]: print(p)
         sys.exit(0)
     for p in a[1:]:
         if p in inst: inst[p] = a[0]
@@ -449,9 +454,13 @@ cat > "${K}/run.sh" <<RUN
 set -euo pipefail
 RED=""; GREEN=""; YELLOW=""; CYAN=""; DIM=""; NC=""; BOLD=""
 export CIPI_LIB="${K}/lib" CIPI_CONFIG="${K}/cfg" CIPI_LOG="${K}/log" PKG_SIM="${K}"
-export CIPI_PKG_ROOT="${K}/opt" CIPI_PKG_BIN="${K}/localbin" PKG_PYTHON="${K}/pystub"
 export PATH="${K}/bin:${K}/localbin:\${PATH}"
 source "${K}/lib/common.sh"; source "${K}/lib/package.sh"
+# The fixed paths of the upstream entries, here.
+_pkg_up_root()   { printf '%s' "${K}/opt"; }
+_pkg_up_bindir() { printf '%s' "${K}/localbin"; }
+_pkg_python()    { printf '%s' "${K}/pystub"; }
+_pkg_lock_file() { printf '%s' "${K}/lock"; }
 [[ -f "${K}/pins.sh" ]] && source "${K}/pins.sh"
 cipi_notify() { echo "notify \$3" >> "${K}/calls"; }
 show_help() { :; }
@@ -629,6 +638,9 @@ echo d201dac320fc5187eac75e723dd07a716196ec5a > "${K}/git-head"
 upj() { pk list --json | jq -c --arg i "$1" '.packages[] | select(.id == $i)'; }
 
 pkg_world noble
+jq -e '.installed == false and .partial == false and (.missing | index("nmap")) and (.missing | index("bind9-dnsutils") | not)' <<< "$(upj sec-recon)" >/dev/null \
+    && pass "sec-recon on a server whose image has dig: not installed, not partial" || fail "sec-recon before: $(upj sec-recon)"
+o=$(pk remove recon --yes); [[ $? -eq 0 && "$o" == *"sec-recon is not installed"* && "$(mark bind9-dnsutils)" == auto ]] && pass "a sec- entry answers to its name without the prefix (recon)" || fail "recon: ${o}"
 o=$(pk install nmap --yes); [[ $? -eq 0 && "$(mark nmap)" == manual && "$(mark whois)" == manual && "$(mark bind9-dnsutils)" == auto ]] \
     && pass "sec-recon (asked as nmap): nmap and whois from Ubuntu; dig, already there for ubuntu-standard, stays its" || fail "sec-recon: ${o}"
 o=$(pk remove sec-recon --yes); [[ $? -eq 0 && "$(mark nmap)" == absent && "$(mark whois)" == absent && "$(mark bind9-dnsutils)" == auto ]] \
@@ -679,13 +691,47 @@ grep -q '^apt=openjdk-21-jre-headless$' "${K}/opt/sec-zap/2.17.0/.cipi-package" 
 o=$(pk remove sec-zap --yes); [[ $? -eq 0 && "$(mark openjdk-21-jre-headless)" == absent && "$(mark java-common)" == absent && "$(mark linux-image-old)" == auto && ! -e "${K}/localbin/zap.sh" ]] \
     && pass "…removed with its Java runtime; older orphans stay" || fail "zap remove: ${o}"
 
-o=$(pk install nikto --yes); [[ $? -eq 0 && "$(mark libxml-writer-perl)" == manual && "$(mark perl)" == auto && -x "${K}/localbin/nikto" ]] \
+o=$(pk install nikto --yes); [[ $? -eq 0 && "$(mark libxml-writer-perl)" == manual && -x "${K}/localbin/nikto" ]] \
     && grep -q "program/nikto.pl" "${K}/opt/sec-nikto/2.6.1/cipi-bin/nikto" && [[ ! -e "${K}/opt/sec-nikto/2.6.1/src/.git" ]] \
     && pass "sec-nikto: the 2.6.1 tag at its pinned commit, a perl wrapper, Perl modules from Ubuntu" || fail "nikto: ${o}"
-pk remove nikto --yes >/dev/null; echo 0000000000000000000000000000000000000000 > "${K}/git-head"
+[[ "$(mark perl)" == manual ]] && grep -q '^apt=.*perl' "${K}/opt/sec-nikto/2.6.1/.cipi-package" \
+    && pass "…perl, there only as a dependency of ubuntu-standard, is kept for it too" || fail "perl hold: $(mark perl)"
+pk remove nikto --yes >/dev/null
+[[ "$(mark perl)" == auto && "$(mark libxml-writer-perl)" == absent ]] && pass "…and goes back to a dependency when nikto is removed (ubuntu-standard still needs it)" || fail "perl release: $(mark perl)"
+echo 0000000000000000000000000000000000000000 > "${K}/git-head"
 o=$(pk install nikto --yes); [[ $? -ne 0 && "$o" == *"not the pinned d201dac"* && ! -e "${K}/opt/sec-nikto/2.6.1" ]] \
     && pass "…a tag that moved to another commit: refused" || fail "nikto commit: ${o}"
 echo d201dac320fc5187eac75e723dd07a716196ec5a > "${K}/git-head"
+
+# Java that is there for pdftk: sec-zap keeps it, so removing pdftk does not take it away.
+pkg_world noble
+python3 -c 'import json,sys; p=sys.argv[1]+"/state.json"; s=json.load(open(p)); s["deps"]["default-jre-headless"]=["openjdk-21-jre-headless"]; json.dump(s,open(p,"w"))' "$K"
+pk install pdftk --yes >/dev/null
+[[ "$(mark openjdk-21-jre-headless)" == auto ]] || fail "world: java should come with pdftk"
+o=$(pk install sec-zap --yes); [[ $? -eq 0 && "$(mark openjdk-21-jre-headless)" == manual ]] && grep -q '^apt=openjdk-21-jre-headless$' "${K}/opt/sec-zap/2.17.0/.cipi-package" \
+    && pass "a Java runtime that came with pdftk: sec-zap keeps it for itself too" || fail "hold java: ${o} / $(mark openjdk-21-jre-headless)"
+pk remove pdftk --yes >/dev/null
+[[ "$(mark openjdk-21-jre-headless)" == manual && -x "${K}/localbin/zap.sh" ]] && pass "…removing pdftk leaves ZAP its Java" || fail "pdftk took java: $(mark openjdk-21-jre-headless)"
+
+# A repair that fails keeps the record; a first install that fails leaves nothing.
+rm -f "${K}/localbin/zap.sh"
+[[ "$(upj sec-zap | jq -c '[.partial, .missing]')" == '[true,["zap.sh"]]' ]] && pass "a command that is gone: partial, and which" || fail "partial json: $(upj sec-zap)"
+mkdir -p "${K}/opt/sec-zap/.work-2.17.0-999"; mv "$M/ZAP_2.17.0_Linux.tar.gz" "$M/zap.keep"
+o=$(pk install sec-zap --yes); r=$?
+[[ $r -ne 0 && "$o" == *"repairs   2.17.0"* ]] && grep -q '^apt=openjdk-21-jre-headless$' "${K}/opt/sec-zap/2.17.0/.cipi-package" && [[ ! -e "${K}/opt/sec-zap/.work-2.17.0-999" ]] \
+    && pass "a repair whose download fails: still there, incomplete, with its record; the leftovers of a killed install are gone" || fail "repair fail (${r}): ${o}"
+o=$(pk remove sec-zap --yes); [[ $? -eq 0 && "$(mark openjdk-21-jre-headless)" == absent && ! -e "${K}/opt/sec-zap" ]] \
+    && pass "…and remove still takes its Java away" || fail "remove after failed repair: ${o}"
+o=$(pk install sec-zap --yes); r=$?
+[[ $r -ne 0 && "$(mark openjdk-21-jre-headless)" == absent && "$(mark java-common)" == absent && "$o" == *"was not installed"* && ! -e "${K}/opt/sec-zap/current" ]] \
+    && pass "a first install whose download fails: the Java apt installed for it goes back" || fail "fresh fail (${r}): ${o} / $(mark openjdk-21-jre-headless)"
+mv "$M/zap.keep" "$M/ZAP_2.17.0_Linux.tar.gz"
+[[ -e "${K}/lock" ]] && grep -q '_pkg_lock; _pkg_install' "${LIB}/package.sh" && grep -q 'apt-get -o DPkg::Lock::Timeout=300 "\$@" 9>&-' "${LIB}/package.sh" \
+    && pass "install and remove take a lock, which apt's children do not inherit" || fail "lock"
+( flock 8; sleep 3 ) 8>"${K}/lock" &
+sleep 0.3; SECONDS=0; o=$(pk install pandoc --yes); r=$?; wait
+[[ $r -eq 0 && $SECONDS -ge 2 && "$(mark pandoc)" == manual ]] && pass "…a second command waits for the first, then runs" || fail "lock wait (${r}, ${SECONDS}s): ${o}"
+! grep -qE 'CIPI_PKG_ROOT|CIPI_PKG_BIN|PKG_PYTHON' "${LIB}/package.sh" && pass "where upstream entries live is not read from the environment" || fail "env overrides in package.sh"
 
 pkg_world noble
 o=$(pk install wpscan --yes); r=$?

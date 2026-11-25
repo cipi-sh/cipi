@@ -683,7 +683,7 @@ _firewall_cs_json() {
         why+=("Only $(( ${avail:-0} / 1024 )) MB of RAM free: CrowdSec wants $(( CROWDSEC_MIN_RAM_KB / 1024 )) MB")
     fi
     if ! _crowdsec_nginx_has_real_ip && _crowdsec_looks_behind_proxy; then
-        why+=("Nginx looks like it is behind a reverse proxy without real_ip: CrowdSec would ban the proxy (cipi zt enable writes Cloudflare's)")
+        why+=("Nginx looks like it is behind a reverse proxy without real_ip: CrowdSec would ban the proxy (behind Cloudflare: cipi nginx real-ip cloudflare)")
     fi
     if (( ${#why[@]} > 0 )); then
         blockers=$(printf '%s\n' "${why[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))')

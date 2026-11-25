@@ -890,7 +890,7 @@ grep -q 'NGINX CUSTOM SET: shop' "$NG/actions.log" && grep -q 'NGINX CUSTOM RESE
 grep -q '"$(_nginx_custom_file "$app")"; reload_nginx' "${LIB}/app.sh" && pass "app delete removes the app's directives file" || fail "app delete keeps the file"
 sud=$(sed -n '/SUDOEOF/,/^SUDOEOF/p' "${LIB}/cipi-api-sudoers.sh")
 grep -q 'cipi nginx show \*' <<< "$sud" && grep -q 'cipi nginx set \*' <<< "$sud" && grep -q 'cipi nginx reset \*' <<< "$sud" && ! grep -q 'cipi nginx edit\|cipi nginx upgrade\|cipi nginx default-server' <<< "$sud" && pass "the panel's sudoers: nginx show, set, reset — nothing else of nginx" || fail "sudoers nginx"
-grep -q '_help_cmd "cipi nginx edit <app>"' "${ROOT}/cipi" && grep -q 'sub="show edit set reset default-server upgrade security"' "${LIB}/completion.sh" && pass "help and completion: nginx show, edit, set, reset" || fail "help nginx"
+grep -q '_help_cmd "cipi nginx edit <app>"' "${ROOT}/cipi" && grep -q 'sub="show edit set reset real-ip default-server upgrade security"' "${LIB}/completion.sh" && pass "help and completion: nginx show, edit, set, reset" || fail "help nginx"
 bash -n "${LIB}/nginx-lint.sh" && sed -n "/<<'CIPINGINXLINT'/,/^CIPINGINXLINT\$/p" "${LIB}/nginx-lint.sh" | sed '1d;$d' | python3 -c "import ast, sys; ast.parse(sys.stdin.read())" 2>/dev/null && pass "nginx-lint.sh parses, and so does the Python in it" || fail "lint compile"
 [[ ! -e "${LIB}/cipi-nginx-lint.py" ]] && ! ls "${LIB}"/*.py 2>/dev/null | grep -q nginx && pass "the check is in a lib/*.sh: self-update of any version installs it" || fail "the lint is a file self-update does not copy"
 printf '%s' 'if ($http_user_agent ~* "(bot|crawler)") { return 403; }
@@ -933,6 +933,118 @@ AUDITRUN
 else
     echo "  (git not installed: commit subjects not checked)"
 fi
+
+# ── cipi nginx real-ip: the visitor's address behind Cloudflare ──
+# curl answers with a list of Cloudflare's ranges; nginx, systemctl and
+# fail2ban-client are stubs. Every path Zero Trust's code writes is redirected.
+echo "-- nginx real-ip: behind Cloudflare"
+RI="${TMP:?}/realip"; mkdir -p "$RI/bin" "$RI/nginx/conf.d" "$RI/cron" "$RI/f2b" "$RI/ips" "$RI/cfg" "$RI/log"
+printf '%s\n' '{"result":{"ipv4_cidrs":["173.245.48.0/20","103.21.244.0/22"],"ipv6_cidrs":["2400:cb00::/32"]},"success":true}' > "$RI/cf.json"
+cat > "$RI/bin/curl" <<CURLSTUB
+#!/bin/bash
+echo "\$*" >> "$RI/curl.log"
+[[ -f "$RI/offline" ]] && exit 6
+cat "$RI/cf.json"
+CURLSTUB
+cat > "$RI/bin/nginx" <<NGINXSTUB2
+#!/bin/bash
+[[ "\${1:-}" == "-t" ]] || exit 0
+if [[ -f "$RI/broken" ]] || { [[ -f "$RI/refuse-realip" ]] && [[ -f "$RI/nginx/conf.d/cipi-cloudflare-realip.conf" ]]; }; then
+    echo "nginx: [emerg] \"real_ip_header\" directive is duplicate in $RI/nginx/conf.d/cipi-cloudflare-realip.conf:3" >&2
+    exit 1
+fi
+echo "nginx: configuration file test is successful" >&2
+NGINXSTUB2
+cat > "$RI/bin/systemctl" <<SYSTEMCTLSTUB
+#!/bin/bash
+echo "\$*" >> "$RI/systemctl.log"
+if [[ "\$1" == "is-active" ]]; then
+    for a in "\$@"; do [[ -f "$RI/active-\$a" ]] && exit 0; done
+    exit 3
+fi
+exit 0
+SYSTEMCTLSTUB
+printf '#!/bin/bash\necho "$*" >> "%s/f2b.log"\n' "$RI" > "$RI/bin/fail2ban-client"
+chmod +x "$RI/bin/"*
+echo '{}' > "$RI/zt.json"
+cat > "$RI/h.sh" <<REALIPHARNESS
+export CIPI_LIB="${LIB}" CIPI_CONFIG="$RI/cfg" CIPI_LOG="$RI/log" PATH="$RI/bin:\$PATH"
+export ZT_REALIP="$RI/nginx/conf.d/cipi-cloudflare-realip.conf" ZT_F2B="$RI/f2b/cipi-zt.conf" ZT_IPS_DIR="$RI/ips"
+export ZT_CS_WL="$RI/crowdsec/s02-enrich/cipi-cloudflare-whitelists.yaml" ZT_CRON="$RI/cron/cipi-zt" NGINX_REALIP_CRON="$RI/cron/cipi-nginx-realip"
+RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
+source "${LIB}/common.sh" 2>/dev/null
+vault_read() { cat "$RI/\$1" 2>/dev/null; }
+vault_write() { cat > "$RI/\$1"; }
+cipi_notify() { :; }; log_action() { echo "\$*" >> "$RI/actions.log"; }; log_event() { :; }
+source "${LIB}/nginx.sh"
+REALIPHARNESS
+RH="source '$RI/h.sh';"
+rip() { bash -c "$RH nginx_command real-ip \"\$@\"" _ "$@" 2>&1 < /dev/null; }
+CONF="$RI/nginx/conf.d/cipi-cloudflare-realip.conf"
+
+[[ "$(rip status --json | jq -c '[.enabled, .provider, .ranges]')" == '[false,null,0]' ]] && pass "real-ip status: off" || fail "real-ip status off: $(rip status --json)"
+grep -q 'cipi nginx real-ip cloudflare' <<< "$(rip status)" && pass "real-ip status: says how to turn it on" || fail "real-ip status text"
+out=$(rip cloudflare); rc=$?
+[[ $rc -eq 0 ]] && grep -q "takes the visitor's address from Cloudflare (3 ranges" <<< "$out" && pass "real-ip cloudflare: on" || fail "real-ip enable: ${out}"
+grep -qx 'real_ip_header CF-Connecting-IP;' "$CONF" && grep -qx 'set_real_ip_from 173.245.48.0/20;' "$CONF" && grep -qx 'set_real_ip_from 2400:cb00::/32;' "$CONF" && [[ "$(grep -c '^set_real_ip_from ' "$CONF")" == 3 ]] \
+    && pass "real-ip: CF-Connecting-IP is believed from Cloudflare's IPv4 and IPv6 ranges, and from nowhere else" || fail "real-ip conf: $(cat "$CONF" 2>&1)"
+grep -q 'api.cloudflare.com/client/v4/ips' "$RI/curl.log" && ! grep -qi 'authorization\|bearer' "$RI/curl.log" && pass "real-ip: the ranges are Cloudflare's public list, no token" || fail "real-ip fetch"
+grep -q 'ignoreip = 127.0.0.1/8 ::1 173.245.48.0/20 103.21.244.0/22 2400:cb00::/32' "$RI/f2b/cipi-zt.conf" && pass "real-ip: fail2ban never bans Cloudflare's ranges" || fail "real-ip fail2ban"
+grep -q 'cipi nginx real-ip refresh' "$RI/cron/cipi-nginx-realip" && pass "real-ip: the ranges are refreshed every night" || fail "real-ip cron"
+grep -q '^reload nginx' "$RI/systemctl.log" && pass "real-ip: nginx reloaded" || fail "real-ip reload"
+[[ "$(rip status --json | jq -c '[.enabled, .provider, .header, .kept_by, .ranges, .nightly_refresh]')" == '[true,"cloudflare","CF-Connecting-IP","real-ip",3,true]' ]] && pass "real-ip status --json: on, Cloudflare, 3 ranges" || fail "real-ip status on: $(rip status --json)"
+grep -q 'Already on' <<< "$(rip cloudflare)" && pass "real-ip cloudflare twice: already on, ranges refreshed" || fail "real-ip twice"
+
+# Cloudflare adds a range; the server is offline at the next refresh, then back.
+printf '%s\n' '{"result":{"ipv4_cidrs":["173.245.48.0/20","103.21.244.0/22","104.16.0.0/13"],"ipv6_cidrs":["2400:cb00::/32"]}}' > "$RI/cf.json"
+touch "$RI/offline"; rip refresh >/dev/null; rm -f "$RI/offline"
+[[ "$(grep -c '^set_real_ip_from ' "$CONF")" == 3 ]] && pass "real-ip refresh: offline, the previous ranges stay" || fail "real-ip refresh offline"
+rip refresh >/dev/null
+[[ "$(grep -c '^set_real_ip_from ' "$CONF")" == 4 ]] && grep -q '104.16.0.0/13' "$RI/f2b/cipi-zt.conf" && pass "real-ip refresh: a new range reaches nginx and fail2ban" || fail "real-ip refresh"
+
+# off: asked for when a ban could then hit Cloudflare itself
+touch "$RI/active-fail2ban"
+out=$(rip off); rc=$?
+[[ $rc -ne 0 ]] && grep -q 'Pass --yes' <<< "$out" && grep -q 'could ban Cloudflare itself' <<< "$out" && [[ -s "$CONF" ]] && pass "real-ip off: says what it risks, and needs --yes without a terminal" || fail "real-ip off guard: ${out}"
+out=$(rip off --yes); rc=$?
+[[ $rc -eq 0 ]] && [[ ! -e "$CONF" && ! -e "$RI/f2b/cipi-zt.conf" && ! -e "$RI/cron/cipi-nginx-realip" ]] && pass "real-ip off --yes: the nginx file, the fail2ban list and the nightly refresh are gone" || fail "real-ip off: ${out}"
+[[ "$(rip status --json | jq -r .enabled)" == "false" ]] && grep -q 'already off' <<< "$(rip off --yes)" && pass "real-ip off twice: already off" || fail "real-ip off twice"
+grep -q 'nothing to refresh' <<< "$(rip refresh)" && [[ ! -e "$CONF" ]] && pass "real-ip refresh while off writes nothing" || fail "real-ip refresh off"
+rm -f "$RI/active-fail2ban"
+
+# nginx refuses, or was already broken: nothing is left behind
+touch "$RI/refuse-realip"; out=$(rip cloudflare); rc=$?; rm -f "$RI/refuse-realip"
+[[ $rc -ne 0 ]] && grep -q 'nginx refused the configuration' <<< "$out" && grep -q 'directive is duplicate' <<< "$out" && [[ ! -e "$CONF" && ! -e "$RI/cron/cipi-nginx-realip" ]] && pass "real-ip: refused by nginx -t, the file is taken back and nginx's reason shown" || fail "real-ip refused: ${out}"
+touch "$RI/broken"; out=$(rip cloudflare); rc=$?; rm -f "$RI/broken"
+[[ $rc -ne 0 ]] && grep -q 'already invalid' <<< "$out" && [[ ! -e "$CONF" ]] && pass "real-ip: a configuration already broken is not touched" || fail "real-ip preflight: ${out}"
+rm -f "$RI/ips/v4" "$RI/ips/v6"; touch "$RI/offline"; out=$(rip cloudflare); rc=$?; rm -f "$RI/offline"
+[[ $rc -ne 0 ]] && grep -q "Could not fetch Cloudflare's ranges" <<< "$out" && [[ ! -e "$CONF" ]] && pass "real-ip: no ranges to trust, nothing written" || fail "real-ip offline: ${out}"
+printf 'set_real_ip_from 10.0.0.0/8;\nreal_ip_header X-Forwarded-For;\n' > "$RI/nginx/conf.d/proxy.conf"
+out=$(rip cloudflare); rc=$?
+[[ $rc -ne 0 ]] && grep -q 'Cipi did not write' <<< "$out" && [[ ! -e "$CONF" ]] && [[ "$(rip status --json | jq -c '[.enabled, .provider, .kept_by]')" == '[true,null,"other"]' ]] && pass "real-ip: a real_ip configuration of someone else is left alone, and said" || fail "real-ip other: ${out}"
+rm -f "$RI/nginx/conf.d/proxy.conf"
+
+# with Zero Trust: one file for both
+rip cloudflare >/dev/null; echo '{"enabled":true}' > "$RI/zt.json"
+[[ "$(rip status --json | jq -r .kept_by)" == "both" ]] && pass "real-ip with Zero Trust: kept by both" || fail "real-ip both"
+out=$(rip off --yes); rc=$?
+[[ $rc -eq 0 ]] && grep -q "stays on until 'cipi zt disable'" <<< "$out" && [[ -s "$CONF" ]] && [[ "$(rip status --json | jq -r .kept_by)" == "zero-trust" ]] && pass "real-ip off under Zero Trust: the tunnel needs it, it stays" || fail "real-ip off zt: ${out}"
+echo '{}' > "$RI/zt.json"
+grep -q 'if \[\[ -f "$NGINX_REALIP_CRON" \]\]; then' "${LIB}/zt.sh" && grep -A4 'if \[\[ -f "$NGINX_REALIP_CRON" \]\]; then' "${LIB}/zt.sh" | grep -q 'rm -f "$ZT_CRON"$' && pass "cipi zt disable leaves Cloudflare's real_ip when real-ip turned it on" || fail "zt disable would remove real-ip"
+grep -q 'cipi nginx real-ip cloudflare' "${LIB}/crowdsec.sh" && grep -q 'cipi nginx real-ip cloudflare' "${LIB}/firewall.sh" && pass "CrowdSec's refusal behind a proxy names the command" || fail "crowdsec hint"
+grep -q '_help_cmd "cipi nginx real-ip cloudflare"' "${ROOT}/cipi" && grep -q 'real-ip)        sub="cloudflare status refresh off"' "${LIB}/completion.sh" && pass "help and completion: nginx real-ip" || fail "help real-ip"
+sud=$(sed -n '/SUDOEOF/,/^SUDOEOF/p' "${LIB}/cipi-api-sudoers.sh"); grep -q 'real-ip' <<< "$sud" && fail "the panel's sudoers must not reach real-ip" || pass "real-ip is for the terminal: not in the panel's sudoers"
+
+# ── a server whose port 3306 runs MySQL: messages say mysql ──
+echo "-- db: the engine a message names"
+dbshown() {   # <flavor> <engine> [always] — with SUDO_USER from the environment
+    bash -c "db_mysql_flavor() { echo '$1'; }; $(sed -n '/^_db_engine_shown() {/,/^}/p' "${LIB}/db.sh"); _db_engine_shown '$2' '${3:-}'"
+}
+[[ "$(dbshown mysql mariadb)" == "mysql" && "$(dbshown mariadb mariadb)" == "mariadb" && "$(dbshown mysql pgsql)" == "pgsql" ]] && pass "db messages: mysql on a server that runs MySQL, the id everywhere else" || fail "db engine shown"
+[[ "$(SUDO_USER=www-data dbshown mysql mariadb)" == "mariadb" && "$(SUDO_USER=www-data dbshown mysql mariadb always)" == "mysql" ]] && pass "db messages: through the API the id its parser reads; a notification says mysql" || fail "db engine shown via API"
+grep -qF 'Engine: ${CYAN}$(_db_engine_shown "$engine")${NC}  Database: ${CYAN}${name}${NC}' "${LIB}/db.sh" && ! grep -q 'Engine: ${CYAN}${engine}${NC}' "${LIB}/db.sh" && pass "db create: the line that said 'Engine: mariadb' on MySQL" || fail "db create line"
+[[ "$(grep -c '_db_engine_shown "$engine"' "${LIB}/db.sh")" -ge 17 ]] && pass "db list, link, delete, backup, restore, password: the same word" || fail "db other messages"
+bash -c "$(sed -n '/^db_normalize_engine() {/,/^}/p' "${LIB}/db.sh"); [[ \"\$(db_normalize_engine mysql)\" == mariadb ]]" && pass "--engine=mysql is the name the messages use" || fail "normalize mysql"
 
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="

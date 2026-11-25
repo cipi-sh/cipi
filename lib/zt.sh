@@ -23,6 +23,11 @@
 [[ -z "${ZT_UNIT:-}" ]]       && readonly ZT_UNIT="cloudflared"
 [[ -z "${ZT_API:-}" ]]        && readonly ZT_API="https://api.cloudflare.com/client/v4"
 [[ -z "${ZT_CS_WL:-}" ]]      && readonly ZT_CS_WL="/etc/crowdsec/parsers/s02-enrich/cipi-cloudflare-whitelists.yaml"
+# `cipi nginx real-ip cloudflare` (lib/nginx.sh) keeps the same nginx file,
+# fail2ban list and CrowdSec whitelist without a tunnel. Its nightly refresh
+# is this cron file, and the file is the sign that it is on: disabling Zero
+# Trust then leaves the three in place.
+[[ -z "${NGINX_REALIP_CRON:-}" ]] && readonly NGINX_REALIP_CRON="/etc/cron.d/cipi-nginx-realip"
 
 zt_command() {
     local sub="${1:-}"; shift || true
@@ -225,11 +230,12 @@ _zt_each_cf_cidr() {
 }
 
 _zt_write_realip() {
-    mkdir -p /etc/nginx/conf.d
+    mkdir -p "$(dirname "$ZT_REALIP")"
     local tmp cidr
     tmp=$(mktemp)
     {
-        echo "# Written by cipi zt. Cloudflare edge ranges; refresh: cipi zt refresh"
+        echo "# Written by Cipi (cipi nginx real-ip, cipi zt). Cloudflare's edge ranges, refreshed every night."
+        echo "# A request is given the address in CF-Connecting-IP only when it comes from one of them."
         echo "real_ip_header CF-Connecting-IP;"
         echo "real_ip_recursive on;"
         echo "map \$http_x_forwarded_proto \$cipi_forwarded_proto {"
@@ -250,13 +256,13 @@ _zt_write_realip() {
 }
 
 _zt_write_fail2ban_ignore() {
-    mkdir -p /etc/fail2ban/jail.d
+    mkdir -p "$(dirname "$ZT_F2B")"
     local cidrs="" c
     while IFS= read -r c; do
         [[ -n "$c" ]] && cidrs+=" ${c}"
     done < <(_zt_each_cf_cidr)
     cat > "$ZT_F2B" <<EOF
-# Written by cipi zt. ignoreip replaces jail.local's list, so localhost stays.
+# Written by Cipi (cipi nginx real-ip, cipi zt). ignoreip replaces jail.local's list, so localhost stays.
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1${cidrs}
 EOF
@@ -268,12 +274,12 @@ EOF
 
 # CrowdSec: dedicated parser so we do not flood cipi crowdsec allow.
 _zt_write_crowdsec_allowlist() {
-    [[ -d /etc/crowdsec/parsers/s02-enrich ]] || return 0
+    [[ -d "$(dirname "$ZT_CS_WL")" ]] || return 0
     local tmp c
     tmp=$(mktemp)
     {
         echo "name: crowdsecurity/cipi-cloudflare-whitelists"
-        echo "description: \"Cloudflare edge CIDRs (cipi zt) — defence if real_ip is missing\""
+        echo "description: \"Cloudflare edge CIDRs (cipi nginx real-ip, cipi zt) — defence if real_ip is missing\""
         echo "filter: \"1 == 1\""
         echo "whitelist:"
         echo "  reason: \"cloudflare edge\""
@@ -679,7 +685,14 @@ _zt_disable() {
     rm -f /etc/systemd/system/${ZT_UNIT}.service
     systemctl daemon-reload 2>/dev/null || true
     rm -rf "$ZT_CF_DIR"
-    rm -f "$ZT_REALIP" "$ZT_F2B" "$ZT_CRON" "$ZT_CS_WL"
+    if [[ -f "$NGINX_REALIP_CRON" ]]; then
+        # cipi nginx real-ip cloudflare is on: the domains may still be behind
+        # Cloudflare's proxy without the tunnel, and its ranges stay trusted.
+        rm -f "$ZT_CRON"
+        info "nginx keeps reading the visitor's address from Cloudflare (cipi nginx real-ip off to stop)"
+    else
+        rm -f "$ZT_REALIP" "$ZT_F2B" "$ZT_CRON" "$ZT_CS_WL"
+    fi
     if command -v nginx >/dev/null 2>&1; then
         nginx -t >/dev/null 2>&1 && systemctl reload nginx 2>/dev/null || true
     fi

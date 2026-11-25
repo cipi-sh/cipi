@@ -403,9 +403,10 @@ _cipi_complete() {
 
         nginx)
             case $pos in
-                1) sub="show edit set reset default-server upgrade security" ;;
+                1) sub="show edit set reset real-ip default-server upgrade security" ;;
                 2) case "$w1" in
                        default-server) sub="status on off" ;;
+                       real-ip)        sub="cloudflare status refresh off" ;;
                        upgrade)        sub="--yes" ;;
                        show|edit|set|reset) sub="$(_cipi_apps)" ;;
                    esac ;;

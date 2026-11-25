@@ -610,12 +610,198 @@ nginx_command() {
             ;;
         status) _nginx_default_server_report ;;
         security) _nginx_security_report ;;
+        real-ip|realip) nginx_realip_command "$@" ;;
         show)  nginx_custom_show "$@" ;;
         edit)  nginx_custom_edit "$@" ;;
         set)   nginx_custom_set "$@" ;;
         reset|unset|clear) nginx_custom_reset "$@" ;;
-        *) error "Use: cipi nginx show|edit|set|reset <app> | default-server on|off|status | security | upgrade [--yes]"; exit 1 ;;
+        *) error "Use: cipi nginx show|edit|set|reset <app> | real-ip cloudflare|off|status | default-server on|off|status | security | upgrade [--yes]"; exit 1 ;;
     esac
+}
+
+# ── The visitor's address behind Cloudflare ───────────────────
+#   cipi nginx real-ip cloudflare     trust Cloudflare's edge for the visitor's address
+#   cipi nginx real-ip status [--json]
+#   cipi nginx real-ip refresh        fetch Cloudflare's ranges again (also every night)
+#   cipi nginx real-ip off [--yes]
+#
+# A domain proxied by Cloudflare (the orange cloud) reaches nginx from
+# Cloudflare's addresses: the access log, fail2ban, CrowdSec and the app all
+# see Cloudflare, not the visitor. With this on, a request that comes from one
+# of Cloudflare's ranges is given the address in its CF-Connecting-IP header
+# (nginx's real_ip module); a request from anywhere else keeps the address of
+# its connection, so the header cannot be forged by connecting to the server
+# directly. It is one setting for the whole server, right for the domains
+# behind Cloudflare and without effect on the others.
+#
+# The work is Zero Trust's (lib/zt.sh), without the tunnel: the same file in
+# conf.d, the same fail2ban ignore list and CrowdSec whitelist for Cloudflare's
+# ranges — a ban on Cloudflare takes every proxied site down — and a refresh
+# of the ranges every night. No Cloudflare token is needed: the list is public.
+
+_nginx_realip_load() {
+    declare -f _zt_apply_realip >/dev/null 2>&1 || source "${CIPI_LIB}/zt.sh"
+}
+
+# on | off, and who keeps it on: real-ip (this command), zero-trust, both, other
+# (a real_ip configuration Cipi did not write).
+_nginx_realip_state() {
+    local on="off" by=""
+    if [[ -s "$ZT_REALIP" ]]; then
+        on="on"
+        local a=false b=false
+        [[ -f "$NGINX_REALIP_CRON" ]] && a=true
+        _zt_enabled 2>/dev/null && b=true
+        if   $a && $b; then by="both"
+        elif $a; then by="real-ip"
+        elif $b; then by="zero-trust"
+        else by="real-ip"; fi
+    elif grep -rqsE '^[[:space:]]*set_real_ip_from[[:space:]]' "$(dirname "$(dirname "$ZT_REALIP")")/nginx.conf" "$(dirname "$ZT_REALIP")" 2>/dev/null; then
+        on="on"; by="other"
+    fi
+    echo "${on} ${by}"
+}
+
+nginx_realip_command() {
+    local action="${1:-status}"; shift || true
+    _nginx_realip_load
+    case "$action" in
+        cloudflare|on|enable) _nginx_realip_enable "$@" ;;
+        off|disable)          _nginx_realip_disable "$@" ;;
+        refresh)              _nginx_realip_refresh "$@" ;;
+        status)               _nginx_realip_status "$@" ;;
+        *) error "Use: cipi nginx real-ip cloudflare|off|status|refresh"; exit 1 ;;
+    esac
+}
+
+_nginx_realip_enable() {
+    local state by had="" out
+    read -r state by <<< "$(_nginx_realip_state)"
+    if [[ "$by" == "other" ]]; then
+        error "nginx already has a real_ip configuration that Cipi did not write (set_real_ip_from in /etc/nginx)"
+        echo "  Remove it first, or keep it: two of them would trust two lists." >&2
+        exit 1
+    fi
+    if ! nginx -t >/dev/null 2>&1; then
+        error "nginx configuration is already invalid — fix it first (nginx -t)"; exit 1
+    fi
+    step "Fetching Cloudflare's address ranges..."
+    _zt_fetch_ips || { error "Could not fetch Cloudflare's ranges (api.cloudflare.com/client/v4/ips) and none are saved"; exit 1; }
+    [[ -f "$ZT_REALIP" ]] && had=$(cat "$ZT_REALIP")
+    _zt_write_realip || { error "Could not write ${ZT_REALIP}"; exit 1; }
+    if ! out=$(nginx -t 2>&1); then
+        # Put back what was there: nginx must never be left unable to reload.
+        if [[ -n "$had" ]]; then printf '%s\n' "$had" > "$ZT_REALIP"; else rm -f "$ZT_REALIP"; fi
+        error "nginx refused the configuration — nothing changed"
+        printf '%s\n' "$out" | grep -v 'test is successful\|syntax is ok' | head -3 | sed 's/^/  /' >&2
+        exit 1
+    fi
+    systemctl reload nginx || { error "systemctl reload nginx failed"; exit 1; }
+    _zt_write_fail2ban_ignore
+    _zt_write_crowdsec_allowlist || true
+    cat > "$NGINX_REALIP_CRON" <<'CRONEOF'
+# Cipi — Cloudflare's address ranges for nginx real_ip, fail2ban and CrowdSec (cipi nginx real-ip).
+23 3 * * * root /usr/local/bin/cipi nginx real-ip refresh >/dev/null 2>&1
+CRONEOF
+    chmod 644 "$NGINX_REALIP_CRON"
+    log_action "NGINX REAL-IP: cloudflare"
+    if [[ "$state" == "on" ]]; then
+        success "Already on — Cloudflare's ranges refreshed ($(_zt_each_cf_cidr | wc -l) ranges)"
+    else
+        success "nginx now takes the visitor's address from Cloudflare ($(_zt_each_cf_cidr | wc -l) ranges, refreshed every night)"
+    fi
+    echo -e "  ${DIM}Logs, fail2ban, CrowdSec and the apps see the visitor for domains proxied by Cloudflare; a direct${NC}"
+    echo -e "  ${DIM}connection keeps its own address. PHP-FPM apps read it as REMOTE_ADDR (\$request->ip(), no${NC}"
+    echo -e "  ${DIM}TrustProxies change); Octane and Node apps in X-Forwarded-For, as before. A firewall ban stops${NC}"
+    echo -e "  ${DIM}direct connections only: a visitor who comes through Cloudflare is blocked at Cloudflare (WAF).${NC}"
+}
+
+_nginx_realip_refresh() {
+    if [[ ! -f "$NGINX_REALIP_CRON" && ! -f "$ZT_REALIP" ]]; then
+        info "real-ip is off — nothing to refresh"
+        return 0
+    fi
+    _zt_refresh
+}
+
+_nginx_realip_disable() {
+    parse_args "$@"
+    local state by
+    read -r state by <<< "$(_nginx_realip_state)"
+    if [[ "$state" == "off" ]]; then
+        rm -f "$NGINX_REALIP_CRON"
+        info "real-ip is already off"
+        return 0
+    fi
+    if [[ "$by" == "other" ]]; then
+        error "The real_ip configuration in /etc/nginx was not written by Cipi — remove it by hand"; exit 1
+    fi
+    if [[ "$by" == "zero-trust" || "$by" == "both" ]]; then
+        # The tunnel delivers every request from Cloudflare: without real_ip all of them are one address.
+        rm -f "$NGINX_REALIP_CRON"
+        warn "Zero Trust is enabled and needs Cloudflare's real_ip: it stays on until 'cipi zt disable'"
+        return 0
+    fi
+    if systemctl is-active --quiet crowdsec 2>/dev/null || systemctl is-active --quiet fail2ban 2>/dev/null; then
+        warn "With a domain still proxied by Cloudflare, every visitor becomes one of Cloudflare's addresses again:"
+        warn "CrowdSec or fail2ban could ban Cloudflare itself and take those sites down."
+        warn "Turn the proxy off in Cloudflare (DNS only) first."
+        if [[ "${ARG_yes:-}" != "true" ]]; then
+            [[ -t 0 ]] || { error "Pass --yes to turn it off without a terminal"; exit 1; }
+            confirm "Turn real-ip off?" || { info "Nothing changed"; return 0; }
+        fi
+    fi
+    local had=""
+    [[ -f "$ZT_REALIP" ]] && had=$(cat "$ZT_REALIP")
+    rm -f "$ZT_REALIP"
+    if ! nginx -t >/dev/null 2>&1; then
+        # A vhost may use what the file defined: nginx stays as it was.
+        [[ -n "$had" ]] && printf '%s\n' "$had" > "$ZT_REALIP"
+        error "nginx refuses its configuration without the file — nothing changed (nginx -t)"; exit 1
+    fi
+    systemctl reload nginx || { error "systemctl reload nginx failed"; exit 1; }
+    rm -f "$ZT_F2B" "$ZT_CS_WL" "$NGINX_REALIP_CRON"
+    if systemctl is-active --quiet fail2ban 2>/dev/null; then
+        fail2ban-client reload >/dev/null 2>&1 || true
+    fi
+    if systemctl is-active --quiet crowdsec 2>/dev/null; then
+        systemctl reload crowdsec 2>/dev/null || true
+    fi
+    log_action "NGINX REAL-IP: off"
+    success "real-ip is off — nginx sees the address of each connection"
+}
+
+_nginx_realip_status() {
+    parse_args "$@"
+    local state by ranges=0 refreshed=""
+    read -r state by <<< "$(_nginx_realip_state)"
+    [[ -s "$ZT_REALIP" ]] && ranges=$(grep -c '^set_real_ip_from ' "$ZT_REALIP" 2>/dev/null || true)
+    [[ -s "${ZT_IPS_DIR}/v4" ]] && refreshed=$(date -u -r "${ZT_IPS_DIR}/v4" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)
+    if [[ "${ARG_json:-}" == "true" ]]; then
+        jq -n --arg state "$state" --arg by "$by" --argjson ranges "${ranges:-0}" --arg refreshed "$refreshed" \
+              --argjson nightly "$([[ -f "$NGINX_REALIP_CRON" || -f "$ZT_CRON" ]] && echo true || echo false)" \
+              '{enabled: ($state == "on"), provider: (if $state == "on" and $by != "other" then "cloudflare" else null end),
+                header: (if $state == "on" and $by != "other" then "CF-Connecting-IP" else null end),
+                kept_by: (if $by == "" then null else $by end), ranges: $ranges,
+                refreshed_at: (if $refreshed == "" then null else $refreshed end), nightly_refresh: $nightly}'
+        return 0
+    fi
+    echo -e "\n${BOLD}nginx — the visitor's address${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    case "$state $by" in
+        "off "*)
+            printf "  %-14s %b\n" "real-ip" "${DIM}off${NC} — the address of each connection"
+            echo -e "\n  ${DIM}Domains behind Cloudflare's proxy show Cloudflare's addresses in the logs and in the app.${NC}"
+            echo -e "  ${DIM}Turn it on with:${NC} ${CYAN}cipi nginx real-ip cloudflare${NC}" ;;
+        "on other")
+            printf "  %-14s %b\n" "real-ip" "${YELLOW}on${NC} — a configuration in /etc/nginx that Cipi did not write" ;;
+        *)
+            printf "  %-14s %b\n" "real-ip" "${GREEN}on${NC} — Cloudflare (CF-Connecting-IP)"
+            printf "  %-14s %s\n" "Ranges" "${ranges} trusted${refreshed:+, fetched ${refreshed/T/ }}"
+            printf "  %-14s %s\n" "Kept by" "$(case "$by" in zero-trust) echo "Zero Trust (cipi zt)";; both) echo "cipi nginx real-ip and Zero Trust";; *) echo "cipi nginx real-ip";; esac)"
+            printf "  %-14s %s\n" "File" "$ZT_REALIP" ;;
+    esac
+    echo ""
 }
 
 # ── An app's own nginx directives ─────────────────────────────

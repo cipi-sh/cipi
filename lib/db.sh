@@ -50,6 +50,24 @@ db_engine_label() {
     esac
 }
 
+# The engine as a message names it: its id — what --engine= takes, and what
+# the API reads in these messages — except on a server whose port 3306 runs
+# MySQL (cipi db switch mysql). There the id is still "mariadb", and a line
+# saying "Engine: mariadb" names a server that is not installed: the message
+# says "mysql", which --engine= takes as well. Through the API (sudo as
+# www-data) the id stays: its parser, and the ones of the releases already
+# installed, expect "mariadb" or "pgsql". `always` is for texts nobody parses
+# (notifications).
+_db_engine_shown() {
+    local e="${1:-}" always="${2:-}"
+    if [[ "$e" == "mariadb" && "$(db_mysql_flavor 2>/dev/null)" == "mysql" ]] \
+        && { [[ "$always" == "always" ]] || [[ "${SUDO_USER:-}" != "www-data" ]]; }; then
+        echo "mysql"
+    else
+        echo "$e"
+    fi
+}
+
 db_engine_port() {
     case "${1:-}" in
         mariadb) echo "3306" ;;
@@ -293,7 +311,7 @@ _db_link() {
     _db_resolve_name_engine "$name" || exit 1
     local engine="$RESOLVED_ENGINE"
     local have; have=$(db_list_databases "$engine" 2>/dev/null || true)
-    grep -qx -- "$name" <<< "$have" || { error "No database '${name}' on ${engine}"; exit 1; }
+    grep -qx -- "$name" <<< "$have" || { error "No database '${name}' on $(_db_engine_shown "$engine")"; exit 1; }
     local own_engine; own_engine=$(app_get "$app" engine); [[ -z "$own_engine" ]] && own_engine="mariadb"
     if [[ "$name" == "$app" && "$(app_get "$app" custom)" != "true" && "$(db_normalize_engine "$own_engine" 2>/dev/null || echo mariadb)" == "$engine" ]]; then
         info "'${name}' is the database created with '${app}' — it is already shown as its own"
@@ -301,12 +319,12 @@ _db_link() {
     fi
     local was; was=$(db_linked_app "$engine" "$name")
     if [[ "$was" == "$app" ]]; then
-        info "'${name}' (${engine}) is already linked to '${app}'"
+        info "'${name}' ($(_db_engine_shown "$engine")) is already linked to '${app}'"
         return 0
     fi
     _db_link_set "$app" "$engine" "$name"
     log_action "DB LINKED: $name ($engine) -> $app${was:+ (was $was)}"
-    success "'${name}' (${engine}) linked to app '${app}'${was:+ — it was linked to '${was}'}"
+    success "'${name}' ($(_db_engine_shown "$engine")) linked to app '${app}'${was:+ — it was linked to '${was}'}"
     echo -e "  ${DIM}Only a label: the database keeps its user and password, and stays when the app is deleted.${NC}"
 }
 
@@ -320,10 +338,10 @@ _db_unlink() {
     _db_resolve_name_engine "$name" || exit 1
     local engine="$RESOLVED_ENGINE" was
     was=$(db_linked_app "$engine" "$name")
-    [[ -n "$was" ]] || { info "'${name}' (${engine}) is not linked to an app"; return 0; }
+    [[ -n "$was" ]] || { info "'${name}' ($(_db_engine_shown "$engine")) is not linked to an app"; return 0; }
     _db_link_del "$engine" "$name"
     log_action "DB UNLINKED: $name ($engine) from $was"
-    success "'${name}' (${engine}) unlinked from app '${was}'"
+    success "'${name}' ($(_db_engine_shown "$engine")) unlinked from app '${was}'"
 }
 
 # ── Low-level SQL ops ────────────────────────────────────────
@@ -1277,7 +1295,7 @@ _db_set_default() {
     rm -f "$tmp"
 
     log_action "DB DEFAULT ENGINE: $engine"
-    success "Default database engine: $(db_engine_label "$engine") (${engine})"
+    success "Default database engine: $(db_engine_label "$engine") ($(_db_engine_shown "$engine"))"
 }
 
 _db_engines() {
@@ -1361,7 +1379,7 @@ _db_create() {
     local meta
     meta=$(vault_read databases.json 2>/dev/null) || meta="{}"
     if echo "$meta" | jq -e --arg e "$engine" --arg n "$name" '.[$e][$n]' &>/dev/null; then
-        error "Database '${name}' already exists on ${engine}"; exit 1
+        error "Database '${name}' already exists on $(_db_engine_shown "$engine")"; exit 1
     fi
 
     local pass; pass=$(generate_password 40)
@@ -1372,10 +1390,10 @@ _db_create() {
 
     log_action "DB CREATED: $name ($engine)${link_app:+ for $link_app}"
     cipi_notify \
-        "Cipi database created: ${name} (${engine}) on $(hostname)" \
-        "A database was created.\n\nServer: $(hostname)\nEngine: ${engine}\nDatabase: ${name}\nUser: ${user}${link_app:+\\nApp: ${link_app}}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Cipi database created: ${name} ($(_db_engine_shown "$engine" always)) on $(hostname)" \
+        "A database was created.\n\nServer: $(hostname)\nEngine: $(_db_engine_shown "$engine" always)\nDatabase: ${name}\nUser: ${user}${link_app:+\\nApp: ${link_app}}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         db_create
-    echo -e "\n${GREEN}✓${NC} Engine: ${CYAN}${engine}${NC}  Database: ${CYAN}${name}${NC}  User: ${CYAN}${user}${NC}  Password: ${CYAN}${pass}${NC}"
+    echo -e "\n${GREEN}✓${NC} Engine: ${CYAN}$(_db_engine_shown "$engine")${NC}  Database: ${CYAN}${name}${NC}  User: ${CYAN}${user}${NC}  Password: ${CYAN}${pass}${NC}"
     [[ -n "$link_app" ]] && echo -e "  App: ${CYAN}${link_app}${NC}"
     echo -e "${YELLOW}Save this password!${NC}\n"
     return 0
@@ -1416,9 +1434,9 @@ _db_list_row() {   # <engine> <database> <user> <size MB>
         local label="—"
         [[ -n "$app" ]] && label="$app"
         [[ "$kind" == "linked" ]] && label="${label} ${DIM}(linked)${NC}"
-        tbl_row "$engine" "$db" "$u" "${sz} MB" "$label"
+        tbl_row "$(_db_engine_shown "$engine")" "$db" "$u" "${sz} MB" "$label"
     else
-        tbl_row "$engine" "$db" "$u" "${sz} MB"
+        tbl_row "$(_db_engine_shown "$engine")" "$db" "$u" "${sz} MB"
     fi
 }
 
@@ -1580,10 +1598,10 @@ _db_delete() {
     _db_link_del "$engine" "$name"
     log_action "DB DELETED: $name ($engine)"
     cipi_notify \
-        "Cipi database deleted: ${name} (${engine}) on $(hostname)" \
-        "A database was deleted.\n\nServer: $(hostname)\nEngine: ${engine}\nDatabase: ${name}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Cipi database deleted: ${name} ($(_db_engine_shown "$engine" always)) on $(hostname)" \
+        "A database was deleted.\n\nServer: $(hostname)\nEngine: $(_db_engine_shown "$engine" always)\nDatabase: ${name}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         db_delete
-    success "'${name}' deleted (${engine})"
+    success "'${name}' deleted ($(_db_engine_shown "$engine"))"
 }
 
 _db_backup() {
@@ -1595,7 +1613,7 @@ _db_backup() {
     local engine="$RESOLVED_ENGINE"
     local dir="${CIPI_LOG}/backups"; mkdir -p "$dir"
     local f="${dir}/${engine}_${name}_$(date +%Y%m%d_%H%M%S).sql.gz"
-    step "Backing up '${name}' (${engine})..."
+    step "Backing up '${name}' ($(_db_engine_shown "$engine"))..."
     db_dump_database "$engine" "$name" "$f" || { error "Backup failed"; rm -f "$f"; exit 1; }
     success "Saved: ${f} ($(du -h "$f"|cut -f1))"
 }
@@ -1619,9 +1637,9 @@ _db_restore() {
     local RESOLVED_ENGINE=""
     _db_resolve_name_engine "$name" || exit 1
     local engine="$RESOLVED_ENGINE"
-    step "Restoring '${name}' (${engine})..."
+    step "Restoring '${name}' ($(_db_engine_shown "$engine"))..."
     db_restore_database "$engine" "$name" "$file" || { error "Restore failed"; exit 1; }
-    success "'${name}' restored (${engine})"
+    success "'${name}' restored ($(_db_engine_shown "$engine"))"
 }
 
 _db_password() {
@@ -1635,6 +1653,6 @@ _db_password() {
     validate_db_name "$u" || { error "Invalid stored user for '${name}'"; exit 1; }
     local np; np=$(generate_password 40)
     db_change_user_password "$engine" "$u" "$np" || { error "Password change failed"; exit 1; }
-    echo -e "\n${GREEN}✓${NC} New password for '${u}' (${engine}): ${CYAN}${np}${NC}"
+    echo -e "\n${GREEN}✓${NC} New password for '${u}' ($(_db_engine_shown "$engine")): ${CYAN}${np}${NC}"
     echo -e "${YELLOW}Update DB_PASSWORD in your .env!${NC}\n"
 }

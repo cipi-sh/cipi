@@ -330,7 +330,7 @@ _cipi_complete() {
             case $pos in
                 1) sub="list install remove" ;;
                 2) case "$w1" in
-                       install|remove) sub="image-optimizers ffmpeg imagemagick poppler-utils jpegoptim optipng pngquant gifsicle webp" ;;
+                       install|remove) sub="image-optimizers avif ffmpeg imagemagick poppler-utils browsershot fonts-cjk pdftk libreoffice pandoc tesseract sec-recon sec-gitleaks sec-nuclei sec-zap sec-nikto sec-wpscan sec-trivy sec-semgrep sec-checkov jpegoptim optipng pngquant gifsicle webp" ;;
                        list)           sub="--json" ;;
                    esac ;;
                 3) case "$w1" in
@@ -339,7 +339,7 @@ _cipi_complete() {
                    esac ;;
             esac ;;
 
-        firewall) [[ $pos -eq 1 ]] && sub="allow list attempts" ;;
+        firewall) [[ $pos -eq 1 ]] && sub="status list allow deny remove block unblock attempts" ;;
         ban)      [[ $pos -eq 1 ]] && sub="list unban" ;;
 
         crowdsec)
@@ -403,10 +403,16 @@ _cipi_complete() {
 
         nginx)
             case $pos in
-                1) sub="default-server upgrade security" ;;
+                1) sub="show edit set reset real-ip default-server upgrade security" ;;
                 2) case "$w1" in
                        default-server) sub="status on off" ;;
+                       real-ip)        sub="cloudflare status refresh off" ;;
                        upgrade)        sub="--yes" ;;
+                       show|edit|set|reset) sub="$(_cipi_apps)" ;;
+                   esac ;;
+                3) case "$w1" in
+                       show) sub="--json" ;;
+                       set)  sub="--file=" ;;
                    esac ;;
             esac ;;
 

@@ -37,7 +37,7 @@ _ban_list() {
 
     if [[ "$f2b" -eq 1 ]]; then
         local jails
-        jails=$(fail2ban-client status | grep "Jail list" | sed 's/.*://;s/,/ /g' | xargs)
+        jails=$(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p' | tr ',' ' ') || jails=""
         local jail
         for jail in $jails; do
             local banned count
@@ -85,6 +85,12 @@ _ban_list() {
 _ban_unban() {
     local ip="${1:-}"
     [[ -z "$ip" ]] && { error "Usage: cipi ban unban <IP>"; exit 1; }
+    # An address (or a CrowdSec range) and nothing else: it reaches
+    # fail2ban-client and cscli, from the shell and from the panel.
+    if [[ "$ip" == -* || ! "$ip" =~ ^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$ || ( "$ip" != *.* && "$ip" != *:* ) ]]; then
+        error "Not an IP address: ${ip}"
+        exit 1
+    fi
 
     local f2b=0 cs=0
     _ban_fail2ban_running && f2b=1
@@ -96,12 +102,15 @@ _ban_unban() {
 
     local unbanned=0
 
-    if [[ "$f2b" -eq 1 ]]; then
-        local jails jail
-        jails=$(fail2ban-client status | grep "Jail list" | sed 's/.*://;s/,/ /g' | xargs)
+    if [[ "$f2b" -eq 1 && "$ip" != */* ]]; then
+        local jails jail st
+        jails=$(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p' | tr ',' ' ') || jails=""
         for jail in $jails; do
-            if fail2ban-client status "$jail" | grep -q "$ip"; then
-                fail2ban-client set "$jail" unbanip "$ip" &>/dev/null
+            st=$(fail2ban-client status "$jail" 2>/dev/null) || continue
+            # The whole address: 1.2.3.4 is not in "11.2.3.45" (5.14.0; was a
+            # substring, with every dot a wildcard).
+            if grep -qwF -- "$ip" <<< "$st"; then
+                fail2ban-client set "$jail" unbanip "$ip" &>/dev/null || true
                 echo -e "  Unbanned ${CYAN}${ip}${NC} from ${BOLD}fail2ban:${jail}${NC}"
                 unbanned=1
             fi
@@ -111,11 +120,12 @@ _ban_unban() {
     if [[ "$cs" -eq 1 ]]; then
         # `cscli decisions delete` exits 0 whether it removed one decision or
         # none, so ask first — otherwise every unban claimed success.
-        local had
-        had=$(cscli decisions list --ip "$ip" -o json 2>/dev/null \
-            | jq '[.[]?.decisions[]?] | length' 2>/dev/null || echo 0)
+        local had flag="--ip"
+        [[ "$ip" == */* ]] && flag="--range"
+        had=$(cscli decisions list "$flag" "$ip" -o json 2>/dev/null \
+            | jq '[.[]?.decisions[]?] | length' 2>/dev/null) || had=0
         if [[ "${had:-0}" -gt 0 ]]; then
-            cscli decisions delete --ip "$ip" >/dev/null 2>&1 || true
+            cscli decisions delete "$flag" "$ip" >/dev/null 2>&1 || true
             echo -e "  Unbanned ${CYAN}${ip}${NC} from ${BOLD}crowdsec${NC} ${DIM}(${had} decision(s))${NC}"
             unbanned=1
         fi

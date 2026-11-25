@@ -129,6 +129,34 @@ deploy_command() {
     fi
 }
 
+# Commit ids on stdin, one per line → {"<id>": "<first line of its message>"}.
+# Read from the app's own clone (Deployer's mirror, or htdocs for a custom app
+# deployed with git pull) as the app user — root never runs git in a
+# repository an app can write — with one git process for all of them. A commit
+# the clone no longer has is left out; control characters become spaces and a
+# subject is cut at 200 characters, because whoever can push chooses it.
+_deploy_commit_subjects() {
+    local app="$1" home dir="" c
+    home=$(_deploy_app_home "$app")
+    local -a ids=()
+    while IFS= read -r c; do
+        [[ "$c" =~ ^[0-9a-f]{7,40}$ ]] && ids+=("$c")
+    done
+    (( ${#ids[@]} > 0 )) || { echo '{}'; return 0; }
+    for c in "${home}/.dep/repo" "${home}/htdocs/.git"; do
+        if app_as "$app" test -d "$c" 2>/dev/null; then dir="$c"; break; fi
+    done
+    [[ -n "$dir" ]] || { echo '{}'; return 0; }
+    app_as "$app" timeout 15 git --git-dir="$dir" log --no-walk=unsorted --ignore-missing \
+            --format='%H%x1f%s' "${ids[@]}" 2>/dev/null < /dev/null \
+        | jq -R -s 'split("\n") | map(select(length > 0) | split("\u001f")
+                    | {key: .[0], value: ((.[1:] | join(" ")) | gsub("[\u0000-\u001f\u007f]"; " ") | .[0:200])})
+                    | map(select(.key | test("^[0-9a-f]{40}$"))) | from_entries'
+}
+
+# Where an app's home is. A function, so tests can point it elsewhere.
+_deploy_app_home() { echo "/home/$1"; }
+
 # cipi deploy <app> --audit [--days=90] [--json] — this app's records from the
 # deploy audit ledger (lib/cipi-deploy-audit.sh).
 _deploy_audit_show() {
@@ -140,7 +168,16 @@ _deploy_audit_show() {
     fi
     since=$(date -u -d "-${days} days" '+%Y-%m-%dT%H:%M:%SZ')
     if [[ "${ARG_json:-}" == "true" ]]; then
-        jq -c --arg a "$app" --arg s "$since" 'select(.app == $a and .ts >= $s)' "$ledger" | jq -s .
+        # Each record gets the first line of its commit's message as `subject`,
+        # read now from the app's clone. It is not in the ledger and no hash
+        # covers it: the record says which commit went live, the clone says
+        # what that commit is called.
+        local records subjects
+        records=$(jq -c --arg a "$app" --arg s "$since" 'select(.app == $a and .ts >= $s)' "$ledger" | jq -s .)
+        subjects=$(jq -r '[.[].commit // "" | select(test("^[0-9a-f]{7,40}$"))] | unique | .[]' <<< "$records" 2>/dev/null \
+            | _deploy_commit_subjects "$app" 2>/dev/null || true)
+        jq -e 'type == "object"' <<< "${subjects:-}" >/dev/null 2>&1 || subjects='{}'
+        jq --argjson s "$subjects" 'map(if ((.commit // "") != "") and (($s[.commit] // "") != "") then . + {subject: $s[.commit]} else . end)' <<< "$records"
         return 0
     fi
     echo -e "\n${BOLD}Deploy audit — ${app}${NC} ${DIM}(last ${days} days, ${ledger})${NC}"

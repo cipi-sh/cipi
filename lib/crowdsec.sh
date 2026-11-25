@@ -55,7 +55,9 @@ _crowdsec_valid_net() {
     local n="${1:-}"
     [[ -z "$n" ]] && return 1
     [[ "$n" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/([0-9]|[12][0-9]|3[0-2]))?$ ]] && return 0
-    [[ "$n" == *:* ]] && return 0
+    # IPv6: hex digits, colons (and an IPv4 tail) only — the value is written
+    # into a YAML allowlist, and since 5.14.0 the panel can send it.
+    [[ "$n" == *:* && "$n" =~ ^[0-9A-Fa-f:.]+(/([0-9]{1,2}|1[01][0-9]|12[0-8]))?$ ]] && return 0
     return 1
 }
 
@@ -147,7 +149,8 @@ _crowdsec_check_real_ip() {
         error "Nginx appears to be behind a reverse proxy without real_ip."
         echo "  Without set_real_ip_from + real_ip_header (e.g. CF-Connecting-IP),"
         echo "  CrowdSec sees only the proxy. One scanner → the proxy is banned → the site is dark."
-        echo "  Fix nginx, run: cipi zt enable  (writes Cloudflare real_ip), or pass --force."
+        echo "  Behind Cloudflare: cipi nginx real-ip cloudflare  (or cipi zt enable, with a tunnel)."
+        echo "  Behind another proxy: set them in nginx, or pass --force."
         return 1
     fi
     return 0
@@ -594,7 +597,7 @@ _crowdsec_allow_silent() {
     _crowdsec_valid_net "$net" || return 1
     mkdir -p "$(dirname "$CROWDSEC_ALLOW_FILE")"
     touch "$CROWDSEC_ALLOW_FILE"
-    grep -qxF "$net" "$CROWDSEC_ALLOW_FILE" 2>/dev/null && return 0
+    grep -qxF -- "$net" "$CROWDSEC_ALLOW_FILE" 2>/dev/null && return 0
     echo "$net" >> "$CROWDSEC_ALLOW_FILE"
 }
 
@@ -984,9 +987,28 @@ _crowdsec_rescue_redeem() {
 
 _crowdsec_enable() {
     parse_args "$@"
+    # From the panel (sudo as www-data, 5.14.0): the RAM and real_ip checks
+    # hold — --force is for whoever stands at the server's shell — and there
+    # is no SSH session to allowlist: the panel passes its own address with
+    # --allow, so the server never bans the panel that manages it.
+    local from_panel=0
+    if [[ "${SUDO_USER:-}" == "www-data" ]]; then
+        from_panel=1
+        ARG_force=""
+    fi
+    if [[ -n "${ARG_allow:-}" ]] && ! _crowdsec_valid_net "${ARG_allow}"; then
+        error "Not an IP or CIDR: ${ARG_allow}"
+        exit 1
+    fi
     _crowdsec_check_ram || exit 1
     _crowdsec_check_real_ip || exit 1
-    _crowdsec_allow_this_ssh
+    if [[ "$from_panel" -eq 0 ]]; then
+        _crowdsec_allow_this_ssh
+    fi
+    if [[ -n "${ARG_allow:-}" ]]; then
+        _crowdsec_allow_silent "${ARG_allow}"
+        info "Allowed ${ARG_allow} (never banned by CrowdSec)"
+    fi
 
     local fresh=0 rescue_was=0 fwmode
     if _crowdsec_installed && _crowdsec_running; then
@@ -1144,11 +1166,12 @@ _crowdsec_allow() {
 _crowdsec_unallow() {
     local net="${1:-}"
     [[ -z "$net" ]] && { error "Usage: cipi crowdsec unallow <ip|cidr>"; exit 1; }
-    if [[ ! -s "$CROWDSEC_ALLOW_FILE" ]] || ! grep -qxF "$net" "$CROWDSEC_ALLOW_FILE" 2>/dev/null; then
+    _crowdsec_valid_net "$net" || { error "Not an IP or CIDR: ${net}"; exit 1; }
+    if [[ ! -s "$CROWDSEC_ALLOW_FILE" ]] || ! grep -qxF -- "$net" "$CROWDSEC_ALLOW_FILE" 2>/dev/null; then
         warn "${net} is not on the extra allowlist"
         return 0
     fi
-    grep -vxF "$net" "$CROWDSEC_ALLOW_FILE" > "${CROWDSEC_ALLOW_FILE}.tmp" || true
+    grep -vxF -- "$net" "$CROWDSEC_ALLOW_FILE" > "${CROWDSEC_ALLOW_FILE}.tmp" || true
     mv "${CROWDSEC_ALLOW_FILE}.tmp" "$CROWDSEC_ALLOW_FILE"
     _crowdsec_write_extra_whitelist
     _crowdsec_reload

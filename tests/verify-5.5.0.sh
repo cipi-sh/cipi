@@ -283,6 +283,7 @@ fw() {
         BOLD=""; CYAN=""; DIM=""; NC=""; YELLOW=""
         error() { echo "ERROR: $*" >&2; }; warn() { echo "WARN: $*"; }; success() { echo "OK: $*"; }
         log_action() { echo "$*" >> "${CIPI_TEST_F}/log"; }
+        parse_args() { local a; for a in "$@"; do [[ "$a" == "--json" ]] && ARG_json=true; done; return 0; }   # common.sh has it (5.14.0: attempts --json)
         source "$0"; firewall_command "$@"' "${LIB}/firewall.sh" "$@" 2>&1
 }
 out=$(fw attempts); rc=$?
@@ -331,11 +332,12 @@ grep -q 'Failed logins → ban *4' <<< "$out" && grep -q 'fail2ban is not runnin
 out=$(fw attempts 1)
 grep -q 'WARN: One mistyped password' <<< "$out" && pass "attempts 1 warns about locking yourself out" || fail "no warning for 1"
 out=$(fw nope); rc=$?
-[[ $rc -eq 1 ]] && grep -q 'allow deny list attempts' <<< "$out" && pass "unknown subcommand lists attempts" || fail "usage does not list attempts"
+# 5.14.0 added remove, block, unblock, status to the list.
+[[ $rc -eq 1 ]] && grep -qE 'allow deny .*list .*attempts' <<< "$out" && pass "unknown subcommand lists attempts" || fail "usage does not list attempts"
 
 grep -q '^maxretry = 3$' "${ROOT}/setup.sh" && grep -q 'FIREWALL_ATTEMPTS_DEFAULT=3' "${LIB}/firewall.sh" \
     && pass "default in firewall.sh matches setup.sh's jail.local (3)" || fail "default out of step with setup.sh"
-grep -q 'cipi firewall attempts' "${ROOT}/cipi" && grep -q 'sub="allow list attempts"' "${LIB}/completion.sh" \
+grep -q 'cipi firewall attempts' "${ROOT}/cipi" && grep -qE 'firewall\).*sub="[^"]*list [^"]*allow [^"]*attempts"' "${LIB}/completion.sh" \
     && pass "help and completion know attempts" || fail "help or completion omit attempts"
 grep -q 'cipi-attempts.local' "${LIB}/compliance.sh" && pass "compliance evidence includes the drop-in" || fail "compliance evidence omits the drop-in"
 

@@ -3,9 +3,9 @@
 # Cipi — Optional app packages (allowlisted)
 #
 # Tools a Laravel project may need on the host — image optimisers, ffmpeg,
-# pdftotext, OCR, office conversion — and the libraries some need to run
-# (the Chrome Puppeteer downloads for Browsershot), installed from Ubuntu's
-# own repositories, on request.
+# pdftotext, OCR, office conversion, security scanners — and the libraries
+# some need to run (the Chrome Puppeteer downloads for Browsershot), on
+# request: from Ubuntu's own repositories, or as pinned upstream releases.
 #
 # The allowlist is the whole point. `cipi package install <anything>` would be
 # a root apt shell with extra steps; the catalog below is a closed set that
@@ -13,7 +13,12 @@
 #
 #   * stateless: binaries or shared libraries and fonts — no daemon, no port,
 #     no credentials, no state that outlives the process,
-#   * from an Ubuntu repository, so Ubuntu ships the security updates,
+#   * from an Ubuntu repository, so Ubuntu ships the security updates — or,
+#     when Ubuntu does not ship it or ships it too old (the scanners Hackly
+#     runs), an upstream release pinned in this file by version and SHA-256
+#     (a git tag by its commit), so the server never resolves "latest" and a
+#     download that does not match is refused; a newer version is a newer
+#     Cipi release (5.14.0, see _pkg_upstream),
 #   * with a real Laravel or PHP package behind it, not "might be handy".
 #
 # Anything that fails one of those is not a package, it is a service: that is
@@ -58,14 +63,90 @@ pdftk|pdftk-java|pdftk|Fill forms, merge and split PDFs for mikehaertl/php-pdftk
 libreoffice|libreoffice-writer-nogui libreoffice-calc-nogui|soffice|Headless LibreOffice: DOCX, XLSX and ODT to PDF (soffice --convert-to)
 pandoc|pandoc|pandoc|Document conversion (Markdown, HTML, DOCX, ODT, EPUB) for ueberdosis/pandoc
 tesseract|tesseract-ocr tesseract-ocr-eng tesseract-ocr-ita tesseract-ocr-deu tesseract-ocr-fra tesseract-ocr-spa|tesseract|OCR for thiagoalessio/tesseract_ocr (English, Italian, German, French, Spanish)
+sec-recon|nmap bind9-dnsutils whois|nmap dig whois|Port scanning, DNS and WHOIS for security scanners (Hackly target scans)
+sec-gitleaks|gitleaks|gitleaks|Secrets in source code (Gitleaks) for security scanners (Hackly repository scans)
 EOF
 }
 
-_pkg_ids()       { _pkg_catalog | cut -d'|' -f1; }
+# ── Upstream entries (5.14.0) ─────────────────────────────────
+# What Ubuntu does not ship, or ships too old for the package that needs it:
+# the scanners of Hackly (github.com/andreapollastri/hackly). Ubuntu has no
+# nuclei, ZAP, WPScan, Trivy, Semgrep or Checkov, and its Nikto is 2.1.5
+# (2014), which writes no JSON.
+#
+# Each one is pinned here to one version, and the bytes of that version to
+# what _pkg_pins says: the SHA-256 of the download, or for a git tag the
+# commit it must point to. Python and Ruby tools are pinned by version and
+# installed into a directory of their own (their dependencies come from PyPI
+# and RubyGems as pip and gem resolve them). scripts/package-pins.sh
+# refreshes the pins from upstream for a release.
+#
+# Everything an entry installs lives in /opt/cipi/packages/<id>/<version>,
+# `current` points at the live version, and its commands are linked into
+# /usr/local/bin — a command that is already there and is not Cipi's is left
+# alone. A .deb is installed by apt. The apt packages an entry needs (a Java
+# runtime, Ruby, Perl modules) come and go with it; build tools are there
+# for the build only.
+#
+# id|method|version|apt dependencies|apt build-only|commands (name=path)|description
+_pkg_upstream() {
+    cat <<'EOF'
+sec-nuclei|zip|3.11.1|||nuclei=nuclei|Template-based vulnerability scanner (nuclei) for Hackly DAST, path discovery and pentests
+sec-zap|tar|2.17.0|openjdk-21-jre-headless/openjdk-17-jre-headless||zap.sh=zap.sh|OWASP ZAP, headless, with a Java runtime, for Hackly baseline and pentest scans
+sec-nikto|git|2.6.1|perl libnet-ssleay-perl libio-socket-ssl-perl libxml-writer-perl||nikto=cipi-bin/nikto|Nikto web server scanner, 2.6 with JSON reports (Ubuntu ships 2.1.5), for Hackly pentests
+sec-wpscan|gem|3.8.28|ruby libcurl4t64/libcurl4|ruby-dev build-essential zlib1g-dev|wpscan=cipi-bin/wpscan|WPScan WordPress scanner for Hackly pentests of WordPress targets
+sec-trivy|deb|0.76.2|||trivy=/usr/bin/trivy|Trivy dependency and misconfiguration scanner for Hackly repository scans (SCA)
+sec-semgrep|venv|1.185.0|python3-venv||semgrep=bin/semgrep|Semgrep static analysis for Hackly repository scans (SAST)
+sec-checkov|venv|3.3.26|python3-venv||checkov=bin/checkov|Checkov infrastructure-as-code scanner for Hackly repository scans
+EOF
+}
+
+# id|arch (amd64, arm64, or all)|URL|SHA-256 of the download (git: commit of the tag)
+#
+# Where they come from (scripts/package-pins.sh fetches and compares them):
+# sec-nuclei the release's nuclei_<v>_checksums.txt; sec-zap ZapVersions.xml
+# of zaproxy/zap-admin; sec-trivy the SHA256 lines of Aqua's apt index
+# (trivy-repo, deb/dists/generic); sec-nikto refs/tags/2.6.1^{}. The 5.14.0
+# pins were also checked against the downloaded files. An entry without a
+# hash cannot be installed, and tests/verify-5.14.0.sh fails until it has one.
+_pkg_pins() {
+    cat <<'EOF'
+sec-nuclei|amd64|https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_amd64.zip|ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6
+sec-nuclei|arm64|https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_arm64.zip|8044e3d9768ba0a744b2872c1a87e813006f013da97ca9f50f7661a4203bec07
+sec-zap|all|https://github.com/zaproxy/zaproxy/releases/download/v2.17.0/ZAP_2.17.0_Linux.tar.gz|efe799aaa3627db683b43f00c9c210aea0b75c00cc8f0a0f0434d12bb3ddde5a
+sec-nikto|all|https://github.com/sullo/nikto.git|d201dac320fc5187eac75e723dd07a716196ec5a
+sec-trivy|amd64|https://aquasecurity.github.io/trivy-repo/deb/pool/main/t/trivy/trivy_0.76.2_amd64.deb|7edaf64c8a2a0ae02137f776c6e56adf285fc36ec76b045274afdc462f20f092
+sec-trivy|arm64|https://aquasecurity.github.io/trivy-repo/deb/pool/main/t/trivy/trivy_0.76.2_arm64.deb|0c576cd78352a2084435d393ea31565a3637cc129dd052c422f1e72fd678ee76
+EOF
+}
+
+_pkg_ids()       { _pkg_catalog | cut -d'|' -f1; _pkg_upstream | cut -d'|' -f1; }
 _pkg_apt_for()   { _pkg_catalog | awk -F'|' -v i="$1" '$1 == i { print $2; exit }'; }
-_pkg_bins_for()  { _pkg_catalog | awk -F'|' -v i="$1" '$1 == i { print $3; exit }'; }
-_pkg_desc_for()  { _pkg_catalog | awk -F'|' -v i="$1" '$1 == i { print $4; exit }'; }
+_pkg_bins_for() {
+    if _pkg_is_up "$1"; then _pkg_up_cmds "$1" | paste -sd' ' -; return 0; fi
+    _pkg_catalog | awk -F'|' -v i="$1" '$1 == i { print $3; exit }'
+}
+_pkg_desc_for() {
+    _pkg_catalog | awk -F'|' -v i="$1" '$1 == i { print $4; exit }'
+    _pkg_up_field "$1" 7
+}
 _pkg_kind_for()  { [[ -n "$(_pkg_bins_for "$1")" ]] && echo tools || echo libraries; }
+
+_pkg_is_up()     { [[ -n "$1" ]] && _pkg_upstream | awk -F'|' -v i="$1" '$1 == i { f = 1 } END { exit !f }'; }
+_pkg_up_field()  { _pkg_upstream | awk -F'|' -v i="$1" -v f="$2" '$1 == i { print $f; exit }'; }
+_pkg_up_cmds()   { local c; for c in $(_pkg_up_field "$1" 6); do printf '%s\n' "${c%%=*}"; done; }
+_pkg_up_path()   { local c; for c in $(_pkg_up_field "$1" 6); do [[ "${c%%=*}" == "$2" ]] && { printf '%s' "${c#*=}"; return 0; }; done; return 1; }
+_pkg_up_root()   { printf '%s' "${CIPI_PKG_ROOT:-/opt/cipi/packages}"; }
+_pkg_up_bindir() { printf '%s' "${CIPI_PKG_BIN:-/usr/local/bin}"; }
+_pkg_up_dir()    { printf '%s/%s' "$(_pkg_up_root)" "$1"; }
+_pkg_arch()      { dpkg --print-architecture 2>/dev/null || echo amd64; }
+# URL|hash for this machine, or nothing.
+_pkg_up_pin()    { _pkg_pins | awk -F'|' -v i="$1" -v a="$2" '$1 == i && ($2 == a || $2 == "all") { print $3 "|" $4; exit }'; }
+# The version `current` points at, or nothing.
+_pkg_up_current() {
+    local l; l=$(readlink "$(_pkg_up_dir "$1")/current" 2>/dev/null) || return 1
+    [[ -n "$l" ]] && printf '%s' "${l##*/}"
+}
 
 package_command() {
     local sub="${1:-list}"; shift || true
@@ -129,11 +210,20 @@ _pkg_item_name() { _pkg_item_installed "$1" || printf '%s' "${1%%/*}"; }
 
 # Resolve a user-typed name to a catalog id. Accepts a group id, or any single
 # apt package inside a group (either alternative) — `webp` and
-# `image-optimizers` both work.
+# `image-optimizers` both work — or a command of an upstream entry: `nuclei`
+# and `zap.sh` are sec-nuclei and sec-zap.
 _pkg_resolve() {
     local want="$1" id p alt
     for id in $(_pkg_ids); do
         [[ "$want" == "$id" ]] && { printf '%s' "$id"; return 0; }
+    done
+    local cmds
+    for id in $(_pkg_upstream | cut -d'|' -f1); do
+        cmds=$(_pkg_up_cmds "$id")
+        if [[ "sec-${want}" == "$id" ]] || grep -qxF -- "$want" <<< "$cmds"; then
+            printf '%s' "$id"
+            return 0
+        fi
     done
     for id in $(_pkg_ids); do
         for p in $(_pkg_apt_for "$id"); do
@@ -155,8 +245,9 @@ _pkg_refuse() {
     echo -e "  Allowed: ${CYAN}$(_pkg_ids | tr '\n' ' ')${NC}"
     echo ""
     echo -e "  ${DIM}The list is closed on purpose: stateless binaries, libraries and fonts from${NC}"
-    echo -e "  ${DIM}Ubuntu's own repositories. Anything with a daemon, a port or its own state is${NC}"
-    echo -e "  ${DIM}a service — see 'cipi search', 'cipi db install'.${NC}"
+    echo -e "  ${DIM}Ubuntu's own repositories, or upstream releases pinned by version and checksum.${NC}"
+    echo -e "  ${DIM}Anything with a daemon, a port or its own state is a service — see${NC}"
+    echo -e "  ${DIM}'cipi search', 'cipi db install'.${NC}"
     if [[ "$want" == chromium* || "$want" == "google-chrome"* || "$want" == puppeteer* ]]; then
         echo ""
         warn "Chromium is not installable this way on Ubuntu."
@@ -204,8 +295,25 @@ _pkg_list() {
     parse_args "$@"
 
     if [[ "${ARG_json:-}" == "true" ]]; then
-        local items="[]" id state p names missing partial
+        local items="[]" id state p names missing partial ust cur
         for id in $(_pkg_ids); do
+            if _pkg_is_up "$id"; then
+                ust=$(_pkg_up_state "$id"); cur=$(_pkg_up_current "$id") || cur=""
+                names=""
+                for p in $(_pkg_up_field "$id" 4); do names="${names} $(_pkg_item_name "$p")"; done
+                items=$(echo "$items" | jq -c \
+                    --arg i "$id" --arg a "${names# }" --arg d "$(_pkg_desc_for "$id")" \
+                    --arg b "$(_pkg_bins_for "$id")" --arg m "$(_pkg_up_missing "$id" | paste -sd' ' -)" \
+                    --arg s "$ust" --arg v "$(_pkg_up_field "$id" 3)" --arg c "$cur" \
+                    '. + [{id:$i, packages:($a | split(" ") | map(select(. != ""))), description:$d, kind:"tools",
+                           binaries:($b | split(" ") | map(select(. != ""))),
+                           missing:($m | split(" ") | map(select(. != ""))),
+                           installed:($s == "installed"), partial:($s == "partial"),
+                           source:"upstream", version:$v,
+                           installed_version:(if $c == "" then null else $c end),
+                           outdated:($s == "outdated")}]')
+                continue
+            fi
             state=$(_pkg_state "$id")
             partial=false; _pkg_partial "$id" "$state" && partial=true
             names=""; missing=""
@@ -221,7 +329,8 @@ _pkg_list() {
                        binaries:($b | split(" ") | map(select(. != ""))),
                        missing:($m | split(" ") | map(select(. != ""))),
                        installed:(($have|tonumber) == ($total|tonumber)),
-                       partial:$partial}]')
+                       partial:$partial, source:"ubuntu", version:null,
+                       installed_version:null, outdated:false}]')
         done
         jq -n --argjson packages "$items" '{packages: $packages}'
         return 0
@@ -229,8 +338,21 @@ _pkg_list() {
 
     echo -e "\n${BOLD}Optional packages${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    local id state have total p names
+    local id state have total p names ust cur want
     for id in $(_pkg_ids); do
+        if _pkg_is_up "$id"; then
+            ust=$(_pkg_up_state "$id"); cur=$(_pkg_up_current "$id") || cur=""; want=$(_pkg_up_field "$id" 3)
+            case "$ust" in
+                installed) printf "  ${GREEN}●${NC} %-18s ${DIM}%s${NC}\n" "$id" "$(_pkg_desc_for "$id")" ;;
+                outdated)  printf "  ${YELLOW}◐${NC} %-18s ${YELLOW}%s${NC}\n" "$id" "${cur} installed, ${want} available — cipi package install ${id}" ;;
+                partial)   printf "  ${YELLOW}◐${NC} %-18s ${DIM}%s${NC}\n" "$id" "missing: $(_pkg_up_missing "$id" | paste -sd' ' -) — cipi package install ${id}" ;;
+                *)         printf "  ${DIM}○${NC} %-18s ${DIM}%s${NC}\n" "$id" "$(_pkg_desc_for "$id")" ;;
+            esac
+            names=""
+            for p in $(_pkg_up_field "$id" 4); do names="${names} $(_pkg_item_name "$p")"; done
+            printf "    ${DIM}%s${NC}\n" "upstream ${want}${names:+ ·${names}}" | fold -s -w 76 | sed '2,$s/^/    /'
+            continue
+        fi
         state=$(_pkg_state "$id"); have="${state%/*}"; total="${state#*/}"
         if [[ "$have" == "$total" ]]; then
             printf "  ${GREEN}●${NC} %-18s ${DIM}%s${NC}\n" "$id" "$(_pkg_desc_for "$id")"
@@ -252,13 +374,14 @@ _pkg_list() {
 }
 
 _pkg_check_disk() {
+    local need="${1:-$PKG_MIN_DISK_KB}"
     local free; free=$(df -Pk /var 2>/dev/null | awk 'NR==2 {print $4}')
-    [[ "${free:-0}" -ge "$PKG_MIN_DISK_KB" ]] && return 0
+    [[ "${free:-0}" -ge "$need" ]] && return 0
     if _pkg_forced; then
         warn "Only $(( ${free:-0} / 1024 ))MB free on /var — continuing because --force"
         return 0
     fi
-    error "Less than $((PKG_MIN_DISK_KB / 1024))MB free on /var (have $(( ${free:-0} / 1024 ))MB)"
+    error "Less than $((need / 1024))MB free on /var (have $(( ${free:-0} / 1024 ))MB)"
     echo "  Codec, office and imaging dependency trees are large. Free some space, or"
     echo "  pass --force at the server."
     return 1
@@ -327,7 +450,394 @@ _pkg_notes() {
         avif)
             echo -e "  ${DIM}spatie/image-optimizer picks avifenc up for .avif files.${NC}"
             ;;
+        sec-nuclei)
+            echo -e "  ${DIM}Templates are per user: Hackly keeps them in storage/app/nuclei-home and${NC}"
+            echo -e "  ${DIM}updates them itself (nuclei -update-templates as the app user otherwise).${NC}"
+            ;;
+        sec-zap)
+            echo -e "  ${YELLOW}ZAP takes about 1 GB of RAM while it scans:${NC} ${DIM}keep it off small servers${NC}"
+            echo -e "  ${DIM}that also serve production apps. Hackly starts it per scan; no service runs.${NC}"
+            ;;
+        sec-wpscan)
+            echo -e "  ${DIM}WordPress vulnerability data needs a WPScan API token (HACKLY_WPSCAN_API_TOKEN).${NC}"
+            ;;
+        sec-trivy)
+            echo -e "  ${DIM}Trivy downloads its vulnerability database on the first scan, into the cache${NC}"
+            echo -e "  ${DIM}of the user that runs it.${NC}"
+            ;;
     esac
+    [[ "$1" == sec-* ]] && echo -e "  ${DIM}Hackly finds it on PATH: php artisan hackly:check-binaries${NC}"
+    return 0
+}
+
+# ── Upstream entries: state, install, remove ──────────────────
+
+[[ -z "${PKG_UP_MIN_DISK_KB:-}" ]] && readonly PKG_UP_MIN_DISK_KB=2097152
+
+# The project name of a pip or gem entry: sec-semgrep → semgrep.
+_pkg_up_name()    { printf '%s' "${1#sec-}"; }
+# The package name of a .deb entry: its pinned file's, up to "_".
+_pkg_up_debname() {
+    local u; u=$(_pkg_pins | awk -F'|' -v i="$1" '$1 == i { print $3; exit }')
+    u="${u##*/}"; printf '%s' "${u%%_*}"
+}
+
+# A command of an entry works: its link resolves into the entry's current
+# version — or, for a .deb, apt has the package and the command is on PATH.
+_pkg_up_cmd_ok() {
+    local id="$1" c="$2" path link
+    path=$(_pkg_up_path "$id" "$c") || return 1
+    if [[ "$path" == /* ]]; then
+        _pkg_dpkg_installed "$(_pkg_up_debname "$id")" && command -v "$c" >/dev/null 2>&1
+        return
+    fi
+    link="$(_pkg_up_bindir)/${c}"
+    [[ -x "$link" ]] || return 1
+    [[ "$(readlink -f "$link")" == "$(readlink -f "$(_pkg_up_dir "$id")/current/${path}")" ]]
+}
+
+# installed | outdated (an older pinned version) | partial | absent
+_pkg_up_state() {
+    local id="$1" cur c
+    cur=$(_pkg_up_current "$id") || cur=""
+    [[ -z "$cur" ]] && { echo absent; return 0; }
+    [[ "$cur" != "$(_pkg_up_field "$id" 3)" ]] && { echo outdated; return 0; }
+    for c in $(_pkg_up_cmds "$id"); do
+        _pkg_up_cmd_ok "$id" "$c" || { echo partial; return 0; }
+    done
+    echo installed
+}
+
+# The commands that do not work: all of them when absent.
+_pkg_up_missing() {
+    local id="$1" c st; st=$(_pkg_up_state "$id")
+    [[ "$st" == installed || "$st" == outdated ]] && return 0
+    for c in $(_pkg_up_cmds "$id"); do
+        [[ "$st" == partial ]] && _pkg_up_cmd_ok "$id" "$c" && continue
+        printf '%s\n' "$c"
+    done
+}
+
+# Commands already on the server that are not Cipi's: installed by hand or by
+# another script — Hackly's own installers put nuclei and zap.sh in
+# /usr/local/bin. A .deb apt has without a Cipi record of it counts too.
+_pkg_up_foreign() {
+    local id="$1" c path link out=""
+    for c in $(_pkg_up_cmds "$id"); do
+        path=$(_pkg_up_path "$id" "$c")
+        if [[ "$path" == /* ]]; then
+            if _pkg_dpkg_installed "$(_pkg_up_debname "$id")" && [[ -z "$(_pkg_up_current "$id")" ]]; then
+                out="${out} $(_pkg_up_debname "$id") (apt)"
+            fi
+            continue
+        fi
+        link="$(_pkg_up_bindir)/${c}"
+        [[ -e "$link" || -L "$link" ]] || continue
+        [[ -L "$link" && "$(readlink "$link")" == "$(_pkg_up_dir "$id")/"* ]] && continue
+        out="${out} ${link}"
+    done
+    printf '%s' "${out# }"
+}
+
+# Download a pinned file and check it against its SHA-256. A mismatch is
+# refused and deleted: never "close enough", never retried from elsewhere.
+_pkg_up_download() {
+    local url="$1" out="$2" want="$3" got
+    step "Downloading ${url##*/}..."
+    if ! curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 --connect-timeout 20 -o "$out" "$url"; then
+        error "Download failed: ${url}"
+        return 1
+    fi
+    got=$(sha256sum "$out" | awk '{print $1}')
+    if [[ "$got" != "$want" ]]; then
+        rm -f "$out"
+        error "Checksum mismatch for ${url##*/} — refused"
+        echo "  pinned   ${want}"
+        echo "  received ${got}"
+        return 1
+    fi
+    info "SHA-256 matches the pin"
+}
+
+# The wrappers an entry needs in cipi-bin/: an interpreter, an environment.
+_pkg_up_wrappers() {
+    local id="$1" dest="$2" out="$3"
+    mkdir -p "${out}/cipi-bin"
+    case "$id" in
+        sec-nikto)
+            printf '#!/bin/sh\n# Cipi: Nikto %s (cipi package)\nexec /usr/bin/perl %s/src/program/nikto.pl "$@"\n' \
+                "${dest##*/}" "$dest" > "${out}/cipi-bin/nikto" ;;
+        sec-wpscan)
+            printf '#!/bin/sh\n# Cipi: WPScan %s (cipi package)\nexport GEM_HOME=%s GEM_PATH=%s\nexec %s/bin/wpscan "$@"\n' \
+                "${dest##*/}" "$dest" "$dest" "$dest" > "${out}/cipi-bin/wpscan" ;;
+    esac
+    chmod 755 "${out}/cipi-bin/"* 2>/dev/null || true
+}
+
+# Build tools installed for this install only: back to dependencies, and
+# whatever that leaves unneeded goes (not orphans that were there before).
+_pkg_up_drop_build() {
+    local build="$1" before="$2" plan
+    [[ -z "$build" ]] && return 0
+    # shellcheck disable=SC2086
+    apt-mark auto $build >/dev/null 2>&1 || true
+    plan=$(_pkg_minus "$(_pkg_orphans)" "$before")
+    [[ -z "$plan" ]] && return 0
+    step "Removing the build tools..."
+    # shellcheck disable=SC2086
+    _pkg_apt purge -y -qq $(tr '\n' ' ' <<< "$plan") || warn "apt-get purge reported a problem"
+}
+
+_pkg_up_install() {
+    local id="$1"
+    local method version deps build dir arch cur st pin="" url="" hash=""
+    method=$(_pkg_up_field "$id" 2); version=$(_pkg_up_field "$id" 3)
+    deps=$(_pkg_up_field "$id" 4); build=$(_pkg_up_field "$id" 5)
+    dir=$(_pkg_up_dir "$id"); arch=$(_pkg_arch)
+    cur=$(_pkg_up_current "$id") || cur=""
+    st=$(_pkg_up_state "$id")
+
+    if [[ "$st" == installed ]]; then
+        success "${id} ${version} is already installed"
+        return 0
+    fi
+
+    case "$method" in
+        zip|tar|deb|git)
+            pin=$(_pkg_up_pin "$id" "$arch"); url="${pin%%|*}"; hash="${pin#*|}"
+            if [[ -z "$pin" || -z "$hash" ]]; then
+                error "This Cipi release has no verified checksum for ${id} ${version} (${arch}) — nothing installed"
+                echo "  Every download is checked against a hash pinned in Cipi; without one it is not made."
+                echo "  A later release pins it: cipi self-update"
+                exit 1
+            fi
+            ;;
+    esac
+
+    local foreign; foreign=$(_pkg_up_foreign "$id")
+    if [[ -n "$foreign" ]] && ! _pkg_forced; then
+        error "Already on this server, and not installed by Cipi: ${foreign}"
+        echo "  Installed by hand or by another script (Hackly's own installers, say)."
+        echo "  Remove it, or replace it with --force at the server's shell."
+        exit 1
+    fi
+
+    _pkg_check_disk "$PKG_UP_MIN_DISK_KB" || exit 1
+
+    local p pick need_deps="" need_build="" unknown=""
+    if [[ -n "${deps}${build}" ]]; then
+        step "Refreshing the package index..."
+        _pkg_apt update -qq || warn "apt-get update reported a problem — continuing"
+    fi
+    for p in $deps; do
+        _pkg_item_installed "$p" >/dev/null && continue
+        if pick=$(_pkg_item_pick "$p"); then need_deps="${need_deps} ${pick}"; else unknown="${unknown} ${p}"; fi
+    done
+    for p in $build; do
+        _pkg_item_installed "$p" >/dev/null && continue
+        if pick=$(_pkg_item_pick "$p"); then need_build="${need_build} ${pick}"; else unknown="${unknown} ${p}"; fi
+    done
+    need_deps="${need_deps# }"; need_build="${need_build# }"
+    if [[ -n "$unknown" ]]; then
+        error "apt has no candidate for:${unknown//\// or } — nothing installed"
+        exit 1
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}${id} ${version}${NC} ${DIM}— upstream, into ${dir}/${version}${NC}"
+    case "$method" in
+        zip|tar|deb) echo -e "  ${DIM}download  ${url}${NC}"; echo -e "  ${DIM}sha-256   ${hash}${NC}" ;;
+        git)         echo -e "  ${DIM}git       ${url} @ ${version} (commit ${hash})${NC}" ;;
+        venv)        echo -e "  ${DIM}pip       $(_pkg_up_name "$id")==${version}, in a virtualenv of its own${NC}" ;;
+        gem)         echo -e "  ${DIM}gem       $(_pkg_up_name "$id") ${version}, in a gem home of its own${NC}" ;;
+    esac
+    [[ -n "$need_deps" ]] && echo -e "  ${DIM}apt       ${need_deps}${NC}"
+    [[ -n "$need_build" ]] && echo -e "  ${DIM}apt, for the build only: ${need_build}${NC}"
+    [[ -n "$cur" ]] && echo -e "  ${DIM}replaces  ${cur}${NC}"
+    echo ""
+
+    if [[ "${ARG_yes:-}" != "true" ]] && ! _pkg_forced; then
+        if [[ ! -t 0 ]]; then
+            error "Installing packages is never implicit: pass --yes"
+            exit 1
+        fi
+        confirm "Install ${id} ${version}?" || { info "Aborted"; return 0; }
+    fi
+
+    local before=""; before=$(_pkg_orphans)
+    if [[ -n "${need_deps}${need_build}" ]]; then
+        step "Installing ${need_deps}${need_build:+ ${need_build}}..."
+        # shellcheck disable=SC2086
+        if ! _pkg_apt install -y -qq $need_deps $need_build; then
+            error "apt-get install failed — nothing else was done"
+            exit 1
+        fi
+    fi
+
+    local dest="${dir}/${version}" work="${dir}/.work-${version}-$$" got
+    mkdir -p "$dir"; chmod 755 "$(_pkg_up_root)" "$dir"
+    rm -rf "$dest" "$work"; mkdir -p "$work"
+    _pkg_up_fail() {
+        rm -rf "$work" "$dest"
+        _pkg_up_drop_build "$need_build" "$before"
+        error "${id} ${version} was not installed"
+        [[ -n "$need_deps" ]] && echo "  apt installed ${need_deps} for it: cipi package remove ${id} takes them away"
+        exit 1
+    }
+
+    case "$method" in
+        zip)
+            _pkg_up_download "$url" "${work}/dl.zip" "$hash" || _pkg_up_fail
+            unzip -q -o "${work}/dl.zip" -d "${work}/out" || _pkg_up_fail
+            ;;
+        tar)
+            _pkg_up_download "$url" "${work}/dl.tar.gz" "$hash" || _pkg_up_fail
+            mkdir -p "${work}/out"
+            tar -xzf "${work}/dl.tar.gz" -C "${work}/out" --strip-components=1 --no-same-owner || _pkg_up_fail
+            ;;
+        git)
+            step "Cloning ${url} at ${version}..."
+            git -c advice.detachedHead=false clone -q --depth 1 --branch "$version" "$url" "${work}/out/src" || _pkg_up_fail
+            got=$(git -C "${work}/out/src" rev-parse HEAD 2>/dev/null)
+            if [[ "$got" != "$hash" ]]; then
+                error "${version} of ${url} is commit ${got:-?}, not the pinned ${hash} — refused"
+                _pkg_up_fail
+            fi
+            rm -rf "${work}/out/src/.git"
+            _pkg_up_wrappers "$id" "$dest" "${work}/out"
+            ;;
+        deb)
+            _pkg_up_download "$url" "${work}/${url##*/}" "$hash" || _pkg_up_fail
+            step "Installing ${url##*/}..."
+            _pkg_apt install -y -qq "${work}/${url##*/}" || _pkg_up_fail
+            mkdir -p "${work}/out"
+            ;;
+        venv)
+            # A virtualenv is not relocatable: it is built where it stays.
+            step "Installing $(_pkg_up_name "$id") ${version} from PyPI..."
+            "${PKG_PYTHON:-python3}" -m venv "$dest" || _pkg_up_fail
+            "${dest}/bin/pip" install -q --no-cache-dir --disable-pip-version-check "$(_pkg_up_name "$id")==${version}" || _pkg_up_fail
+            ;;
+        gem)
+            step "Installing $(_pkg_up_name "$id") ${version} from RubyGems..."
+            mkdir -p "$dest"
+            gem install --no-document --install-dir "$dest" --bindir "${dest}/bin" "$(_pkg_up_name "$id")" -v "$version" || _pkg_up_fail
+            _pkg_up_wrappers "$id" "$dest" "$dest"
+            ;;
+    esac
+    [[ -d "${work}/out" ]] && { mv -T "${work}/out" "$dest" || _pkg_up_fail; }
+    rm -rf "$work"
+
+    # What apt installed for it, kept with it: the dependencies of the version
+    # it replaces carry over.
+    local added="$need_deps" prev
+    if [[ -n "$cur" && -f "${dir}/${cur}/.cipi-package" ]]; then
+        prev=$(sed -n 's/^apt=//p' "${dir}/${cur}/.cipi-package")
+        added=$(printf '%s %s' "$prev" "$added" | tr ' ' '\n' | sed '/^$/d' | sort -u | paste -sd' ' -)
+    fi
+    {
+        echo "id=${id}"; echo "version=${version}"; echo "method=${method}"
+        echo "pin=${hash:-${version}}"; echo "apt=${added}"; echo "installed=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    } > "${dest}/.cipi-package"
+    chmod -R a+rX "$dest"
+
+    ln -sfn "$version" "${dir}/.current-$$" && mv -Tf "${dir}/.current-$$" "${dir}/current"
+    local c path
+    for c in $(_pkg_up_cmds "$id"); do
+        path=$(_pkg_up_path "$id" "$c")
+        [[ "$path" == /* ]] && continue
+        mkdir -p "$(_pkg_up_bindir)"
+        ln -sfn "${dir}/current/${path}" "$(_pkg_up_bindir)/${c}"
+    done
+    local d
+    for d in "$dir"/*; do
+        [[ -L "$d" || "${d##*/}" == "$version" ]] && continue
+        rm -rf "$d"
+    done
+
+    _pkg_up_drop_build "$need_build" "$before"
+
+    local missing=""
+    for c in $(_pkg_up_cmds "$id"); do
+        _pkg_up_cmd_ok "$id" "$c" || missing="${missing} ${c}"
+    done
+
+    log_action "PACKAGE: installed ${id} ${version} (upstream ${method}${hash:+, ${hash}})"
+    cipi_notify \
+        "Cipi: package installed on $(hostname)" \
+        "An optional package was installed.\n\nServer: $(hostname)\nEntry: ${id} ${version} (upstream)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        package_install
+
+    echo ""
+    if [[ -n "$missing" ]]; then
+        warn "Installed, but these are missing:${missing}"
+    else
+        success "${id} ${version} installed — $(_pkg_bins_for "$id" | tr ' ' ',') available"
+    fi
+    echo ""
+    _pkg_notes "$id"
+    echo ""
+}
+
+_pkg_up_remove() {
+    local id="$1" dir cur method added="" deb="" before plan c link
+    dir=$(_pkg_up_dir "$id"); method=$(_pkg_up_field "$id" 2)
+    cur=$(_pkg_up_current "$id") || cur=""
+    if [[ -z "$cur" && ! -d "$dir" ]]; then
+        info "${id} is not installed"
+        if [[ -n "$(_pkg_up_foreign "$id")" ]]; then
+            echo -e "  ${DIM}What is here was not installed by Cipi: $(_pkg_up_foreign "$id")${NC}"
+        fi
+        return 0
+    fi
+    [[ -n "$cur" ]] && added=$(sed -n 's/^apt=//p' "${dir}/${cur}/.cipi-package" 2>/dev/null)
+    if [[ "$method" == deb ]] && _pkg_dpkg_installed "$(_pkg_up_debname "$id")"; then
+        deb=$(_pkg_up_debname "$id")
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Removes ${id}${cur:+ ${cur}}:${NC} ${DIM}${dir}, $(_pkg_bins_for "$id")${deb:+, the ${deb} package}${NC}"
+    [[ -n "$added" ]] && echo -e "  ${DIM}and what apt installed for it (${added}) unless something else needs it${NC}"
+    echo ""
+    if [[ "${ARG_yes:-}" != "true" ]] && ! _pkg_forced; then
+        if [[ ! -t 0 ]]; then error "Removing packages is never implicit: pass --yes"; exit 1; fi
+        confirm "Remove ${id}?" || { info "Aborted"; return 0; }
+    fi
+
+    before=$(_pkg_orphans)
+    for c in $(_pkg_up_cmds "$id"); do
+        link="$(_pkg_up_bindir)/${c}"
+        [[ -L "$link" && "$(readlink "$link")" == "${dir}/"* ]] && rm -f "$link"
+    done
+    if [[ -n "$deb" ]]; then
+        step "Purging ${deb}..."
+        _pkg_apt purge -y -qq "$deb" || { error "apt-get purge failed for ${deb}"; exit 1; }
+    fi
+    rm -rf "$dir"
+
+    local p still=""
+    for p in $added; do _pkg_dpkg_installed "$p" && still="${still} ${p}"; done
+    if [[ -n "$still" ]]; then
+        # shellcheck disable=SC2086
+        apt-mark auto $still >/dev/null 2>&1 || true
+        plan=$(_pkg_minus "$(_pkg_orphans)" "$before")
+        if [[ -n "$plan" ]]; then
+            step "Purging what only ${id} needed: $(tr '\n' ' ' <<< "$plan" | sed 's/ $//')..."
+            # shellcheck disable=SC2086
+            _pkg_apt purge -y -qq $(tr '\n' ' ' <<< "$plan") || warn "apt-get purge reported a problem"
+        fi
+    fi
+
+    log_action "PACKAGE: removed ${id}${cur:+ ${cur}} (upstream)"
+    cipi_notify \
+        "Cipi: package removed from $(hostname)" \
+        "An optional package was removed.\n\nServer: $(hostname)\nEntry: ${id}${cur:+ ${cur}} (upstream)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        package_remove
+
+    echo ""
+    success "${id} removed"
+    echo -e "  ${DIM}Any app still using it will now fail — check before deploying.${NC}"
+    echo ""
 }
 
 _pkg_install() {
@@ -336,6 +846,7 @@ _pkg_install() {
     parse_args "$@"
 
     local id; id=$(_pkg_resolve "$want") || { _pkg_refuse "$want"; exit 1; }
+    if _pkg_is_up "$id"; then _pkg_up_install "$id"; return; fi
     local items; items=$(_pkg_apt_for "$id")
 
     local state; state=$(_pkg_state "$id")
@@ -432,6 +943,7 @@ _pkg_remove() {
     parse_args "$@"
 
     local id; id=$(_pkg_resolve "$want") || { _pkg_refuse "$want"; exit 1; }
+    if _pkg_is_up "$id"; then _pkg_up_remove "$id"; return; fi
     local kind; kind=$(_pkg_kind_for "$id")
 
     # Only what is actually there: naming an absent package makes apt-get
@@ -450,6 +962,18 @@ _pkg_remove() {
     before=$(_pkg_orphans)
 
     if [[ "$kind" == "tools" ]]; then
+        # A tool another package pulled in (dig, with ubuntu-standard) is that
+        # package's: only what was installed on purpose goes (5.14.0).
+        local own=""
+        for p in $present; do
+            [[ -n "$(apt-mark showmanual "$p" 2>/dev/null)" ]] && own="${own} ${p}"
+        done
+        present="${own# }"
+        if [[ -z "$present" ]]; then
+            info "${id} is not installed"
+            echo -e "  ${DIM}The packages of it that are here were installed by other packages.${NC}"
+            return 0
+        fi
         # shellcheck disable=SC2086
         sim=$(_pkg_apt purge -s $present 2>/dev/null) || { error "apt cannot plan the removal of: ${present}"; exit 1; }
         removed=$(_pkg_sim_removed "$sim")

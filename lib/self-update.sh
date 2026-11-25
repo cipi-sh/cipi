@@ -285,5 +285,23 @@ selfupdate_command() {
             "Cipi updated itself.\n\nServer: $(hostname)\nVersion: v${old_ver} → v${nv}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nChangelog: https://github.com/cipi-sh/cipi/blob/master/CHANGELOG.md\n\nTurn this off with: cipi notifications disable self_update" \
             self_update
     fi
+
+    # Upstream package entries (sec-nuclei, sec-zap…) whose pin moved with this
+    # release: said here, updated by the operator — downloading hundreds of MB
+    # is not a side effect of an update that may run from cron (5.14.0).
+    if [[ -d /opt/cipi/packages && -f /opt/cipi/lib/package.sh ]]; then
+        local pkg_outdated
+        pkg_outdated=$( (
+            # shellcheck source=/dev/null
+            source /opt/cipi/lib/package.sh
+            for id in $(_pkg_upstream | cut -d'|' -f1); do
+                [[ "$(_pkg_up_state "$id")" == outdated ]] && echo "$id"
+            done
+        ) 2>/dev/null | paste -sd' ' - || true)
+        if [[ -n "$pkg_outdated" ]]; then
+            warn "Optional packages with a newer pinned version: ${pkg_outdated}"
+            echo "  Update each with: cipi package install <id>  (or from the panel)"
+        fi
+    fi
     success "Updated to v${nv}"
 }

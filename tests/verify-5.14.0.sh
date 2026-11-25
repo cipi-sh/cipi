@@ -361,6 +361,8 @@ def binsync():
             f = K + "/bin/" + b
             if p in inst: open(f, "w").write("#!/bin/sh\n"); os.chmod(f, 0o755)
             elif os.path.exists(f): os.remove(f)
+if me == "dpkg":
+    print(st.get("arch", "amd64")); sys.exit(0)
 if me == "dpkg-query":
     print("installed" if a[-1] in inst else "not-installed", end=""); sys.exit(0 if a[-1] in inst else 1)
 if me == "apt-cache":
@@ -374,6 +376,10 @@ if me == "apt-mark":
         if p in inst: inst[p] = a[0]
     save(); sys.exit(0)
 opts = [x for x in a if x.startswith("-")]; words = [x for x in a if not x.startswith("-") and not x.startswith("DPkg::")]
+# A local .deb ("apt-get install ./trivy_0.76.2_amd64.deb") is its package, by name.
+words = [os.path.basename(w).split("_")[0] if w.endswith(".deb") else w for w in words]
+for w in words:
+    if w not in avail and w in st.get("debs", []): avail.append(w)
 sim = "-s" in opts; cmd, names = words[0], words[1:]
 if cmd == "update": sys.exit(0)
 if cmd == "install":
@@ -403,7 +409,7 @@ if cmd == "autoremove":
     save(); binsync(); sys.exit(0)
 sys.exit(0)
 STUB
-chmod +x "${K}/aptsim"; for c in apt-get apt-cache dpkg-query apt-mark; do ln -sf ../aptsim "${K}/bin/${c}"; done
+chmod +x "${K}/aptsim"; for c in apt-get apt-cache dpkg-query apt-mark dpkg; do ln -sf ../aptsim "${K}/bin/${c}"; done
 printf '#!/bin/bash\necho "Filesystem 1024-blocks Used Available Capacity Mounted"\necho "/dev/sda1 50000000 1000 ${STUB_FREE_KB:-9000000} 1%% /var"\n' > "${K}/bin/df"; chmod +x "${K}/bin/df"
 # A server: php-imagick needs libcairo2 (installed as its dependency), an old
 # kernel waits for autoremove, and "reports" (an app tool of the admin) needs ffmpeg.
@@ -416,27 +422,37 @@ cat = ["libnss3","libnspr4","libdrm2","libxkbcommon0","libxcomposite1","libxdama
        "libpango-1.0-0","libcairo2","fonts-liberation","fonts-noto-color-emoji","fonts-noto-cjk","pdftk-java","default-jre-headless",
        "libreoffice-writer-nogui","libreoffice-calc-nogui","libreoffice-core-nogui","pandoc","libavif-bin","ffmpeg","libavcodec",
        "tesseract-ocr","tesseract-ocr-eng","tesseract-ocr-ita","tesseract-ocr-deu","tesseract-ocr-fra","tesseract-ocr-spa",
-       "jpegoptim","optipng","pngquant","gifsicle","webp","imagemagick","poppler-utils"]
+       "jpegoptim","optipng","pngquant","gifsicle","webp","imagemagick","poppler-utils",
+       "nmap","bind9-dnsutils","whois","gitleaks","openjdk-21-jre-headless","java-common","perl","libnet-ssleay-perl",
+       "libio-socket-ssl-perl","libxml-writer-perl","ruby","ruby-dev","build-essential","gcc","zlib1g-dev","python3-venv"]
 # 24.04 names the time_t-renamed libraries with t64; a later release may not.
-t64 = ["libatk1.0-0","libatk-bridge2.0-0","libcups2","libasound2"]
+t64 = ["libatk1.0-0","libatk-bridge2.0-0","libcups2","libasound2","libcurl4"]
 avail = cat + ([p + "t64" for p in t64] if rel == "noble" else t64)
-st = {"installed": {"php8.5-imagick": "manual", "libcairo2": "auto", "linux-image-old": "auto", "reports": "manual", "ffmpeg": "manual", "libavcodec": "auto"},
+st = {"installed": {"php8.5-imagick": "manual", "libcairo2": "auto", "linux-image-old": "auto", "reports": "manual", "ffmpeg": "manual", "libavcodec": "auto",
+                    "ubuntu-standard": "manual", "bind9-dnsutils": "auto", "perl": "auto"},
+      "debs": ["trivy"],
       "deps": {"php8.5-imagick": ["libcairo2"], "pdftk-java": ["default-jre-headless"], "libreoffice-writer-nogui": ["libreoffice-core-nogui"],
-               "libreoffice-calc-nogui": ["libreoffice-core-nogui"], "ffmpeg": ["libavcodec"], "reports": ["ffmpeg"], "tesseract-ocr": ["tesseract-ocr-eng"]},
+               "libreoffice-calc-nogui": ["libreoffice-core-nogui"], "ffmpeg": ["libavcodec"], "reports": ["ffmpeg"], "tesseract-ocr": ["tesseract-ocr-eng"],
+               "ubuntu-standard": ["bind9-dnsutils", "perl"], "openjdk-21-jre-headless": ["java-common"], "build-essential": ["gcc"], "ruby-dev": ["ruby"]},
       "avail": avail,
       "bins": {"pandoc": ["pandoc"], "pdftk-java": ["pdftk"], "libreoffice-core-nogui": ["soffice"], "libavif-bin": ["avifenc"],
-               "tesseract-ocr": ["tesseract"], "ffmpeg": ["ffmpeg", "ffprobe"]}}
+               "tesseract-ocr": ["tesseract"], "ffmpeg": ["ffmpeg", "ffprobe"], "nmap": ["nmap"], "bind9-dnsutils": ["dig"],
+               "whois": ["whois"], "gitleaks": ["gitleaks"], "trivy": ["trivy"]}}
 json.dump(st, open(K + "/state.json", "w"))
 PY
-    : > "${K}/calls"; rm -f "${K}/bin/pandoc" "${K}/bin/pdftk" "${K}/bin/soffice" "${K}/bin/avifenc" "${K}/bin/tesseract"
+    : > "${K}/calls"; rm -f "${K}/bin/pandoc" "${K}/bin/pdftk" "${K}/bin/soffice" "${K}/bin/avifenc" "${K}/bin/tesseract" "${K}/bin/nmap" "${K}/bin/whois" "${K}/bin/gitleaks" "${K}/bin/trivy"
+    printf '#!/bin/sh\n' > "${K}/bin/dig"; chmod +x "${K}/bin/dig"
+    rm -rf "${K}/opt" "${K}/localbin"; mkdir -p "${K}/localbin"
     printf '#!/bin/sh\n' > "${K}/bin/ffmpeg"; printf '#!/bin/sh\n' > "${K}/bin/ffprobe"; chmod +x "${K}/bin/ffmpeg" "${K}/bin/ffprobe"
 }
 cat > "${K}/run.sh" <<RUN
 set -euo pipefail
 RED=""; GREEN=""; YELLOW=""; CYAN=""; DIM=""; NC=""; BOLD=""
 export CIPI_LIB="${K}/lib" CIPI_CONFIG="${K}/cfg" CIPI_LOG="${K}/log" PKG_SIM="${K}"
-export PATH="${K}/bin:\${PATH}"
+export CIPI_PKG_ROOT="${K}/opt" CIPI_PKG_BIN="${K}/localbin" PKG_PYTHON="${K}/pystub"
+export PATH="${K}/bin:${K}/localbin:\${PATH}"
 source "${K}/lib/common.sh"; source "${K}/lib/package.sh"
+[[ -f "${K}/pins.sh" ]] && source "${K}/pins.sh"
 cipi_notify() { echo "notify \$3" >> "${K}/calls"; }
 show_help() { :; }
 "\$@"
@@ -445,13 +461,13 @@ pk()  { bash "${K}/run.sh" package_command "$@" </dev/null 2>&1; }
 inst() { python3 -c 'import json,sys; s=json.load(open(sys.argv[1]+"/state.json")); print(" ".join(sorted(s["installed"])))' "$K"; }
 mark() { python3 -c 'import json,sys; s=json.load(open(sys.argv[1]+"/state.json")); print(s["installed"].get(sys.argv[2],"absent"))' "$K" "$1"; }
 
-eval "$(sed -n '/^_pkg_catalog()/,/^}/p' "${LIB}/package.sh")"
-eval "$(grep -E '^_pkg_(ids|apt_for|bins_for|desc_for|kind_for)\(\)' "${LIB}/package.sh")"
+source "${LIB}/package.sh"
 ids=" $(_pkg_ids | tr '\n' ' ')"
-for want in image-optimizers avif ffmpeg imagemagick poppler-utils browsershot fonts-cjk pdftk libreoffice pandoc tesseract; do
+for want in image-optimizers avif ffmpeg imagemagick poppler-utils browsershot fonts-cjk pdftk libreoffice pandoc tesseract \
+            sec-recon sec-gitleaks sec-nuclei sec-zap sec-nikto sec-wpscan sec-trivy sec-semgrep sec-checkov; do
     [[ "$ids" == *" ${want} "* ]] || fail "catalog misses ${want}"
 done
-[[ "$(_pkg_ids | wc -l | tr -d ' ')" == 11 ]] && pass "catalog: 11 entries (${ids# })" || fail "catalog size: ${ids}"
+[[ "$(_pkg_ids | wc -l | tr -d ' ')" == 20 ]] && pass "catalog: 20 entries, 7 of them upstream (${ids# })" || fail "catalog size: ${ids}"
 [[ "$(_pkg_kind_for browsershot)" == libraries && "$(_pkg_kind_for fonts-cjk)" == libraries && "$(_pkg_kind_for pdftk)" == tools ]] \
     && pass "browsershot and fonts-cjk are libraries (nothing on PATH), the rest tools" || fail "kinds"
 bad=""; while IFS='|' read -r id apt bins desc; do
@@ -468,7 +484,9 @@ o=$(pk install nginx); [[ $? -ne 0 && "$o" == *"not in the Cipi package allowlis
 
 pkg_world noble
 j=$(pk list --json)
-jq -e '.packages | length == 11' <<< "$j" >/dev/null && pass "list --json: 11 entries" || fail "list json: ${j}"
+jq -e '.packages | length == 20' <<< "$j" >/dev/null && pass "list --json: 20 entries" || fail "list json: ${j}"
+jq -e '[.packages[] | select(.source == "ubuntu")] | length == 13' <<< "$j" >/dev/null && jq -e '.packages[] | select(.id == "sec-zap") | .source == "upstream" and .version == "2.17.0" and .installed_version == null and .outdated == false and .binaries == ["zap.sh"] and .missing == ["zap.sh"]' <<< "$j" >/dev/null \
+    && pass "…source, version, installed_version, outdated: 13 from Ubuntu, sec-zap upstream 2.17.0" || fail "list json upstream: $(jq -c '.packages[] | select(.id=="sec-zap")' <<< "$j")"
 jq -e '.packages[] | select(.id == "browsershot") | .kind == "libraries" and .binaries == [] and .installed == false and .partial == false and (.missing | index("libnss3")) and (.missing | index("libcairo2") | not)' <<< "$j" >/dev/null \
     && pass "…browsershot: libraries, not partial (libcairo2 belongs to php-imagick), missing listed" || fail "browsershot json: $(jq -c '.packages[] | select(.id=="browsershot")' <<< "$j")"
 jq -e '.packages[] | select(.id == "ffmpeg") | .installed == true and .binaries == ["ffmpeg","ffprobe"] and .kind == "tools"' <<< "$j" >/dev/null \
@@ -528,6 +546,161 @@ pk install pandoc --yes >/dev/null; o=$(pk remove pandoc --yes --autoremove); [[
 pkg_world noble; pk install fonts-cjk --yes >/dev/null
 o=$(pk remove fonts-cjk); [[ $? -ne 0 && "$(mark fonts-noto-cjk)" == manual ]] \
     && pass "remove without --yes and no terminal: refused, the library marked manual again" || fail "remove implicit: ${o} / $(mark fonts-noto-cjk)"
+
+# ── cipi package: the sec entries, upstream ones pinned ───────
+# The pins of the release itself: every download has its hash, every git tag
+# its commit. An entry without one cannot be installed — this fails until
+# scripts/package-pins.sh has filled it, so a release cannot ship without.
+nopin=""; badpin=""
+while IFS='|' read -r id method ver _deps _build _cmds _desc; do
+    case "$method" in
+        zip|tar|deb|git)
+            for arch in amd64 arm64; do
+                pin=$(_pkg_up_pin "$id" "$arch"); url="${pin%%|*}"; h="${pin#*|}"
+                if [[ -z "$pin" || -z "$h" ]]; then nopin="${nopin} ${id}/${arch}"; continue; fi
+                if [[ "$method" == git ]]; then [[ "$h" =~ ^[0-9a-f]{40}$ ]] || badpin="${badpin} ${id}"
+                else [[ "$h" =~ ^[0-9a-f]{64}$ && "$url" == https://*"${ver}"* ]] || badpin="${badpin} ${id}/${arch}"; fi
+            done ;;
+        venv|gem) [[ "$ver" =~ ^[0-9]+(\.[0-9]+)+$ ]] || badpin="${badpin} ${id}" ;;
+        *) badpin="${badpin} ${id}(method ${method})" ;;
+    esac
+done <<< "$(_pkg_upstream)"
+[[ -z "$badpin" ]] && pass "upstream pins are well-formed: https URLs of the pinned version, SHA-256, git commits" || fail "pins:${badpin}"
+[[ -z "$nopin" ]] && pass "every upstream download has its pin" \
+    || fail "no pin for:${nopin} — run scripts/package-pins.sh (needs network) and commit the result"
+[[ "$(_pkg_up_pin sec-zap amd64)" == *"|efe799aaa3627db683b43f00c9c210aea0b75c00cc8f0a0f0434d12bb3ddde5a" \
+   && "$(_pkg_up_pin sec-nikto arm64)" == *"|d201dac320fc5187eac75e723dd07a716196ec5a" \
+   && "$(_pkg_up_pin sec-trivy arm64)" == *"/trivy_0.76.2_arm64.deb|0c576cd78352a2084435d393ea31565a3637cc129dd052c422f1e72fd678ee76" ]] \
+    && pass "…ZAP 2.17.0 (ZapVersions.xml), Nikto 2.6.1 (tag commit), Trivy 0.76.2 (Aqua's apt index)" || fail "known pins"
+
+# The test's own world: a mirror for curl, git, gem and pip that make what
+# the real ones would, and pins for the mirror's files.
+M="${K}/mirror"; mkdir -p "$M/zap/ZAP_2.17.0"
+printf '#!/bin/sh\necho nuclei\n' > "$M/nuclei"; chmod +x "$M/nuclei"; (cd "$M" && zip -q nuclei_3.11.1_linux_amd64.zip nuclei)
+printf '#!/bin/sh\necho zap\n' > "$M/zap/ZAP_2.17.0/zap.sh"; chmod +x "$M/zap/ZAP_2.17.0/zap.sh"; tar -czf "$M/ZAP_2.17.0_Linux.tar.gz" -C "$M/zap" ZAP_2.17.0
+printf 'not really a deb\n' > "$M/trivy_0.76.2_amd64.deb"
+sha() { sha256sum "$1" | cut -c1-64; }
+write_pins() {
+    cat > "${K}/pins.sh" <<PINS
+_pkg_pins() {
+    cat <<'EOF'
+sec-nuclei|amd64|https://mirror.test/nuclei_3.11.1_linux_amd64.zip|${1:-$(sha "$M/nuclei_3.11.1_linux_amd64.zip")}
+sec-zap|all|https://mirror.test/ZAP_2.17.0_Linux.tar.gz|$(sha "$M/ZAP_2.17.0_Linux.tar.gz")
+sec-nikto|all|https://mirror.test/nikto.git|d201dac320fc5187eac75e723dd07a716196ec5a
+sec-trivy|amd64|https://mirror.test/trivy_0.76.2_amd64.deb|$(sha "$M/trivy_0.76.2_amd64.deb")
+EOF
+}
+PINS
+}
+write_pins
+cat > "${K}/bin/curl" <<'STUB'
+#!/bin/bash
+out=""; url=""
+while [[ $# -gt 0 ]]; do case "$1" in -o) out="$2"; shift 2 ;; --proto|--retry|--retry-delay|--connect-timeout) shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac; done
+echo "curl ${url}" >> "${PKG_SIM}/calls"
+[[ "$url" == https://* && -f "${PKG_SIM}/mirror/${url##*/}" ]] || exit 22
+cp "${PKG_SIM}/mirror/${url##*/}" "$out"
+STUB
+cat > "${K}/bin/git" <<'STUB'
+#!/bin/bash
+if [[ "$1" == "-C" ]]; then cat "${PKG_SIM}/git-head"; exit 0; fi
+dest="${*: -1}"; mkdir -p "${dest}/program" "${dest}/.git"; printf 'print "nikto\\n";\n' > "${dest}/program/nikto.pl"
+echo "git $*" >> "${PKG_SIM}/calls"
+STUB
+cat > "${K}/bin/gem" <<'STUB'
+#!/bin/bash
+echo "gem $*" >> "${PKG_SIM}/calls"
+dir=""; bindir=""; while [[ $# -gt 0 ]]; do case "$1" in --install-dir) dir="$2"; shift 2 ;; --bindir) bindir="$2"; shift 2 ;; *) shift ;; esac; done
+mkdir -p "$bindir"; printf '#!/bin/sh\necho wpscan\n' > "${bindir}/wpscan"; chmod +x "${bindir}/wpscan"
+STUB
+cat > "${K}/pystub" <<'STUB'
+#!/bin/bash
+# python3 -m venv DIR: a pip that "installs" NAME==VERSION as DIR/bin/NAME
+d="${*: -1}"; mkdir -p "${d}/bin"
+cat > "${d}/bin/pip" <<PIP
+#!/bin/bash
+echo "pip \$*" >> "${PKG_SIM}/calls"
+n="\${*: -1}"; printf '#!/bin/sh\n' > "${d}/bin/\${n%%==*}"; chmod +x "${d}/bin/\${n%%==*}"
+PIP
+chmod +x "${d}/bin/pip"
+STUB
+chmod +x "${K}/bin/curl" "${K}/bin/git" "${K}/bin/gem" "${K}/pystub"
+echo d201dac320fc5187eac75e723dd07a716196ec5a > "${K}/git-head"
+upj() { pk list --json | jq -c --arg i "$1" '.packages[] | select(.id == $i)'; }
+
+pkg_world noble
+o=$(pk install nmap --yes); [[ $? -eq 0 && "$(mark nmap)" == manual && "$(mark whois)" == manual && "$(mark bind9-dnsutils)" == auto ]] \
+    && pass "sec-recon (asked as nmap): nmap and whois from Ubuntu; dig, already there for ubuntu-standard, stays its" || fail "sec-recon: ${o}"
+o=$(pk remove sec-recon --yes); [[ $? -eq 0 && "$(mark nmap)" == absent && "$(mark whois)" == absent && "$(mark bind9-dnsutils)" == auto ]] \
+    && pass "…removed: what it installed goes, dig stays (a tool another package pulled in is not the entry's)" || fail "sec-recon remove: ${o} / $(mark bind9-dnsutils)"
+
+o=$(pk install nuclei); [[ $? -ne 0 && "$o" == *"never implicit"* && ! -e "${K}/opt/sec-nuclei" ]] && pass "upstream: nothing without --yes when there is no terminal" || fail "implicit upstream: ${o}"
+o=$(pk install nuclei --yes); r=$?
+[[ $r -eq 0 && "$(readlink "${K}/opt/sec-nuclei/current")" == 3.11.1 && "$(readlink "${K}/localbin/nuclei")" == "${K}/opt/sec-nuclei/current/nuclei" && -x "${K}/localbin/nuclei" ]] \
+    && pass "install nuclei → sec-nuclei 3.11.1: in /opt/cipi/packages/sec-nuclei/3.11.1, current → it, linked into /usr/local/bin" || fail "nuclei (${r}): ${o}"
+[[ "$o" == *"SHA-256 matches the pin"* && "$o" == *"hackly:check-binaries"* ]] && grep -q 'pin=' "${K}/opt/sec-nuclei/3.11.1/.cipi-package" \
+    && pass "…the download checked against its pin, recorded with it" || fail "nuclei pin output: ${o}"
+jq -e '.installed and .source == "upstream" and .installed_version == "3.11.1" and .outdated == false and .missing == []' <<< "$(upj sec-nuclei)" >/dev/null \
+    && pass "…listed installed, upstream, 3.11.1" || fail "nuclei json: $(upj sec-nuclei)"
+o=$(pk install sec-nuclei --yes); [[ $? -eq 0 && "$o" == *"already installed"* ]] && pass "…a second install is a no-op" || fail "nuclei again: ${o}"
+
+mv "${K}/opt/sec-nuclei/3.11.1" "${K}/opt/sec-nuclei/3.10.0"; ln -sfn 3.10.0 "${K}/opt/sec-nuclei/current"
+jq -e '.installed == false and .outdated and .installed_version == "3.10.0" and .version == "3.11.1" and .missing == []' <<< "$(upj sec-nuclei)" >/dev/null \
+    && pass "an older version: outdated, not installed" || fail "outdated json: $(upj sec-nuclei)"
+[[ "$(pk list)" == *"3.10.0 installed, 3.11.1 available"* ]] && pass "…and the list says so" || fail "outdated text"
+o=$(pk install sec-nuclei --yes); [[ $? -eq 0 && "$(readlink "${K}/opt/sec-nuclei/current")" == 3.11.1 && ! -e "${K}/opt/sec-nuclei/3.10.0" && "$o" == *"replaces  3.10.0"* ]] \
+    && pass "…install updates it: the new version, current swapped, the old one gone" || fail "update: ${o}"
+o=$(pk remove nuclei --yes); [[ $? -eq 0 && ! -e "${K}/opt/sec-nuclei" && ! -e "${K}/localbin/nuclei" && "$o" == *"sec-nuclei removed"* ]] \
+    && pass "remove: the directory and the link" || fail "remove nuclei: ${o}"
+grep -q "notify package_remove" "${K}/calls" && pass "…package_remove notified" || fail "notify upstream remove"
+
+cp "$M/nuclei_3.11.1_linux_amd64.zip" "$M/good.zip"; printf 'tampered' >> "$M/nuclei_3.11.1_linux_amd64.zip"
+o=$(pk install nuclei --yes); r=$?
+[[ $r -ne 0 && "$o" == *"Checksum mismatch"* && ! -e "${K}/opt/sec-nuclei/current" && ! -e "${K}/localbin/nuclei" && -z "$(ls -A "${K}/opt/sec-nuclei" 2>/dev/null)" ]] \
+    && pass "a download that does not match its pin: refused, nothing left behind" || fail "mismatch (${r}): ${o}"
+mv "$M/good.zip" "$M/nuclei_3.11.1_linux_amd64.zip"
+write_pins " "; sed -i 's/| $/|/' "${K}/pins.sh"; : > "${K}/calls"
+o=$(pk install nuclei --yes); [[ $? -ne 0 && "$o" == *"no verified checksum for sec-nuclei 3.11.1 (amd64)"* ]] && ! grep -q "^curl " "${K}/calls" \
+    && pass "no pin: refused, nothing downloaded" || fail "no pin: ${o}"
+write_pins
+
+printf '#!/bin/sh\n' > "${K}/localbin/nuclei"; chmod +x "${K}/localbin/nuclei"
+o=$(pk install nuclei --yes); [[ $? -ne 0 && "$o" == *"not installed by Cipi"* && ! -L "${K}/localbin/nuclei" ]] \
+    && pass "a nuclei Cipi did not install (Hackly's own script): left alone" || fail "foreign: ${o}"
+o=$(SUDO_USER=www-data bash "${K}/run.sh" package_command install nuclei --yes --force </dev/null 2>&1); [[ $? -ne 0 && ! -L "${K}/localbin/nuclei" ]] \
+    && pass "…the panel's --force does not replace it" || fail "panel force foreign: ${o}"
+o=$(pk install nuclei --yes --force); [[ $? -eq 0 && -L "${K}/localbin/nuclei" ]] && pass "…--force at the server's shell does" || fail "shell force foreign: ${o}"
+
+pkg_world noble
+o=$(pk install zap --yes); r=$?
+[[ $r -eq 0 && "$(mark openjdk-21-jre-headless)" == manual && -x "${K}/localbin/zap.sh" && "$(readlink -f "${K}/localbin/zap.sh")" == "${K}/opt/sec-zap/2.17.0/zap.sh" ]] \
+    && pass "sec-zap: the tarball unpacked, a Java runtime from Ubuntu, zap.sh linked" || fail "zap (${r}): ${o}"
+grep -q '^apt=openjdk-21-jre-headless$' "${K}/opt/sec-zap/2.17.0/.cipi-package" && pass "…the runtime recorded as installed for it" || fail "zap record"
+o=$(pk remove sec-zap --yes); [[ $? -eq 0 && "$(mark openjdk-21-jre-headless)" == absent && "$(mark java-common)" == absent && "$(mark linux-image-old)" == auto && ! -e "${K}/localbin/zap.sh" ]] \
+    && pass "…removed with its Java runtime; older orphans stay" || fail "zap remove: ${o}"
+
+o=$(pk install nikto --yes); [[ $? -eq 0 && "$(mark libxml-writer-perl)" == manual && "$(mark perl)" == auto && -x "${K}/localbin/nikto" ]] \
+    && grep -q "program/nikto.pl" "${K}/opt/sec-nikto/2.6.1/cipi-bin/nikto" && [[ ! -e "${K}/opt/sec-nikto/2.6.1/src/.git" ]] \
+    && pass "sec-nikto: the 2.6.1 tag at its pinned commit, a perl wrapper, Perl modules from Ubuntu" || fail "nikto: ${o}"
+pk remove nikto --yes >/dev/null; echo 0000000000000000000000000000000000000000 > "${K}/git-head"
+o=$(pk install nikto --yes); [[ $? -ne 0 && "$o" == *"not the pinned d201dac"* && ! -e "${K}/opt/sec-nikto/2.6.1" ]] \
+    && pass "…a tag that moved to another commit: refused" || fail "nikto commit: ${o}"
+echo d201dac320fc5187eac75e723dd07a716196ec5a > "${K}/git-head"
+
+pkg_world noble
+o=$(pk install wpscan --yes); r=$?
+[[ $r -eq 0 && "$(mark ruby)" == manual && "$(mark ruby-dev)" == absent && "$(mark build-essential)" == absent && "$(mark gcc)" == absent && -x "${K}/localbin/wpscan" ]] \
+    && pass "sec-wpscan: built with ruby-dev and build-essential, which are gone after; Ruby stays" || fail "wpscan (${r}): ${o} / ruby-dev $(mark ruby-dev) gcc $(mark gcc)"
+grep -q "GEM_HOME=${K}/opt/sec-wpscan/3.8.28" "${K}/opt/sec-wpscan/3.8.28/cipi-bin/wpscan" && grep -q "gem install .*wpscan -v 3.8.28" "${K}/calls" \
+    && pass "…wpscan 3.8.28 in a gem home of its own, behind a wrapper" || fail "wpscan gem home"
+o=$(pk install semgrep --yes); [[ $? -eq 0 && "$(mark python3-venv)" == manual && -x "${K}/localbin/semgrep" ]] && grep -q "pip install .*semgrep==1.185.0" "${K}/calls" \
+    && pass "sec-semgrep: semgrep==1.185.0 in a virtualenv of its own" || fail "semgrep: ${o}"
+o=$(pk install sec-trivy --yes); [[ $? -eq 0 && "$(mark trivy)" == manual && "$(upj sec-trivy | jq -r .installed)" == true ]] \
+    && pass "sec-trivy: the pinned .deb, installed by apt" || fail "trivy: ${o}"
+o=$(pk remove trivy --yes); [[ $? -eq 0 && "$(mark trivy)" == absent ]] && pass "…and purged by apt" || fail "trivy remove: ${o}"
+pkg_world noble; python3 -c 'import json,sys; p=sys.argv[1]+"/state.json"; s=json.load(open(p)); s["installed"]["trivy"]="manual"; json.dump(s,open(p,"w"))' "$K"
+o=$(pk install trivy --yes); [[ $? -ne 0 && "$o" == *"trivy (apt)"* ]] && pass "a trivy apt has from elsewhere (Aqua's repository): left alone" || fail "foreign deb: ${o}"
+o=$(pk install chromium-browser 2>&1); [[ "$o" != *"sec-"*"installed"* ]] && pass "…and resolving names never turns an unknown one into a sec entry" || fail "resolve"
 
 sud=$(sed -n '/SUDOEOF/,/^SUDOEOF/p' "${LIB}/cipi-api-sudoers.sh")
 grep -q 'cipi package install \*' <<< "$sud" && grep -q 'cipi package remove \*' <<< "$sud" && pass "the panel's sudoers: package install, remove" || fail "sudoers package"

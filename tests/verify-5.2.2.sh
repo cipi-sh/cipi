@@ -363,7 +363,8 @@ for granted in "package install" "package remove"; do
 done
 grep -q '_pkg_from_panel' "$PKG" \
     && pass "package.sh knows when the panel is asking" || fail "no panel guard in package.sh"
-if grep -qE 'package install|package_command' "${ROOT}/setup.sh" "${LIB}/self-update.sh" 2>/dev/null; then
+# Calls only: self-update may tell the operator what to run (5.14.0), not run it.
+if grep -hE 'package install|package_command' "${ROOT}/setup.sh" "${LIB}/self-update.sh" 2>/dev/null | grep -qvE '^[[:space:]]*(echo|warn|info|#)'; then
     fail "setup.sh or self-update installs optional packages"
 else
     pass "optional packages install only on request"

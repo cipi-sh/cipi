@@ -330,7 +330,7 @@ _cipi_complete() {
             case $pos in
                 1) sub="list install remove" ;;
                 2) case "$w1" in
-                       install|remove) sub="image-optimizers avif ffmpeg imagemagick poppler-utils browsershot fonts-cjk pdftk libreoffice pandoc tesseract jpegoptim optipng pngquant gifsicle webp" ;;
+                       install|remove) sub="image-optimizers avif ffmpeg imagemagick poppler-utils browsershot fonts-cjk pdftk libreoffice pandoc tesseract sec-recon sec-gitleaks sec-nuclei sec-zap sec-nikto sec-wpscan sec-trivy sec-semgrep sec-checkov jpegoptim optipng pngquant gifsicle webp" ;;
                        list)           sub="--json" ;;
                    esac ;;
                 3) case "$w1" in

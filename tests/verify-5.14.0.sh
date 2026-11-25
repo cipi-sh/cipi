@@ -737,7 +737,7 @@ sleep 0.3; SECONDS=0; o=$(pk install pandoc --yes); r=$?; wait
 pkg_world noble
 o=$(pk install wpscan --yes); r=$?
 [[ $r -eq 0 && "$(mark ruby)" == manual && "$(mark ruby-dev)" == absent && "$(mark build-essential)" == absent && "$(mark gcc)" == absent && -x "${K}/localbin/wpscan" ]] \
-    && pass "sec-wpscan: built with ruby-dev and build-essential, which are gone after; Ruby stays" || fail "wpscan (${r}): ${o} / ruby-dev $(mark ruby-dev) gcc $(mark gcc)"
+    && [[ "$o" == *"WPScan is not open source"* ]] && pass "sec-wpscan: built with ruby-dev and build-essential, which are gone after; Ruby stays; its licence is said" || fail "wpscan (${r}): ${o} / ruby-dev $(mark ruby-dev) gcc $(mark gcc)"
 grep -q "GEM_HOME=${K}/opt/sec-wpscan/3.8.28" "${K}/opt/sec-wpscan/3.8.28/cipi-bin/wpscan" && grep -q "gem install .*wpscan -v 3.8.28" "${K}/calls" \
     && pass "…wpscan 3.8.28 in a gem home of its own, behind a wrapper" || fail "wpscan gem home"
 o=$(pk install semgrep --yes); [[ $? -eq 0 && "$(mark python3-venv)" == manual && -x "${K}/localbin/semgrep" ]] && grep -q "pip install .*semgrep==1.185.0" "${K}/calls" \

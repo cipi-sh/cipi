@@ -496,6 +496,8 @@ _pkg_notes() {
             ;;
         sec-wpscan)
             echo -e "  ${DIM}WordPress vulnerability data needs a WPScan API token (HACKLY_WPSCAN_API_TOKEN).${NC}"
+            echo -e "  ${YELLOW}WPScan is not open source:${NC} ${DIM}free to test your own systems and for penetration${NC}"
+            echo -e "  ${DIM}testers; selling it as a service needs a commercial licence (its LICENSE file).${NC}"
             ;;
         sec-trivy)
             echo -e "  ${DIM}Trivy downloads its vulnerability database on the first scan, into the cache${NC}"

@@ -108,15 +108,15 @@ _help_topic_header() {
     fi
 }
 
+# The topics, in alphabetical order (what "Unknown help topic" lists).
 _help_topics_list() {
-    cat <<'EOF'
-app  use  node  domains  www  redirect  proxy  deploy  worker  schedule  health  monitor  metrics  db  search  service  ssl
-php  frankenphp  package  auth  basicauth  ssh  firewall  ban  crowdsec  zt  scan  compliance  backup  sync
-git  ini  yml  nginx  api  gui  notification  smtp  reset  credentials  server  updates  valkey  completion
-EOF
+    printf '%s\n' "${_HELP_TOPICS[@]}" | LC_ALL=C sort
 }
 
-# The order of `cipi help` and `cipi help all`.
+# The topics, in the order `cipi help all` prints them: the server first, then
+# what is done most. `cipi help` — the list of commands — is alphabetical
+# whatever this order is; where a command is in two topics, the first one
+# here gives it its description (unless the other is its own).
 _HELP_TOPICS=(server updates service app use domains www redirect proxy auth basicauth deploy worker schedule
               health monitor metrics db search node api gui git sync ssh ssl php frankenphp package firewall ban
               crowdsec zt scan compliance backup ini yml nginx smtp notification valkey reset credentials completion)
@@ -151,7 +151,11 @@ _help_index() {
             if (!(name in pick) || ($3 == f[1] && tp[pick[name]] != f[1])) pick[name] = r
             tp[r] = $3
         }
-        END { for (k = 1; k <= r; k++) if (pick[nm[k]] == k) print nm[k] "\t" ds[k] }'
+        END { for (k = 1; k <= r; k++) if (pick[nm[k]] == k) print nm[k] "\t" ds[k] }' \
+    | LC_ALL=C sort -t "$(printf '\t')" -k1,1
+    # Alphabetical, like `php artisan list`. In the C locale a space sorts
+    # before every letter: "db" comes before "db backup", and the commands
+    # of a namespace stay together ("app …" all before "auth").
 }
 
 show_help() {
@@ -182,6 +186,8 @@ show_help() {
                                       "    --json" "Machine-readable output, where a command has it" \
                                       "    --yes" "Go on without asking, where a command asks first"
     echo ""
+    # _help_index is sorted: the commands that stand alone come out in
+    # alphabetical order, then the namespaces, each with its own in order.
     echo -e "${YELLOW}Available commands:${NC}"
     _help_index | awk -F '\t' -v g="$GREEN" -v y="$YELLOW" -v nc="$NC" -v cols="$cols" '
         { name[NR] = $1; desc[NR] = $2; split($1, w, " "); ns[NR] = w[1]; count[w[1]]++
@@ -1157,7 +1163,7 @@ show_help_topic() {
 
         *)
             error "Unknown help topic: ${topic}"
-            echo -e "  Topics: $(_help_topics_list | tr '\n' ' ' | sed 's/  */ /g')"
+            echo -e "  Topics: $(_help_topics_list | tr '\n' ' ' | sed 's/ *$//')"
             echo -e "  Or run: ${CYAN}cipi help${NC} / ${CYAN}cipi help all${NC}"
             exit 1
             ;;

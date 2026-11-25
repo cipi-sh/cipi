@@ -1046,6 +1046,34 @@ grep -qF 'Engine: ${CYAN}$(_db_engine_shown "$engine")${NC}  Database: ${CYAN}${
 [[ "$(grep -c '_db_engine_shown "$engine"' "${LIB}/db.sh")" -ge 17 ]] && pass "db list, link, delete, backup, restore, password: the same word" || fail "db other messages"
 bash -c "$(sed -n '/^db_normalize_engine() {/,/^}/p' "${LIB}/db.sh"); [[ \"\$(db_normalize_engine mysql)\" == mariadb ]]" && pass "--engine=mysql is the name the messages use" || fail "normalize mysql"
 
+# ── cipi help: the commands in alphabetical order ────────────
+echo "-- help: alphabetical order"
+HC="${TMP:?}/helpcipi"; mkdir -p "$HC"
+sed "s|readonly CIPI_LIB=\"/opt/cipi/lib\"|readonly CIPI_LIB=\"${LIB}\"|" "${ROOT}/cipi" > "$HC/cipi"
+hp=$(CIPI_NO_PAGER=1 COLUMNS=120 bash "$HC/cipi" help 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | sed -n '/^Available commands:$/,$p')
+alone=$(awk '/^ [a-z]/{exit} /^  [a-z]/{print $1}' <<< "$hp")
+[[ "$(wc -l <<< "$alone")" -ge 5 && "$alone" == "$(LC_ALL=C sort <<< "$alone")" ]] && grep -qx 'status' <<< "$alone" \
+    && pass "cipi help: the commands that stand alone, in alphabetical order" || fail "help standalone order: $(tr '\n' ' ' <<< "$alone")"
+ns=$(grep '^ [a-z]' <<< "$hp" | sed 's/^ //')
+[[ "$(wc -l <<< "$ns")" -ge 40 && "$ns" == "$(LC_ALL=C sort <<< "$ns")" && "$(sort -u <<< "$ns" | wc -l)" == "$(wc -l <<< "$ns")" ]] \
+    && pass "cipi help: the namespaces in alphabetical order, each once ($(wc -l <<< "$ns"))" || fail "help namespace order: $(tr '\n' ' ' <<< "$ns")"
+bad=$(LC_ALL=C awk '
+    /^ [a-z]/ { ns = $1; prev = ""; next }
+    ns != "" && /^  [a-z]/ {
+        name = substr($0, 3); sub(/  +.*$/, "", name)
+        if (name !~ ("^" ns "( |$)")) print ns ": " name " is not of this namespace"
+        if (prev != "" && name < prev) print ns ": " name " after " prev
+        prev = name
+    }' <<< "$hp")
+[[ -z "$bad" ]] && pass "cipi help: inside a namespace, its own commands, in alphabetical order" || fail "help order inside a namespace: $(head -5 <<< "$bad" | tr '\n' ';')"
+n=$(grep -c '^  [a-z]' <<< "$hp")
+(( n > 300 )) && [[ "$(grep '^  [a-z]' <<< "$hp" | sort -u | wc -l)" == "$n" ]] && pass "cipi help: still every command, each once (${n})" || fail "help lost or doubled commands (${n})"
+grep -qE '^  nginx real-ip cloudflare  ' <<< "$hp" && grep -qE '^  nginx show  ' <<< "$hp" && pass "cipi help: nginx real-ip and nginx show are in the list" || fail "help: nginx entries"
+tl=$(bash "$HC/cipi" help nope 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | sed -n 's/^  Topics: //p' | tr ' ' '\n' | grep .)
+[[ "$(wc -l <<< "$tl")" -ge 40 && "$tl" == "$(LC_ALL=C sort <<< "$tl")" ]] && pass "unknown help topic: the topics in alphabetical order" || fail "topics order: $(tr '\n' ' ' <<< "$tl")"
+first=$(CIPI_NO_PAGER=1 bash "$HC/cipi" help all 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -m1 -A1 '^ [A-Z]' | head -1)
+[[ "$first" == " Server" ]] && pass "cipi help all keeps its own order: the server first" || fail "help all starts with: ${first}"
+
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="
 [[ $FAIL -eq 0 ]]

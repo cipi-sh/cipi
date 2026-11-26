@@ -119,7 +119,7 @@ _help_topics_list() {
 # here gives it its description (unless the other is its own).
 _HELP_TOPICS=(server updates service app use domains www redirect proxy auth basicauth deploy worker schedule
               health monitor metrics db search node api gui git sync ssh ssl php frankenphp package firewall ban
-              crowdsec zt scan compliance backup ini yml nginx smtp notification valkey reset credentials completion)
+              crowdsec zt scan compliance backup ini yml nginx cache smtp notification valkey reset credentials completion)
 
 # Every command of every topic, one line each: "name<TAB>description", from
 # the topics' own _help_cmd lines — the list cannot drift from them. The
@@ -253,7 +253,7 @@ show_help_topic() {
             echo ""
             ;;
 
-        valkey|redis|cache)
+        valkey|redis)
             _help_topic_header "Valkey per app"
             echo ""
             _help_cmd "cipi valkey list [--json]"      "Which app uses which instance"
@@ -264,6 +264,31 @@ show_help_topic() {
             _help_note "New apps get their own instance. An existing app keeps the shared one until you isolate it:"
             _help_note "its keys are copied, .env is switched (REDIS_HOST/PORT/PASSWORD) and its workers restarted."
             _help_note "Options: --no-copy (start empty)  --maxmemory=256mb  --yes"
+            _help_note "From the panel too: the server's Valkey tab (cipi/api 1.47, cipi/gui 4.9)."
+            echo ""
+            ;;
+
+        cache|page-cache|pagecache)
+            _help_topic_header "Page cache (nginx)"
+            echo ""
+            _help_cmd "cipi cache [list] [--json]"          "Every app: cache on or off, pages kept, space taken"
+            _help_cmd "cipi cache <app> on"                  "nginx keeps the pages PHP makes  ${DIM}[--ttl=10m] [--size=256m] [--exclude=/cart*,/feed] [--no-deploy-clear]${NC}"
+            _help_cmd "cipi cache <app> off"                 "Every request runs PHP again; the cached pages are deleted"
+            _help_cmd "cipi cache <app> ttl <time>"          "How long a page is kept  ${DIM}30s · 10m · 1h · 7d${NC}"
+            _help_cmd "cipi cache <app> size <size>"         "How much of the disk it may take  ${DIM}256m · 2g${NC}"
+            _help_cmd "cipi cache <app> clear"               "Delete the cached pages now"
+            _help_cmd "cipi cache <app> exclude"             "Paths of its own never cached  ${DIM}add '/cart*' · remove <path> · remove --all · set a,b${NC}"
+            _help_cmd "cipi cache <app> [status] [--json]"   "On or off, time kept, pages and bytes now"
+            _help_note "Not OPcache, which is on already and keeps PHP's compiled code: with this one nginx"
+            _help_note "answers with the page itself and PHP does not run. Made for WordPress and sites whose"
+            _help_note "pages are the same for every visitor; PHP-FPM (fastcgi_cache) and Octane (proxy_cache)."
+            _help_note "Never cached: signed-in visitors, carts, admin pages, an Authorization header, query"
+            _help_note "strings (tracking parameters apart), and whatever the app marks private or gives a cookie."
+            _help_note "A path of your own to keep out — a page per visitor that says so with no cookie, a feed:"
+            _help_note "cipi cache <app> exclude add '/cart*' '/feed'   (* is anything; without it, the path itself)"
+            _help_note "Emptied after every successful deploy and rollback. In a recipe or a script of your own,"
+            _help_note "as the app's user: sudo /usr/local/bin/cipi-cache-clear <app>"
+            _help_note "X-Cache-Status in the response says HIT, MISS, BYPASS, EXPIRED or STALE."
             echo ""
             ;;
 
@@ -828,7 +853,9 @@ show_help_topic() {
             _help_topic_header "FrankenPHP (Octane apps)"
             echo ""
             _help_cmd "cipi frankenphp [status] [--json]"   "Each Octane app's build, its PHP, patched or not"
+            _help_cmd "cipi frankenphp php <app> [<X.Y>]"   "The whole app on PHP X.Y: Octane and the rest  ${DIM}[--yes] [--no-fetch] [--json]${NC}"
             _help_cmd "cipi frankenphp upgrade <app>|--all" "Newest build on the app's PHP minor  ${DIM}[--to=<build>] [--no-fetch] [--yes]${NC}"
+            _help_cmd "cipi frankenphp restart <app>"       "Restart Octane on its pinned build, and check it answers"
             _help_cmd "cipi frankenphp use <app> <build>"   "Pin a build  ${DIM}[--no-restart] [--force]${NC}"
             _help_cmd "cipi frankenphp fetch [<version>]"   "Download a release from GitHub (latest by default)"
             _help_cmd "cipi frankenphp import <binary>"     "Add a build made elsewhere — another PHP minor"
@@ -839,6 +866,9 @@ show_help_topic() {
             _help_note "minor and FrankenPHP major; it restarts Octane, checks it answers, and goes back"
             _help_note "to the previous build when it does not. Nightly: cipi autoupdate on|off frankenphp."
             _help_note "GitHub's binaries carry one PHP minor; for another, build FrankenPHP and import it."
+            _help_note "An Octane app runs two PHP: the one in its build answers the requests, the server's"
+            _help_note "runs Composer, artisan, cron and the workers. php <app> X.Y puts both on X.Y, and"
+            _help_note "refuses, with nothing changed, when no build carries it. cipi app edit --php does the same."
             echo ""
             ;;
 
@@ -1153,6 +1183,10 @@ show_help_topic() {
             _help_note "e.g. events telegram security,deploy · events pager urgent · events mail all (everything, the default)."
             _help_note "Categories: apps domains deploy health monitor backup security ssl php database … (cipi notification events)."
             _help_note "urgent: failures and security events. add|update <id> … --events=… sets it with the channel."
+            _help_cmd "cipi notification timezone [<Area/City>|server]" "The zone the Time of a notification is written in  ${DIM}[--json]${NC}"
+            _help_cmd "cipi notification server-name [<name>]" "The name the server goes by in notifications  ${DIM}[--clear] [--json]${NC}"
+            _help_note "timezone Europe/Rome changes how notifications read, not the server's clock; server-name"
+            _help_note "production turns \"vmi12334\" into \"production (vmi12334)\" — the name the panel knows it by."
             _help_note "A secret left out of the command line is asked for on a terminal, not echoed. Secrets are kept in the vault."
             _help_note "cipi notifications (the older name), its channel … subcommands and cipi smtp keep working."
             _help_note "See also: cipi help monitor"
@@ -1294,6 +1328,7 @@ main() {
         reboot)     _maybe_cmd_help updates "$@";    require_root; source "${CIPI_LIB}/pending.sh";     reboot_command "$@" ;;
         autoupdate|autoupdates) _maybe_cmd_help updates "$@"; require_root; source "${CIPI_LIB}/autoupdate.sh"; autoupdate_command "$@" ;;
         valkey)     _maybe_cmd_help valkey "$@";     require_root; source "${CIPI_LIB}/valkey.sh";      valkey_command "$@" ;;
+        cache)      _maybe_cmd_help cache "$@";      require_root; source "${CIPI_LIB}/cache.sh";       cache_command "$@" ;;
         disk)       _maybe_cmd_help server "$@";     require_root; source "${CIPI_LIB}/disk.sh";        disk_command "$@" ;;
         app)        _maybe_cmd_help app "$@";        require_root; source "${CIPI_LIB}/app.sh";         app_command "$@" ;;
         alias)      _maybe_cmd_help domains "$@";    require_root; source "${CIPI_LIB}/app.sh";         alias_command "$@" ;;

@@ -3,6 +3,10 @@
 # Cipi — Queue Workers (Supervisor)
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 worker_command() {
     local sub="${1:-}"; shift||true
     case "$sub" in
@@ -174,7 +178,7 @@ _worker_add() {
     log_action "WORKER ADD: $app queue=$queue procs=$procs"
     cipi_notify \
         "Cipi worker added: ${app} (${queue}) on $(hostname)" \
-        "A queue worker was added.\n\nServer: $(hostname)\nApp: ${app}\nQueue: ${queue}\nProcesses: ${procs}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A queue worker was added.\n\nServer: $(hostname)\nApp: ${app}\nQueue: ${queue}\nProcesses: ${procs}\nTime: $(notify_now)" \
         worker_add
     success "Worker '${queue}' added (${procs} processes)"
 }
@@ -230,7 +234,7 @@ _worker_remove() {
     log_action "WORKER REMOVE: $app queue=$queue"
     cipi_notify \
         "Cipi worker removed: ${app} (${queue}) on $(hostname)" \
-        "A queue worker was removed.\n\nServer: $(hostname)\nApp: ${app}\nQueue: ${queue}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A queue worker was removed.\n\nServer: $(hostname)\nApp: ${app}\nQueue: ${queue}\nTime: $(notify_now)" \
         worker_remove
     success "Worker '${queue}' removed"
 }

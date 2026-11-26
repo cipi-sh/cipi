@@ -27,12 +27,24 @@
 # app on 8.5 and one on 8.6 run different builds on the same server. GitHub
 # publishes static binaries for one PHP minor at a time (the newest); a build
 # on another minor is imported (cipi frankenphp import <file>), e.g. one made
-# with FrankenPHP's static builder. `upgrade` never changes an app's PHP minor:
-# that is `cipi app edit <app> --php=X.Y`, then `cipi frankenphp upgrade <app>`.
+# with FrankenPHP's static builder. `upgrade` never changes an app's PHP minor.
+#
+# Moving an app to another PHP is one command since 5.17.0, and it names the
+# version: `cipi frankenphp php <app> 8.6` (or `cipi app edit <app> --php=8.6`,
+# which does the same for an Octane app). The build that carries that PHP is
+# looked for first — on this server, then in the release GitHub publishes —
+# and nothing changes when there is none; then Octane moves to it (restart,
+# check, way back) and Composer, artisan, cron and the workers to the server's
+# php8.6. One PHP for the whole app, said by its number: "upgrade" never said
+# which version would arrive.
 #
 # Outside /opt/cipi on purpose: self-update copies /opt/cipi into a backup on
 # every run, and these binaries are about 100 MB each.
 #############################################
+
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
 
 [[ -z "${FRANKENPHP_ROOT:-}" ]] && FRANKENPHP_ROOT="/opt/cipi-frankenphp"
 FRANKENPHP_BUILDS="${FRANKENPHP_ROOT}/builds"
@@ -234,9 +246,9 @@ fphp_adopt() {   # <app>
 # The newest build an app may be moved to: on the app's own PHP minor, of
 # the same FrankenPHP major as the current one (when there is one), and one
 # that may be given to it.
-fphp_candidate() {   # <app> [current id]
-    local app="$1" cur="${2:-}" minor id best="" major=""
-    minor=$(app_get "$app" php)
+fphp_candidate() {   # <app> [current id] [php minor — the app's own by default]
+    local app="$1" cur="${2:-}" minor="${3:-}" id best="" major=""
+    [[ -n "$minor" ]] || minor=$(app_get "$app" php)
     [[ -n "$cur" ]] && major=$(fphp_meta "$cur" frankenphp | cut -d. -f1)
     for id in $(fphp_builds); do
         [[ "$(fphp_minor "$(fphp_meta "$id" php)")" == "$minor" ]] || continue
@@ -245,6 +257,76 @@ fphp_candidate() {   # <app> [current id]
         if [[ -z "$best" ]] || fphp_newer "$id" "$best"; then best="$id"; fi
     done
     echo "$best"
+}
+
+# The PHP minors an app's Octane can be put on with the builds this server
+# has (the ones that may be given to it, on its FrankenPHP major): one per
+# line, oldest first.
+fphp_minors_for() {   # <app>
+    local app="$1" cur id major=""
+    cur=$(fphp_app_build "$app")
+    [[ -n "$cur" ]] && major=$(fphp_meta "$cur" frankenphp | cut -d. -f1)
+    for id in $(fphp_builds); do
+        fphp_build_trusted_for "$id" "$app" || continue
+        if [[ -n "$major" && "$(fphp_meta "$id" frankenphp | cut -d. -f1)" != "$major" ]]; then continue; fi
+        fphp_minor "$(fphp_meta "$id" php)"
+    done | sort -uV
+    return 0
+}
+
+# An app whose Octane answers on another PHP than the one the app is on
+# (state "mismatch"): the command that settles it, a tab, and what it does.
+# `cipi frankenphp upgrade` was the hint until 5.17.0, and it did nothing
+# where no build on the app's PHP was on the server — the usual case, since a
+# FrankenPHP release carries one PHP and the newest one is what Octane
+# downloads.
+fphp_mismatch_fix() {   # <app>
+    local app="$1" cur cand ap bp
+    cur=$(fphp_app_build "$app"); [[ -n "$cur" ]] || return 0
+    ap=$(app_get "$app" php); bp=$(fphp_minor "$(fphp_meta "$cur" php)")
+    [[ -n "$bp" && "$bp" != "$ap" ]] || return 0
+    cand=$(fphp_candidate "$app" "$cur")
+    if [[ -n "$cand" ]]; then
+        printf 'cipi frankenphp php %s %s\tOctane back on PHP %s, with the build %s that is on this server\n' "$app" "$ap" "$ap" "$cand"
+    else
+        printf 'cipi frankenphp php %s %s\tComposer, artisan, cron and the workers to PHP %s as well — no FrankenPHP build on PHP %s is on this server\n' "$app" "$bp" "$bp" "$ap"
+    fi
+}
+
+# The build that puts an app's Octane on PHP <minor>: the newest one on this
+# server — after fetching the release GitHub publishes, unless told not to —
+# that may be given to the app and that its laravel/octane accepts. Prints
+# the build id; the reason on stderr and 1 when there is none. Changes nothing
+# but the store of builds.
+fphp_build_for_php() {   # <app> <php minor> [no-fetch]
+    local app="$1" want="$2" nofetch="${3:-}" cur latest="" cand req fv have
+    cur=$(fphp_app_build "$app")
+    if [[ -z "$nofetch" ]]; then
+        latest=$(fphp_fetch) || { warn "GitHub could not be reached — only the builds on this server are considered" >&2; latest=""; }
+    fi
+    cand=$(fphp_candidate "$app" "$cur" "$want")
+    if [[ -z "$cand" ]]; then
+        have=$(fphp_minors_for "$app" | paste -sd, - | sed 's/,/, /g')
+        error "No FrankenPHP build on PHP ${want} for '${app}'." >&2
+        {
+            echo "  A FrankenPHP release carries one PHP: on this server there are builds on ${have:-none yet}."
+            if [[ -n "$latest" ]]; then
+                echo "  The release GitHub publishes now ($(fphp_meta "$latest" frankenphp)) carries PHP $(fphp_meta "$latest" php)."
+                if [[ -n "$cur" && "$(fphp_meta "$latest" frankenphp | cut -d. -f1)" != "$(fphp_meta "$cur" frankenphp | cut -d. -f1)" ]]; then
+                    echo "  It is a new FrankenPHP major: Cipi does not move an app to one by itself — cipi frankenphp use ${app} ${latest}"
+                fi
+            fi
+            echo "  A build on PHP ${want} is made with FrankenPHP's static builder (PHP_VERSION=${want}) and added with: cipi frankenphp import <file>"
+        } >&2
+        return 1
+    fi
+    req=$(fphp_octane_required "$app"); fv=$(fphp_meta "$cand" frankenphp)
+    if [[ -n "$req" ]] && ! version_at_least "$fv" "$req"; then
+        error "The newest build on PHP ${want} is ${cand} (FrankenPHP ${fv}); the live release's laravel/octane needs FrankenPHP ${req} or newer." >&2
+        echo "  Octane would replace it with its own download when it starts. Import a newer build on PHP ${want}: cipi frankenphp import <file>" >&2
+        return 1
+    fi
+    echo "$cand"
 }
 
 # A new Octane app (create, convert): the newest build on its PHP that the
@@ -382,7 +464,7 @@ fphp_activate() {   # <app> <id> [no-restart]
     fphp_release_link "$app" || warn "${app}: could not link the live release to the pinned build"
     log_action "FRANKENPHP USE: ${app} ${prev:-none} → ${id}"
     if [[ -n "$norestart" ]]; then
-        info "'${app}' runs ${id} from its next Octane start (supervisorctl restart ${app}-octane)"
+        info "'${app}' runs ${id} from its next Octane start (cipi frankenphp restart ${app})"
         return 0
     fi
     step "Restarting ${app}-octane on ${id}..."
@@ -447,11 +529,13 @@ frankenphp_command() {
         fetch)          _fphp_fetch_cmd "$@" ;;
         import)         _fphp_import "$@" ;;
         use|pin)        _fphp_use "$@" ;;
+        php)            _fphp_php "$@" ;;
+        restart)        _fphp_restart_cmd "$@" ;;
         upgrade)        _fphp_upgrade "$@" ;;
         adopt)          _fphp_adopt_cmd "$@" ;;
         remove|rm)      _fphp_remove "$@" ;;
         prune)          fphp_prune; success "Unused FrankenPHP builds pruned" ;;
-        *) error "Use: status fetch import use upgrade adopt remove prune"; exit 1 ;;
+        *) error "Use: status php fetch import use upgrade restart adopt remove prune"; exit 1 ;;
     esac
 }
 
@@ -475,11 +559,16 @@ _fphp_status() {
         done
         for app in $(fphp_octane_apps); do
             read -r st bid pv rs <<< "$(fphp_app_state "$app")"
+            local fix="" fix_cmd="" fix_why=""
+            [[ "$st" == mismatch ]] && fix=$(fphp_mismatch_fix "$app")
+            IFS=$'\t' read -r fix_cmd fix_why <<< "$fix"
             apps_json=$(jq -c --arg a "$app" --arg php "$(app_get "$app" php)" --arg st "$st" --arg b "$bid" --arg pv "$pv" --arg rs "$rs" \
                 --arg f "$( [[ "$bid" != - ]] && fphp_meta "$bid" frankenphp || true)" \
+                --argjson av "$(fphp_minors_for "$app" | jq -R . | jq -sc .)" --arg fc "$fix_cmd" --arg fw "$fix_why" \
                 '. + [{app: $a, php: $php, state: $st, build: (if $b == "-" then null else $b end),
                        frankenphp: (if $f == "" then null else $f end), build_php: (if $pv == "-" then null else $pv end),
-                       restart_pending: ($rs == "yes")}]' <<< "$apps_json")
+                       restart_pending: ($rs == "yes"), available_php: $av,
+                       fix: (if $fc == "" then null else {command: $fc, why: $fw} end)}]' <<< "$apps_json")
         done
         jq -n --argjson b "$builds_json" --argjson a "$apps_json" --arg auto "$(_fphp_autoupdate_state)" \
             '{builds: $b, apps: $a, autoupdate: ($auto == "on")}'
@@ -497,11 +586,11 @@ _fphp_status() {
         case "$st" in
             ok)         note="patched" ;;
             vulnerable) col="$RED"; note="VULNERABLE — cipi frankenphp upgrade ${app}" ;;
-            mismatch)   col="$YELLOW"; note="PHP ${pv} inside, app on $(app_get "$app" php) — cipi frankenphp upgrade ${app}" ;;
+            mismatch)   col="$YELLOW"; note="Octane answers on PHP ${pv}, the rest of the app runs $(app_get "$app" php) — $(fphp_mismatch_fix "$app" | cut -f1)" ;;
             unpinned)   col="$YELLOW"; note="not pinned (PHP ${pv}, downloaded by Octane) — cipi frankenphp adopt ${app}" ;;
             missing)    col="$YELLOW"; note="no binary yet — deploy, or: cipi frankenphp upgrade ${app}" ;;
         esac
-        [[ "$rs" == yes ]] && note="${note}; restart pending (supervisorctl restart ${app}-octane)"
+        [[ "$rs" == yes ]] && note="${note}; restart pending (cipi frankenphp restart ${app})"
         tbl_row "$app" "$(app_get "$app" php)" "${bid/#-/—}" "${col}${note}${NC}"
     done
     if [[ "$any" == true ]]; then tbl_print; else echo -e "  ${DIM}No Octane apps.${NC}"; fi
@@ -518,7 +607,7 @@ _fphp_status() {
     if [[ "$nb" -gt 0 ]]; then tbl_print; else echo -e "  ${DIM}None yet.${NC}"; fi
     echo ""
     echo -e "  ${DIM}Nightly patch updates (same PHP minor, same FrankenPHP major): $(_fphp_autoupdate_state) — cipi autoupdate on|off frankenphp${NC}"
-    echo -e "  ${DIM}Upgrade now: ${CYAN}cipi frankenphp upgrade <app>|--all${NC}${DIM}   Another PHP minor: ${CYAN}cipi frankenphp import <binary>${NC}"
+    echo -e "  ${DIM}Upgrade now: ${CYAN}cipi frankenphp upgrade <app>|--all${NC}${DIM}   Another PHP: ${CYAN}cipi frankenphp php <app> <X.Y>${NC}${DIM}   A build of your own: ${CYAN}cipi frankenphp import <binary>${NC}"
     echo ""
 }
 
@@ -570,7 +659,7 @@ _fphp_use_refused() {   # <app> <id> <force>
     [[ "$force" == true ]] && return 0
     if [[ "$(fphp_minor "$pv")" != "$(app_get "$app" php)" ]]; then
         error "${id} carries PHP ${pv}; '${app}' is on PHP $(app_get "$app" php) (Composer, artisan and the workers run on that one)."
-        error "Move the app first (cipi app edit ${app} --php=$(fphp_minor "$pv")), or --force."
+        error "To put the whole app on PHP $(fphp_minor "$pv"): cipi frankenphp php ${app} $(fphp_minor "$pv") — or --force for this build alone."
         return 1
     fi
     req=$(fphp_octane_required "$app")
@@ -598,10 +687,120 @@ _fphp_use() {
     if fphp_activate "$app" "$id" "$( [[ "${ARG_no_restart:-}" == true ]] && echo yes || true)"; then
         cipi_notify \
             "Cipi FrankenPHP changed: ${app} on $(hostname)" \
-            "The FrankenPHP build of an Octane app changed.\n\nServer: $(hostname)\nApp: ${app}\nFrom: ${prev:-not pinned}\nTo: ${id} (FrankenPHP $(fphp_meta "$id" frankenphp), PHP $(fphp_meta "$id" php))\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "The FrankenPHP build of an Octane app changed.\n\nServer: $(hostname)\nApp: ${app}\nFrom: ${prev:-not pinned}\nTo: ${id} (FrankenPHP $(fphp_meta "$id" frankenphp), PHP $(fphp_meta "$id" php))\nTime: $(notify_now)" \
             frankenphp_upgrade
         return 0
     fi
+    exit 1
+}
+
+# cipi frankenphp php <app> [X.Y] [--yes] [--no-fetch] [--json]
+#
+# One PHP for the whole app, by its number. An Octane app runs two: the one
+# inside its FrankenPHP build answers the requests, the server's php<X.Y>
+# runs Composer, artisan, cron and the queue workers. This puts both on X.Y:
+# the build first — Octane restarts, has to answer, and the previous build
+# comes back when it does not, with nothing else changed — then the rest, the
+# way `cipi app edit <app> --php=X.Y` moves it. Without a version: what the
+# app runs and what it can be moved to.
+_fphp_php() {
+    local app="${1:-}" want="${2:-}"
+    _fphp_need_octane_app "$app" || { error "Usage: cipi frankenphp php <app> [X.Y] [--yes] [--no-fetch] [--json]"; exit 1; }
+    shift
+    if [[ -z "$want" || "$want" == --* ]]; then want=""; else shift; fi
+    parse_args "$@"
+    local cur ap full="" bp="" st bid pv rs
+    cur=$(fphp_app_build "$app"); ap=$(app_get "$app" php)
+    read -r st bid pv rs <<< "$(fphp_app_state "$app")"
+    [[ "$pv" != - ]] && { full="$pv"; bp=$(fphp_minor "$pv"); }
+
+    if [[ -z "$want" ]]; then
+        local fix="" fix_cmd="" fix_why=""
+        [[ "$st" == mismatch ]] && fix=$(fphp_mismatch_fix "$app")
+        IFS=$'\t' read -r fix_cmd fix_why <<< "$fix"
+        if [[ "${ARG_json:-}" == "true" ]]; then
+            jq -n --arg a "$app" --arg php "$ap" --arg op "$full" --arg b "${cur:-}" --arg st "$st" --arg rs "$rs" \
+                --arg f "$( [[ -n "$cur" ]] && fphp_meta "$cur" frankenphp || true)" \
+                --argjson av "$(fphp_minors_for "$app" | jq -R . | jq -sc .)" --arg fc "$fix_cmd" --arg fw "$fix_why" \
+                '{app: $a, php: $php, octane_php: (if $op == "" then null else $op end),
+                  build: (if $b == "" then null else $b end), frankenphp: (if $f == "" then null else $f end),
+                  state: $st, restart_pending: ($rs == "yes"), available_php: $av,
+                  fix: (if $fc == "" then null else {command: $fc, why: $fw} end)}'
+            return 0
+        fi
+        echo -e "\n${BOLD}${app}${NC} ${DIM}— the PHP of an Octane app${NC}"
+        echo -e "  Requests (Octane)                  PHP ${BOLD}${full:-none yet}${NC}${cur:+  ${DIM}FrankenPHP build ${cur}${NC}}"
+        echo -e "  Composer, artisan, cron, workers   PHP ${BOLD}${ap}${NC}  ${DIM}/usr/bin/php${ap}${NC}"
+        if [[ -n "$fix_cmd" ]]; then
+            echo -e "  ${YELLOW}Two PHP versions in one app.${NC} ${CYAN}${fix_cmd}${NC}  ${DIM}${fix_why}${NC}"
+        fi
+        local av; av=$(fphp_minors_for "$app" | paste -sd, - | sed 's/,/, /g')
+        echo -e "  ${DIM}Builds on this server for it: PHP ${av:-none yet}. Another version: ${CYAN}cipi frankenphp php ${app} <X.Y>${NC}${DIM} — the release GitHub publishes is fetched then.${NC}\n"
+        return 0
+    fi
+
+    if ! [[ "$want" =~ ^[0-9]+\.[0-9]+$ ]] || ! validate_php_version "$want"; then
+        error "Invalid PHP version '${want}' — one of 8.3, 8.4, 8.5, 8.6"
+        exit 1
+    fi
+    if ! php_is_installed "$want"; then
+        error "PHP ${want} is not installed on this server — Composer, artisan and the workers of '${app}' need it: cipi php install ${want}"
+        exit 1
+    fi
+    if [[ "$want" != "$ap" ]]; then
+        php_ext_pending_refuse "$want" "Nothing was changed." || exit 1
+    fi
+    if [[ -z "$cur" ]]; then
+        cur=$(fphp_adopt "$app" 2>/dev/null || true)
+        [[ -n "$cur" ]] && info "'${app}': pinned the binary it runs (${cur})"
+    fi
+    local cand
+    cand=$(fphp_build_for_php "$app" "$want" "$( [[ "${ARG_no_fetch:-}" == true ]] && echo yes || true)") || exit 1
+
+    if [[ "$cand" == "$cur" && "$want" == "$ap" ]] && ! fphp_restart_pending "$app"; then
+        info "'${app}' is on PHP ${want} already — Octane on ${cur}, the rest on /usr/bin/php${want}"
+        return 0
+    fi
+    if [[ "${ARG_yes:-}" != true && -t 0 ]]; then
+        echo -e "  ${DIM}Octane: ${cur:-not pinned} → ${cand} (PHP $(fphp_meta "$cand" php)), restarted.$( [[ "$want" != "$ap" ]] && echo " Composer, artisan, cron and workers: PHP ${ap} → ${want}.")${NC}"
+        confirm "Put '${app}' on PHP ${want}?" || { info "Nothing changed"; return 0; }
+    fi
+    if [[ "$cand" != "$cur" ]] || fphp_restart_pending "$app"; then
+        if ! fphp_activate "$app" "$cand"; then
+            error "'${app}' was not moved: it stays on PHP ${ap}${cur:+, Octane on ${cur}}"
+            exit 1
+        fi
+    fi
+    if [[ "$want" != "$ap" ]]; then
+        declare -f app_edit >/dev/null 2>&1 || source "${CIPI_LIB}/app.sh"
+        # The build is settled here: app_edit moves the rest and leaves it alone.
+        CIPI_FPHP_SWITCHING=1 app_edit "$app" "--php=${want}"
+    fi
+    fphp_prune
+    cipi_notify \
+        "Cipi FrankenPHP: ${app} on PHP ${want} on $(hostname)" \
+        "An Octane app was put on one PHP version.\n\nServer: $(hostname)\nApp: ${app}\nPHP: ${ap}${bp:+ (Octane: ${bp})} → ${want}\nBuild: ${cur:-not pinned} → ${cand} (FrankenPHP $(fphp_meta "$cand" frankenphp), PHP $(fphp_meta "$cand" php))\nTime: $(notify_now)" \
+        frankenphp_upgrade
+    success "'${app}' is on PHP ${want}: Octane on ${cand}, Composer, artisan, cron and workers on /usr/bin/php${want}"
+}
+
+# cipi frankenphp restart <app> — Octane restarted on its pinned build, and
+# checked: what a pin changed with --no-restart, or `restart pending`, needs.
+_fphp_restart_cmd() {
+    local app="${1:-}" rc=0
+    _fphp_need_octane_app "$app" || { error "Usage: cipi frankenphp restart <app>"; exit 1; }
+    step "Restarting ${app}-octane..."
+    fphp_octane_restart "$app" || rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+        info "${app}-octane is stopped (supervisorctl start ${app}-octane) — left as it is"
+        return 0
+    fi
+    if fphp_octane_verify "$app"; then
+        log_action "OCTANE RESTART: ${app}"
+        success "${app}-octane restarted and answering"
+        return 0
+    fi
+    error "${app}-octane does not answer after the restart — tail -n 50 /var/log/cipi-apps/${app}/octane.log"
     exit 1
 }
 
@@ -707,11 +906,11 @@ _fphp_upgrade() {
         fi
         if [[ -n "$latest" && -n "$cur" && "$latest" != "$cand" ]] && fphp_newer "$latest" "$cur"; then
             if [[ "$(fphp_minor "$(fphp_meta "$latest" php)")" != "$(app_get "$app" php)" ]]; then
-                msg="FrankenPHP $(fphp_meta "$latest" frankenphp) is out and carries PHP $(fphp_meta "$latest" php); '${app}' is on PHP $(app_get "$app" php), so Cipi keeps it on ${cand:-$cur}. To move it: cipi app edit ${app} --php=$(fphp_minor "$(fphp_meta "$latest" php)"), then cipi frankenphp upgrade ${app}. To stay and keep getting PHP patches: build FrankenPHP on PHP $(app_get "$app" php) and cipi frankenphp import it."
+                msg="FrankenPHP $(fphp_meta "$latest" frankenphp) is out and carries PHP $(fphp_meta "$latest" php); '${app}' is on PHP $(app_get "$app" php), so Cipi keeps it on ${cand:-$cur}. To move it: cipi frankenphp php ${app} $(fphp_minor "$(fphp_meta "$latest" php)"). To stay and keep getting PHP patches: build FrankenPHP on PHP $(app_get "$app" php) and cipi frankenphp import it."
                 info "$msg"
                 [[ "$cron" == true ]] && _fphp_notify_once "${app} ${latest}" \
                     "Cipi FrankenPHP: a release on another PHP for ${app} on $(hostname)" \
-                    "${msg}\n\nServer: $(hostname)\nApp: ${app}\nCurrent build: ${cur}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+                    "${msg}\n\nServer: $(hostname)\nApp: ${app}\nCurrent build: ${cur}\nTime: $(notify_now)" \
                     frankenphp_available
             elif [[ "$(fphp_meta "$latest" frankenphp | cut -d. -f1)" != "$(fphp_meta "$cur" frankenphp | cut -d. -f1)" ]]; then
                 msg="FrankenPHP $(fphp_meta "$latest" frankenphp) is a new major release; '${app}' stays on ${cur} until you move it: cipi frankenphp use ${app} ${latest}"
@@ -738,13 +937,13 @@ _fphp_upgrade() {
         if fphp_activate "$app" "$cand"; then
             cipi_notify \
                 "Cipi FrankenPHP upgraded: ${app} on $(hostname)" \
-                "The FrankenPHP build of an Octane app was upgraded.\n\nServer: $(hostname)\nApp: ${app}\nFrom: ${cur:-not pinned}\nTo: ${cand} (FrankenPHP $(fphp_meta "$cand" frankenphp), PHP $(fphp_meta "$cand" php))\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+                "The FrankenPHP build of an Octane app was upgraded.\n\nServer: $(hostname)\nApp: ${app}\nFrom: ${cur:-not pinned}\nTo: ${cand} (FrankenPHP $(fphp_meta "$cand" frankenphp), PHP $(fphp_meta "$cand" php))\nTime: $(notify_now)" \
                 frankenphp_upgrade
         else
             rc=1
             cipi_notify \
                 "Cipi FrankenPHP upgrade failed: ${app} on $(hostname)" \
-                "Octane did not come up on ${cand}; the app was put back on ${cur:-its previous binary}.\n\nServer: $(hostname)\nApp: ${app}\nLog: /var/log/cipi-apps/${app}/octane.log\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+                "Octane did not come up on ${cand}; the app was put back on ${cur:-its previous binary}.\n\nServer: $(hostname)\nApp: ${app}\nLog: /var/log/cipi-apps/${app}/octane.log\nTime: $(notify_now)" \
                 frankenphp_upgrade
         fi
     done

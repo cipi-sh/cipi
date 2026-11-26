@@ -71,7 +71,23 @@ source "${CIPI_LIB}/notifications.sh" 2>/dev/null || true
 source "${CIPI_LIB}/smtp.sh" 2>/dev/null || true
 
 HOSTNAME=$(hostname 2>/dev/null || echo "unknown")
+# In the zone notifications are written in, and with its name (5.17.0).
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+NOW=$(notify_now 2>/dev/null || date '+%Y-%m-%d %H:%M:%S %Z')
 LABEL_LC=$(printf '%s' "$LABEL" | tr '[:upper:]' '[:lower:]')
+
+# The webhook deploy succeeded: the app's nginx page cache (cipi cache <app>
+# on) holds the pages of the release before — emptied here, where root runs
+# for the caller's own app (the sudoers rule fixes APP), and before
+# Cloudflare's purge so that the edge fetches the new pages. Never fatal.
+CACHE_LINE=""
+if [[ "$IS_SUCCESS" == true ]] && vault_read apps.json 2>/dev/null | jq -e --arg a "$APP" '.[$a].page_cache.enabled == true' >/dev/null 2>&1; then
+    declare -f app_get >/dev/null 2>&1 || app_get() { vault_read apps.json | jq -r --arg a "$1" --arg k "$2" '.[$a][$k] // empty'; }
+    source "${CIPI_LIB}/cache.sh" >/dev/null 2>&1 || true
+    if declare -f cache_after_deploy >/dev/null 2>&1; then
+        CACHE_LINE=$(cache_after_deploy "$APP" 2>/dev/null) || CACHE_LINE=""
+    fi
+fi
 
 # The webhook deploy succeeded: Cloudflare's cache of the app's hostnames
 # when the app asked for it (cipi zt purge <app> --on-deploy=on). Root work
@@ -91,9 +107,10 @@ fi
 if [[ "$IS_SUCCESS" == true ]]; then
     NOTIFY_TRIGGER="deploy_success"
     SUBJECT="Cipi deploy succeeded: ${APP} (${HOSTNAME})"
-    BODY="Automatic deploy for '${APP}' completed on ${HOSTNAME} at $(date '+%Y-%m-%d %H:%M:%S').
+    BODY="Automatic deploy for '${APP}' completed on ${HOSTNAME} at ${NOW}.
 ${EXTRA:+
-${EXTRA}}${PURGE_LINE:+
+${EXTRA}}${CACHE_LINE:+
+${CACHE_LINE}}${PURGE_LINE:+
 ${PURGE_LINE}}"
 else
     NOTIFY_TRIGGER="cron_fail"
@@ -111,7 +128,7 @@ else
         fi
     fi
 
-    BODY="${LABEL^} for '${APP}' failed with exit code ${EXIT_CODE} on ${HOSTNAME} at $(date '+%Y-%m-%d %H:%M:%S').
+    BODY="${LABEL^} for '${APP}' failed with exit code ${EXIT_CODE} on ${HOSTNAME} at ${NOW}.
 ${EXTRA:+
 ${EXTRA}}
 Output (last 30 lines):

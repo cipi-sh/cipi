@@ -853,6 +853,37 @@ deployer_release_name_ensure_hook() {
     return 0
 }
 
+# recipe/laravel.php's own `deploy` task runs artisan:storage:link,
+# artisan:optimize and artisan:migrate after the vendors; Cipi's hooks run the
+# same three right before it. Every deploy did each of them twice (5.17.0),
+# and a step turned off in the app's deploy-config still ran once. This appends
+# lib/deployer/flow.php, which makes the list of the `deploy` task Cipi's own,
+# so only the hooks run. Laravel and Octane recipes only.
+#
+# Returns 0 when the flow is there or was added, 2 when the file was left as
+# it is on purpose: it defines its own `deploy` task, or the three hooks are
+# not where Cipi writes them (a deploy.php edited by hand — taking the recipe's
+# steps away from it could leave it without a migration at all).
+deployer_flow_ensure_hook() {
+    local app="$1" df cur tpl step
+    df="/home/${app}/.deployer/deploy.php"
+    [[ -f "$df" ]] || return 1
+    [[ "$(app_get "$app" custom 2>/dev/null || true)" == "true" ]] && return 0
+    [[ "$(app_get "$app" runtime 2>/dev/null || true)" == "node" ]] && return 0
+    cur=$(app_read "$app" "$df") || return 1
+    grep -q 'cipi:deploy-flow' <<< "$cur" && return 0
+    grep -q "recipe/laravel.php" <<< "$cur" || return 0
+    grep -qE '^[[:space:]]*\?>[[:space:]]*$' <<< "$cur" && return 1
+    grep -qE "^[[:space:]]*task\([[:space:]]*['\"]deploy['\"][[:space:]]*," <<< "$cur" && return 2
+    for step in storage:link migrate optimize; do
+        grep -qE "^[[:space:]]*after\('deploy:vendors', 'artisan:${step}'\);|^// artisan:${step} disabled \(deploy-config\)" <<< "$cur" || return 2
+    done
+    tpl="${CIPI_LIB}/deployer/flow.php"
+    [[ -f "$tpl" ]] || return 1
+    app_append "$app" "$df" < "$tpl" || return 1
+    return 0
+}
+
 # What the move from Deployer 6 to 8 left behind in an app that had released
 # on Deployer 6, repaired as the app user (idempotent, prints one line per
 # change and nothing when there was nothing to do):
@@ -1120,7 +1151,7 @@ _update_apps_public() {
             basic_auth, www_redirect, redirect, redirects, proxies, force_https, custom, docroot, engine,
             octane, octane_port, reverb, reverb_port, horizon, schedule, node_build,
             cloned_from, predeploy_snapshot, limits, ini, health_url, health_expect,
-            ssl_dns_provider, backup_profiles, search, databases,
+            ssl_dns_provider, backup_profiles, search, databases, page_cache,
             runtime, node_mode, node_version, node_framework, node_output, node_start, node_health, node_ports
         })
     ' > "${CIPI_CONFIG}/apps-public.json" 2>/dev/null || return 0
@@ -2188,6 +2219,74 @@ logrotate_cipi_check() {
     return 1
 }
 
+# Ubuntu's /var/log is root:syslog 0775 wherever rsyslog is installed, and
+# logrotate (as root) refuses a log whose directory a group other than root
+# can write unless the rule says who to rotate as: "su". /etc/logrotate.conf
+# says it for every rule it includes (su root adm), so the nightly run
+# rotated Cipi's logs in /var/log all along — but a rule read on its own has
+# no such line, and `logrotate -d /etc/logrotate.d/cipi-*`, which is what
+# logrotate_cipi_check and `cipi pending` run, called every one of them
+# skipped: auth.log, fail2ban.log, ufw.log, the panel's logs (5.17.0).
+#
+# Cipi's shared rules say it themselves from now on. This adds
+# "su root adm" — what Ubuntu's own configuration gives them — to every block
+# of a cipi-* rule file that names a log directly in /var/log and has no su
+# line of its own; a server whose logrotate.conf lost its su line gets those
+# logs rotated for real. The per-app rules (cipi-home-<app>) already rotate
+# as the app user and are not read. Prints the files it changed, one per
+# line; a file it cannot write is left as it is.
+logrotate_cipi_su() {
+    local d="${CIPI_LOGROTATE_D:-/etc/logrotate.d}" grp=adm f tmp
+    [[ -d "$d" ]] || return 0
+    getent group adm >/dev/null 2>&1 || grp=root
+    for f in "$d"/cipi-*; do
+        [[ -f "$f" && ! -L "$f" ]] || continue
+        [[ "${f##*/}" == cipi-home-* ]] && continue
+        tmp=$(mktemp) || return 1
+        if ! awk -v grp="$grp" '
+            function flush(   i) {
+                for (i = 1; i <= n; i++) {
+                    print buf[i]
+                    if (direct && !has_su && i == open_at) print "    su root " grp
+                }
+                n = 0; direct = 0; has_su = 0; open_at = 0; inblock = 0; inscript = 0
+            }
+            {
+                buf[++n] = $0
+                line = $0; sub(/^[ \t]+/, "", line); sub(/[ \t\r]+$/, "", line)
+                if (!inblock) {
+                    if (line == "" || line ~ /^#/) next
+                    brace = (line ~ /\{$/)
+                    if (brace) sub(/[ \t]*\{$/, "", line)
+                    m = split(line, part, /[ \t]+/)
+                    for (j = 1; j <= m; j++) {
+                        p = part[j]; gsub(/["\047]/, "", p)
+                        if (p ~ /^\/var\/log\/[^\/]+$/) direct = 1
+                    }
+                    if (brace) { inblock = 1; open_at = n }
+                    next
+                }
+                if (inscript) { if (line == "endscript") inscript = 0; next }
+                if (line ~ /^(prerotate|postrotate|firstaction|lastaction|preremove)([ \t]|$)/) { inscript = 1; next }
+                if (line ~ /^su([ \t]|$)/) has_su = 1
+                if (line == "}") flush()
+            }
+            END { flush() }' "$f" > "$tmp" 2>/dev/null; then
+            rm -f "$tmp"; continue
+        fi
+        if [[ ! -s "$tmp" ]] || cmp -s "$tmp" "$f"; then
+            rm -f "$tmp"; continue
+        fi
+        # root:root 0644 — logrotate ignores a rule file with any other owner
+        # or a mode that lets someone else write it.
+        if install -m 644 -o root -g root "$tmp" "$f" 2>/dev/null; then
+            echo "${f##*/}"
+        fi
+        rm -f "$tmp"
+    done
+    return 0
+}
+
 # Laravel apps log to one file, storage/logs/laravel.log, which logrotate
 # (cipi-app-logs) rotates, compresses and expires. With the `daily` channel
 # Laravel named a file per day and logrotate then rotated each of those once:
@@ -2717,6 +2816,10 @@ if _cipi_config_writable 2>/dev/null; then
     done
     ensure_apps_json_api_access
 fi
+
+# The time of a notification. lib/notifications.sh, when it is there, defines
+# the one that follows `cipi notification timezone`.
+notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
 
 # Email notifications (optional) — cipi_notify "Subject" "Body" [trigger_id]
 [[ -f "${CIPI_LIB}/notifications.sh" ]] && source "${CIPI_LIB}/notifications.sh"

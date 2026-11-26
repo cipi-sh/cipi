@@ -3,6 +3,10 @@
 # Cipi — HTTP healthchecks + alerts
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 [[ -z "${HEALTH_STATE_DIR:-}" ]] && readonly HEALTH_STATE_DIR="${CIPI_LOG}/health"
 [[ -z "${HEALTH_CRON:-}" ]]      && readonly HEALTH_CRON="/etc/cron.d/cipi-health"
 [[ -z "${HEALTH_HELPER:-}" ]]    && readonly HEALTH_HELPER="/usr/local/bin/cipi-health-check"
@@ -275,7 +279,7 @@ health_post_deploy() {
     [[ "$code" == "404" ]] && origin_hint="404: the URL does not exist on the app — Laravel serves /up only with the health route on (bootstrap/app.php: health: '/up').\n${origin_hint}"
     cipi_notify \
         "Cipi post-deploy healthcheck failed: ${app} on $(hostname)" \
-        "The application did not answer correctly after a ${context}.\n\nServer: $(hostname)\nApp: ${app}\nRelease now live: ${release:-?}\nURL: ${url}\nExpected: ${expect}\nGot: ${code}\nAttempts: ${HEALTH_PD_ATTEMPTS} over $(( grace + (HEALTH_PD_ATTEMPTS - 1) * HEALTH_PD_DELAY ))s\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nThe release is live and serving this response.\nRoll back with:  cipi deploy ${app} --rollback\nDeploy log:      /home/${app}/logs/deploy.log\n\n${origin_hint}\nChange the URL:        cipi health set ${app} --url=…\nSkip it after deploys: cipi health set ${app} --no-postdeploy\nRemove it:             cipi health unset ${app}" \
+        "The application did not answer correctly after a ${context}.\n\nServer: $(hostname)\nApp: ${app}\nRelease now live: ${release:-?}\nURL: ${url}\nExpected: ${expect}\nGot: ${code}\nAttempts: ${HEALTH_PD_ATTEMPTS} over $(( grace + (HEALTH_PD_ATTEMPTS - 1) * HEALTH_PD_DELAY ))s\nTime: $(notify_now)\n\nThe release is live and serving this response.\nRoll back with:  cipi deploy ${app} --rollback\nDeploy log:      /home/${app}/logs/deploy.log\n\n${origin_hint}\nChange the URL:        cipi health set ${app} --url=…\nSkip it after deploys: cipi health set ${app} --no-postdeploy\nRemove it:             cipi health unset ${app}" \
         deploy_health_fail
     return 1
 }

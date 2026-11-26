@@ -16,6 +16,10 @@
 # must not slow down a deploy or a cron run.
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 [[ -z "${ALERTS_CFG:-}" ]] && readonly ALERTS_CFG="${CIPI_CONFIG}/alerts.json"
 
 _alert_types() { echo "slack discord mattermost googlechat telegram ntfy pushover webhook resend ses"; }
@@ -210,11 +214,15 @@ _alert_deliver_channel() {
             # With a secret, the receiver can tell the request is ours:
             # X-Cipi-Signature: sha256=<HMAC-SHA256 of the body, hex>.
             local payload secret sig
+            # server is the hostname, as always; server_name the name given
+            # with `cipi notification server-name` (null without one).
+            local sname=""
+            declare -f _notify_server_name >/dev/null 2>&1 && sname=$(_notify_server_name 2>/dev/null || true)
             payload=$(jq -nc \
-                --arg server "$(hostname)" --arg trigger "$trigger" \
+                --arg server "$(hostname)" --arg name "$sname" --arg trigger "$trigger" \
                 --arg subject "$subject" --arg body "$body" \
                 --argjson ts "$(date +%s)" \
-                '{server:$server, trigger:$trigger, subject:$subject, body:$body, ts:$ts}')
+                '{server:$server, server_name:(if $name == "" then null else $name end), trigger:$trigger, subject:$subject, body:$body, ts:$ts}')
             secret=$(jq -r '.secret // ""' <<<"$ch")
             if [[ -n "$secret" ]]; then
                 sig=$(_alert_hmac "key:${secret}" "$payload")
@@ -504,7 +512,7 @@ _alerts_test() {
     _alerts_ensure_config
     local cfg; cfg=$(vault_read alerts.json)
     local subject="Cipi test alert on $(hostname)"
-    local body="Test notification from Cipi.\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    local body="Test notification from Cipi.\nServer: $(hostname)\nTime: $(notify_now)"
 
     if [[ "$id" == "all" ]]; then
         local n; n=$(echo "$cfg" | jq '[.channels[] | select(.enabled != false)] | length')

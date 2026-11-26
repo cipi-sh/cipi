@@ -9,6 +9,10 @@
 # Rescue: TLS listener, one-shot token, allowlists the TCP peer. Not a login.
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 [[ -z "${CROWDSEC_ALLOW_FILE:-}" ]] && readonly CROWDSEC_ALLOW_FILE="${CIPI_CONFIG}/crowdsec-allow.list"
 [[ -z "${CROWDSEC_CRON:-}" ]]       && readonly CROWDSEC_CRON="/etc/cron.d/cipi-crowdsec"
 [[ -z "${CROWDSEC_PARSER_DIR:-}" ]] && readonly CROWDSEC_PARSER_DIR="/etc/crowdsec/parsers/s02-enrich"
@@ -901,7 +905,7 @@ _crowdsec_rescue_mail() {
     fp=$(_crowdsec_rescue_fingerprint) || fp="n/a"
     cipi_notify \
         "Cipi CrowdSec rescue on $(hostname)" \
-        "${reason}\n\nThis is not a login. The URL only allowlists the IP that fetches it.\n\n${curl}\nFingerprint SHA256: ${fp}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "${reason}\n\nThis is not a login. The URL only allowlists the IP that fetches it.\n\n${curl}\nFingerprint SHA256: ${fp}\nTime: $(notify_now)" \
         crowdsec_rescue
 }
 
@@ -1051,7 +1055,7 @@ _crowdsec_enable() {
     rescue_curl=$(_crowdsec_rescue_curl 2>/dev/null || echo "")
     cipi_notify \
         "Cipi CrowdSec enabled on $(hostname)" \
-        "CrowdSec is reading sshd and nginx logs. Bans are enforced by the ${fwmode} firewall bouncer (registered via cscli bouncers add).\n\nFail2ban is unchanged. This is not a WAF.\n\nAllowlists: localhost, RFC1918, Let's Encrypt HTTP-01, GitHub/GitLab/Bitbucket webhook ranges, this SSH session.\nAdd more with: cipi crowdsec allow <ip|cidr>\n\nRescue (not a login — one GET allowlists the calling IP, then the token dies):\n${rescue_curl}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "CrowdSec is reading sshd and nginx logs. Bans are enforced by the ${fwmode} firewall bouncer (registered via cscli bouncers add).\n\nFail2ban is unchanged. This is not a WAF.\n\nAllowlists: localhost, RFC1918, Let's Encrypt HTTP-01, GitHub/GitLab/Bitbucket webhook ranges, this SSH session.\nAdd more with: cipi crowdsec allow <ip|cidr>\n\nRescue (not a login — one GET allowlists the calling IP, then the token dies):\n${rescue_curl}\nTime: $(notify_now)" \
         crowdsec_enable
     success "CrowdSec enabled (engine + ${fwmode} bouncer)"
     info "cipi ban list|unban now includes CrowdSec decisions"
@@ -1094,7 +1098,7 @@ _crowdsec_disable() {
     log_event "CrowdSec disabled on $(hostname)"
     cipi_notify \
         "Cipi CrowdSec disabled on $(hostname)" \
-        "CrowdSec, its bouncer and its firewall chains were removed. Fail2ban is unchanged.\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "CrowdSec, its bouncer and its firewall chains were removed. Fail2ban is unchanged.\nTime: $(notify_now)" \
         crowdsec_disable
     success "CrowdSec removed — firewall is back to fail2ban only"
 }

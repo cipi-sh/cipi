@@ -165,10 +165,16 @@ _release() {
     basename "$target"
 }
 
-BRANCH=""
-if [[ -d "${HOME_DIR}/current/.git" ]]; then
+# The branch this deploy takes: what the recipe says, as Deployer reads it.
+# A release made by Deployer 7 or 8 is an archive of the commit, not a
+# checkout — there is no .git in it to ask — and until 5.17.0 the log and the
+# notification said "branch=?" for every app deployed that way. A checkout
+# (a recipe that clones) is still asked when the recipe names no branch.
+BRANCH=$(sed -n "s/^set('branch', '\(.*\)');[[:space:]]*\$/\1/p" "$DEPLOY_FILE" 2>/dev/null | sed -n 1p)
+if [[ -z "$BRANCH" && -d "${HOME_DIR}/current/.git" ]]; then
     BRANCH=$(git -C "${HOME_DIR}/current" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
 fi
+BRANCH=$(printf '%s' "$BRANCH" | tr -d '[:space:][:cntrl:]' | cut -c1-120)
 
 REL_BEFORE=$(_release)
 T0=$SECONDS
@@ -225,12 +231,23 @@ RESULT="OK"; [[ $RC -eq 0 ]] || RESULT="FAILED"
 } >> "$LOG" 2>/dev/null || true
 
 # What was actually published — the part worth reading in the alert.
+# A release that is a checkout is asked directly; one that is an archive
+# (Deployer 7 and 8) names its commit in REVISION, and the commit itself is in
+# Deployer's mirror of the repository, ~/.dep/repo.
 COMMIT=""
+COMMIT_FMT='%h — %s%nAuthor: %an%nCommitted: %ad'
 REL_DIR="${HOME_DIR}/releases/${REL_AFTER}"
 [[ -d "${REL_DIR}/.git" ]] || REL_DIR="${HOME_DIR}/current"
 if [[ -d "${REL_DIR}/.git" ]]; then
-    COMMIT=$(git -C "$REL_DIR" log -1 --format='%h — %s%nAuthor: %an%nCommitted: %ad' \
+    COMMIT=$(git -C "$REL_DIR" --no-pager log -1 --format="$COMMIT_FMT" \
         --date=format:'%Y-%m-%d %H:%M' 2>/dev/null || true)
+elif [[ -n "$REL_AFTER" && -f "${HOME_DIR}/releases/${REL_AFTER}/REVISION" && ! -L "${HOME_DIR}/releases/${REL_AFTER}/REVISION" \
+        && -d "${HOME_DIR}/.dep/repo" ]]; then
+    REV=$(head -n 1 "${HOME_DIR}/releases/${REL_AFTER}/REVISION" 2>/dev/null | tr -cd '0-9a-f')
+    if [[ ${#REV} -ge 7 && ${#REV} -le 64 ]]; then
+        COMMIT=$(timeout 15 git --git-dir="${HOME_DIR}/.dep/repo" --no-pager log -1 --format="$COMMIT_FMT" \
+            --date=format:'%Y-%m-%d %H:%M' "$REV" 2>/dev/null || true)
+    fi
 fi
 
 DETAIL="Trigger: ${TRIGGER}

@@ -3,6 +3,10 @@
 # Cipi — SSH Key Management, and remote SSH access of app users
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 AUTHORIZED_KEYS="/home/cipi/.ssh/authorized_keys"
 
 ssh_command() {
@@ -158,7 +162,7 @@ _ssh_add() {
     local server_ip; server_ip=$(curl -s --max-time 3 https://checkip.amazonaws.com 2>/dev/null || hostname)
     cipi_notify \
         "Cipi SSH key added on $(hostname)" \
-        "An SSH key was added to the cipi user.\n\nServer: $(hostname) (${server_ip})\nComment: ${comment}\nFingerprint: ${fingerprint}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "An SSH key was added to the cipi user.\n\nServer: $(hostname) (${server_ip})\nComment: ${comment}\nFingerprint: ${fingerprint}\nTime: $(notify_now)" \
         ssh_key_add
 }
 
@@ -264,7 +268,7 @@ _ssh_rename() {
     local server_ip; server_ip=$(curl -s --max-time 3 https://checkip.amazonaws.com 2>/dev/null || hostname)
     cipi_notify \
         "Cipi SSH key renamed on $(hostname)" \
-        "An SSH key was renamed on the cipi user.\n\nServer: $(hostname) (${server_ip})\nOld name: ${old_comment}\nNew name: ${new_name}\nFingerprint: ${fingerprint}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "An SSH key was renamed on the cipi user.\n\nServer: $(hostname) (${server_ip})\nOld name: ${old_comment}\nNew name: ${new_name}\nFingerprint: ${fingerprint}\nTime: $(notify_now)" \
         ssh_key_rename
 }
 
@@ -382,7 +386,7 @@ _ssh_remove() {
     local server_ip; server_ip=$(curl -s --max-time 3 https://checkip.amazonaws.com 2>/dev/null || hostname)
     cipi_notify \
         "Cipi SSH key removed on $(hostname)" \
-        "An SSH key was removed from the cipi user.\n\nServer: $(hostname) (${server_ip})\nComment: ${removed_comment}\nFingerprint: ${removed_fp}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\nRemaining keys: $((${#keys[@]} - 1))" \
+        "An SSH key was removed from the cipi user.\n\nServer: $(hostname) (${server_ip})\nComment: ${removed_comment}\nFingerprint: ${removed_fp}\nTime: $(notify_now)\nRemaining keys: $((${#keys[@]} - 1))" \
         ssh_key_remove
 }
 
@@ -783,7 +787,7 @@ _ssh_apps_change() {
         log_action "SSH APPS ${action}: ${who}"
         cipi_notify \
             "Cipi app SSH access ${want}: ${who} on $(hostname)" \
-            "SSH/SFTP access from outside was ${want}.\n\nServer: $(hostname)\nApp users: ${who}\nNew apps: $(_ssh_apps_default)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "SSH/SFTP access from outside was ${want}.\n\nServer: $(hostname)\nApp users: ${who}\nNew apps: $(_ssh_apps_default)\nTime: $(notify_now)" \
             app_ssh_access
     fi
 }

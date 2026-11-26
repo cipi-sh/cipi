@@ -3,6 +3,10 @@
 # Cipi — Server credentials
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 # Port 3306 runs MariaDB or MySQL (db_mysql_* in common.sh); MariaDB for
 # whatever sources this file without common.sh.
 declare -f db_mysql_flavor >/dev/null 2>&1 || db_mysql_flavor() { echo mariadb; }
@@ -225,7 +229,7 @@ credentials_show() {
     log_action "CREDENTIALS SHOWN"
     cipi_notify \
         "Cipi credentials shown on $(hostname)" \
-        "The server credentials were printed with cipi credentials.\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The server credentials were printed with cipi credentials.\n\nServer: $(hostname)\nTime: $(notify_now)" \
         credentials_show
 }
 
@@ -288,7 +292,7 @@ credentials_export() {
     fi
     cipi_notify \
         "Cipi credentials exported on $(hostname)" \
-        "The server credentials were exported with cipi credentials export.\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The server credentials were exported with cipi credentials export.\n\nServer: $(hostname)\nTime: $(notify_now)" \
         credentials_show
 }
 

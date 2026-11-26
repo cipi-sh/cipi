@@ -16,6 +16,10 @@
 #   cipi service upgrade [nginx|mariadb|postgresql|valkey] [--yes]
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 _stack_upgrade_apt() {
     DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 "$@"
 }
@@ -308,7 +312,7 @@ _stack_upgrade() {
             log_action "STACK UPGRADE: nginx ${before} (Ubuntu archive) → ${after} (nginx.org mainline)"
             cipi_notify \
                 "Cipi ${label} upgraded on $(hostname)" \
-                "nginx was moved from the Ubuntu archive build to nginx.org mainline.\n\nServer: $(hostname)\nFrom: ${before}\nTo: ${after}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+                "nginx was moved from the Ubuntu archive build to nginx.org mainline.\n\nServer: $(hostname)\nFrom: ${before}\nTo: ${after}\nTime: $(notify_now)" \
                 "$(_stack_upgrade_notify_id "$kind")"
             success "${label} upgraded (${before} → ${after})"
             exit 0
@@ -368,7 +372,7 @@ _stack_upgrade() {
         log_action "STACK UPGRADE: ${kind} ${before} → ${after} (${newly} package(s))"
         cipi_notify \
             "Cipi ${label} upgraded on $(hostname)" \
-            "${label} packages were upgraded.\n\nServer: $(hostname)\nFrom: ${before}\nTo: ${after}\nPackages upgraded: ${newly}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "${label} packages were upgraded.\n\nServer: $(hostname)\nFrom: ${before}\nTo: ${after}\nPackages upgraded: ${newly}\nTime: $(notify_now)" \
             "$(_stack_upgrade_notify_id "$kind")"
         success "${label} upgraded (${before} → ${after})"
         exit 0

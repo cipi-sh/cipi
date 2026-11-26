@@ -1293,6 +1293,10 @@ install_cipi() {
     chmod 755 /usr/local/bin/cipi-frankenphp-link
     install -d -m 755 /opt/cipi-frankenphp /opt/cipi-frankenphp/builds /opt/cipi-frankenphp/apps
 
+    # The app user's way to empty its own nginx page cache (cipi cache), by sudo
+    cp cipi-install/lib/cipi-cache-clear.sh /usr/local/bin/cipi-cache-clear
+    chmod 755 /usr/local/bin/cipi-cache-clear
+
     # Cron notification wrapper
     cp cipi-install/lib/cipi-cron-notify.sh /usr/local/bin/cipi-cron-notify
     chmod 700 /usr/local/bin/cipi-cron-notify
@@ -1384,7 +1388,7 @@ EOF
     # Templates (if any)
     cp cipi-install/templates/* /opt/cipi/templates/ 2>/dev/null || true
 
-    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /usr/local/bin/cipi-auth-notify /usr/local/bin/cipi-app-notify /usr/local/bin/cipi-app-deploy /usr/local/bin/cipi-app-post-deploy /usr/local/bin/cipi-deploy-audit /usr/local/bin/cipi-node-switch /usr/local/bin/cipi-node-run /usr/local/bin/cipi-read-app-logs /usr/local/bin/cipi-health-check /usr/local/bin/cipi-monitor /usr/local/bin/cipi-metrics /usr/local/bin/cipi-scan-manifest /usr/local/bin/cipi-crowdsec-rescue /usr/local/bin/cipi-crowdsec-rescue-hole /usr/local/bin/cipi-frankenphp-link /opt/cipi /opt/cipi-frankenphp
+    chown -R root:root /usr/local/bin/cipi /usr/local/bin/cipi-worker /usr/local/bin/cipi-cron-notify /usr/local/bin/cipi-auth-notify /usr/local/bin/cipi-app-notify /usr/local/bin/cipi-app-deploy /usr/local/bin/cipi-app-post-deploy /usr/local/bin/cipi-deploy-audit /usr/local/bin/cipi-node-switch /usr/local/bin/cipi-node-run /usr/local/bin/cipi-read-app-logs /usr/local/bin/cipi-health-check /usr/local/bin/cipi-monitor /usr/local/bin/cipi-metrics /usr/local/bin/cipi-scan-manifest /usr/local/bin/cipi-crowdsec-rescue /usr/local/bin/cipi-crowdsec-rescue-hole /usr/local/bin/cipi-frankenphp-link /usr/local/bin/cipi-cache-clear /opt/cipi /opt/cipi-frankenphp
 
     # Shell tab-completion — installed for every shell, no activation needed:
     # /etc/bash_completion.d/cipi, the zsh vendor file, and an /etc/profile.d
@@ -1563,6 +1567,7 @@ EOF
 /var/log/cipi-apps/*/deploy.log
 /var/log/cipi/*.log
 /var/log/cipi-queue.log {
+    su root adm
     daily
     missingok
     rotate 365
@@ -1593,8 +1598,16 @@ EOF
 EOF
 
     # Security logs (firewall, fail2ban, auth) — 12 months
+    # "su root adm" in every block that names a log directly in /var/log:
+    # that directory is root:syslog 0775 where rsyslog is installed, and
+    # logrotate skips a log in a directory a group other than root can write
+    # unless the rule says who to rotate as. Ubuntu's /etc/logrotate.conf says
+    # the same for the rules it includes; with the line here a rule read on
+    # its own (logrotate -d /etc/logrotate.d/cipi-*, cipi pending) agrees with
+    # the nightly run. See logrotate_cipi_su in lib/common.sh.
     cat > /etc/logrotate.d/cipi-security-logs <<'EOF'
 /var/log/fail2ban.log {
+    su root adm
     daily
     missingok
     rotate 365
@@ -1607,6 +1620,7 @@ EOF
     endscript
 }
 /var/log/ufw.log {
+    su root adm
     daily
     missingok
     rotate 365
@@ -1619,6 +1633,7 @@ EOF
     endscript
 }
 /var/log/auth.log {
+    su root adm
     daily
     missingok
     rotate 365

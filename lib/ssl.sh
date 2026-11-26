@@ -3,6 +3,10 @@
 # Cipi — SSL (Let's Encrypt)
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 _ssl_zt_lock_http() {
     vault_read zt.json 2>/dev/null | jq -e '.lock_http == true' >/dev/null 2>&1
 }
@@ -275,7 +279,7 @@ _ssl_installed() {
     log_action "SSL INSTALLED: $app ${how}"
     cipi_notify \
         "Cipi SSL installed${kind}: ${d} (${app}) on $(hostname)" \
-        "An SSL certificate was installed.\n\nServer: $(hostname)\nApp: ${app}\nDomain: ${d}\n${details}Time: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "An SSL certificate was installed.\n\nServer: $(hostname)\nApp: ${app}\nDomain: ${d}\n${details}Time: $(notify_now)" \
         ssl_install
 }
 
@@ -533,7 +537,7 @@ _ssl_force() {
     log_action "SSL FORCE HTTPS: $app"
     cipi_notify \
         "Cipi SSL force HTTPS: ${d} (${app}) on $(hostname)" \
-        "HTTP → HTTPS redirect was forced.\n\nServer: $(hostname)\nApp: ${app}\nDomain: ${d}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "HTTP → HTTPS redirect was forced.\n\nServer: $(hostname)\nApp: ${app}\nDomain: ${d}\nTime: $(notify_now)" \
         ssl_force
     success "HTTP → HTTPS redirect enabled for ${d}"
 }
@@ -545,7 +549,7 @@ _ssl_renew() {
         log_action "SSL RENEWED"
         cipi_notify \
             "Cipi SSL renewed on $(hostname)" \
-            "SSL certificates were renewed.\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "SSL certificates were renewed.\n\nServer: $(hostname)\nTime: $(notify_now)" \
             ssl_renew
         success "Renewal complete"
     else

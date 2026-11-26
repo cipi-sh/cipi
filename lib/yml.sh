@@ -35,6 +35,10 @@
 #     manual; a plan can always be inspected before anything changes.
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 yml_command() {
     local sub="${1:-}"; shift||true
     case "$sub" in
@@ -2546,7 +2550,7 @@ _yml_node_sync_cmd() {
     log_action "YML NODE SYNC: ${app} release=$(basename "$release") $(paste -sd';' - <<< "$changes")"
     cipi_notify \
         "Cipi cipi.yml node settings: ${app} on $(hostname)" \
-        "The deploy of '${app}' picked up node settings from cipi.yml.\n\nServer: $(hostname)\nApp: ${app}\nRelease: $(basename "$release")\n\n${changes}\n\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The deploy of '${app}' picked up node settings from cipi.yml.\n\nServer: $(hostname)\nApp: ${app}\nRelease: $(basename "$release")\n\n${changes}\n\nTime: $(notify_now)" \
         yml_apply
     return 0
 }
@@ -2865,7 +2869,7 @@ _yml_apply_cmd() {
     if ! _yml_load "$([[ "$auto" == "true" ]] && echo true || echo false)"; then
         [[ "$auto" == "true" ]] && cipi_notify \
             "Cipi cipi.yml invalid: ${_YML_APP} on $(hostname)" \
-            "The cipi.yml shipped with the latest release of '${_YML_APP}' failed validation and was not applied.\n\nServer: $(hostname)\nFile: ${_YML_FILE}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nRun: cipi yml validate ${_YML_APP}" \
+            "The cipi.yml shipped with the latest release of '${_YML_APP}' failed validation and was not applied.\n\nServer: $(hostname)\nFile: ${_YML_FILE}\nTime: $(notify_now)\n\nRun: cipi yml validate ${_YML_APP}" \
             yml_fail
         _yml_auto_result "$auto" "invalid"
         exit 1
@@ -2878,7 +2882,7 @@ _yml_apply_cmd() {
         error "Nothing was applied — resolve the blocking items above first."
         [[ "$auto" == "true" ]] && cipi_notify \
             "Cipi cipi.yml blocked: ${_YML_APP} on $(hostname)" \
-            "cipi.yml for '${_YML_APP}' could not be applied.\n\nServer: $(hostname)\nBlocked by:\n$(printf '  - %s\n' "${_YML_BLOCKERS[@]}")\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "cipi.yml for '${_YML_APP}' could not be applied.\n\nServer: $(hostname)\nBlocked by:\n$(printf '  - %s\n' "${_YML_BLOCKERS[@]}")\nTime: $(notify_now)" \
             yml_fail
         _yml_auto_result "$auto" "blocked"
         exit 1
@@ -2921,7 +2925,7 @@ _yml_apply_cmd() {
         log_action "YML APPLY: ${_YML_APP} applied=${applied}"
         cipi_notify \
             "Cipi cipi.yml applied: ${_YML_APP} on $(hostname)" \
-            "cipi.yml was applied.\n\nServer: $(hostname)\nApp: ${_YML_APP}\nFile: ${_YML_FILE}\nChanges: ${applied}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "cipi.yml was applied.\n\nServer: $(hostname)\nApp: ${_YML_APP}\nFile: ${_YML_FILE}\nChanges: ${applied}\nTime: $(notify_now)" \
             yml_apply
         _yml_auto_result "$auto" "applied=${applied}"
         return 0
@@ -2930,7 +2934,7 @@ _yml_apply_cmd() {
     log_action "YML APPLY: ${_YML_APP} applied=${applied} failed=${failed}"
     cipi_notify \
         "Cipi cipi.yml partially applied: ${_YML_APP} on $(hostname)" \
-        "cipi.yml was applied with errors.\n\nServer: $(hostname)\nApp: ${_YML_APP}\nApplied: ${applied}\nFailed: ${failed}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "cipi.yml was applied with errors.\n\nServer: $(hostname)\nApp: ${_YML_APP}\nApplied: ${applied}\nFailed: ${failed}\nTime: $(notify_now)" \
         yml_fail
     _yml_auto_result "$auto" "failed=${failed} applied=${applied}"
     return 1
@@ -3074,7 +3078,7 @@ _yml_apply_action() {
                 log_action "BASICAUTH ENABLED (cipi.yml): ${app}"
                 cipi_notify \
                     "Cipi basic auth enabled: ${app} on $(hostname)" \
-                    "HTTP basic auth was enabled from cipi.yml.\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\nUsers: $(cut -d: -f1 "$(_basicauth_file "$app")" | paste -sd, -)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+                    "HTTP basic auth was enabled from cipi.yml.\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\nUsers: $(cut -d: -f1 "$(_basicauth_file "$app")" | paste -sd, -)\nTime: $(notify_now)" \
                     basicauth_enable
             else
                 basicauth_disable "$app" >/dev/null
@@ -3270,7 +3274,7 @@ _yml_create_database() {
     fi
     cipi_notify \
         "Cipi database created: ${name} (${engine}) on $(hostname)" \
-        "A database declared in cipi.yml was created.\n\nServer: $(hostname)\nApp: ${app}\nEngine: ${engine}\nDatabase: ${name}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A database declared in cipi.yml was created.\n\nServer: $(hostname)\nApp: ${app}\nEngine: ${engine}\nDatabase: ${name}\nTime: $(notify_now)" \
         db_create
     return 0
 }
@@ -3474,7 +3478,7 @@ _yml_post_deploy_run() {
             if [[ "$on_fail" == "abort" ]]; then
                 cipi_notify \
                     "Cipi post-deploy failed: ${app} on $(hostname)" \
-                    "A post-deploy step declared in cipi.yml failed and post_on_failure is 'abort'.\n\nServer: $(hostname)\nApp: ${app}\nStep: ${line}\nExit: ${step_rc}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nDeploy log: ${lf:-/home/${app}/logs/deploy.log}" \
+                    "A post-deploy step declared in cipi.yml failed and post_on_failure is 'abort'.\n\nServer: $(hostname)\nApp: ${app}\nStep: ${line}\nExit: ${step_rc}\nTime: $(notify_now)\n\nDeploy log: ${lf:-/home/${app}/logs/deploy.log}" \
                     yml_post_fail 2>/dev/null || true
                 echo "${failed} of ${n} failed (abort)"
                 return "$step_rc"
@@ -3491,7 +3495,7 @@ _yml_post_deploy_run() {
     fi
     cipi_notify \
         "Cipi post-deploy failed: ${app} on $(hostname)" \
-        "One or more post-deploy steps declared in cipi.yml failed (post_on_failure: warn — deploy left live).\n\nServer: $(hostname)\nApp: ${app}\nFailed: ${failed} of ${n}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nDeploy log: ${lf:-/home/${app}/logs/deploy.log}" \
+        "One or more post-deploy steps declared in cipi.yml failed (post_on_failure: warn — deploy left live).\n\nServer: $(hostname)\nApp: ${app}\nFailed: ${failed} of ${n}\nTime: $(notify_now)\n\nDeploy log: ${lf:-/home/${app}/logs/deploy.log}" \
         yml_post_fail 2>/dev/null || true
     echo "${failed} of ${n} failed (warn)"
     return "$rc"

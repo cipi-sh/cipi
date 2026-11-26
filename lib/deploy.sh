@@ -3,6 +3,10 @@
 # Cipi — Deploy Management (Deployer)
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 # Refuse to invoke `dep` for an app pinned to PHP < 8.3 when Deployer 8+ is
 # installed: `dep` runs under the app's PHP, and the v8 phar can't even start
 # on PHP < 8.3, so this fails fast with a clear message instead of a cryptic
@@ -238,7 +242,7 @@ _deploy_predeploy_snapshot() {
 
     cipi_notify \
         "Cipi pre-deploy snapshot failed: ${app} on $(hostname)" \
-        "Database dump before deploy failed.\n\nServer: $(hostname)\nApp: ${app}\nEngine: ${eng}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Database dump before deploy failed.\n\nServer: $(hostname)\nApp: ${app}\nEngine: ${eng}\nTime: $(notify_now)" \
         deploy_snapshot_fail
     if [[ "$required" == "true" ]]; then
         error "Pre-deploy snapshot failed (required)"
@@ -352,6 +356,17 @@ _deploy_run() {
         local post_line post_rc=0
         post_line=$(_deploy_run_post_deploy "$app") || post_rc=$?
         local health_line; health_line=$(_deploy_health_check "$app")
+        # The nginx page cache (cipi cache <app> on): the pages of the release
+        # before name its assets. Before Cloudflare's purge, so that the edge
+        # fetches the new pages and not what nginx still held.
+        local cache_line=""
+        if [[ -n "$(app_get "$app" page_cache)" ]]; then
+            declare -f cache_after_deploy >/dev/null 2>&1 || source "${CIPI_LIB}/cache.sh" 2>/dev/null || true
+            if declare -f cache_after_deploy >/dev/null 2>&1; then
+                cache_line=$(cache_after_deploy "$app" 2>/dev/null) || cache_line=""
+                [[ -n "$cache_line" ]] && info "$cache_line"
+            fi
+        fi
         # cipi zt purge <app> --on-deploy=on: Cloudflare's cache of the app's
         # hostnames, once the new release answers.
         local purge_line=""
@@ -370,7 +385,7 @@ _deploy_run() {
         [[ -n "${_DEPLOY_YML_LINE:-}" ]] && yml_mail="cipi.yml: ${_DEPLOY_YML_LINE}\n"
         cipi_notify \
             "Cipi deploy succeeded: ${app} release ${rel_after:-?} on $(hostname)" \
-            "Deploy completed successfully.\n\n$(_deploy_release_details "$app" "$rel_after" "$branch_disp" "$secs")Previous release: ${rel_before:-none}\nPost-deploy: ${post_line}\n${yml_mail}Healthcheck: ${health_line}\n${purge_line:+${purge_line}\n}" \
+            "Deploy completed successfully.\n\n$(_deploy_release_details "$app" "$rel_after" "$branch_disp" "$secs")Previous release: ${rel_before:-none}\nPost-deploy: ${post_line}\n${yml_mail}Healthcheck: ${health_line}\n${cache_line:+${cache_line}\n}${purge_line:+${purge_line}\n}" \
             deploy_success
         # A plain return: `[[ … ]] && return` on this line was false (status 1)
         # whenever the steps passed, and under `set -e` that 1 became the exit
@@ -467,8 +482,21 @@ _deploy_commit_info() {
     home=$(deploy_app_home "$app")
     dir="${home}/releases/${release}"
     [[ -n "$release" ]] || return 0
-    [[ -d "${dir}/.git" ]] || dir="${home}/current"
-    [[ -d "${dir}/.git" ]] || return 0
+    # A release made by Deployer 7 or 8 is an archive of the commit, not a
+    # checkout: the commit is named in its REVISION and kept in Deployer's
+    # mirror, ~/.dep/repo. Without this the notifications of every app
+    # deployed that way had no Commit, Author or Committed line (5.17.0).
+    if [[ ! -d "${dir}/.git" ]]; then
+        local rev=""
+        rev=$(app_as "$app" head -n 1 -- "${dir}/REVISION" 2>/dev/null < /dev/null | tr -cd '0-9a-f' || true)
+        if [[ ${#rev} -ge 7 && ${#rev} -le 64 && -d "${home}/.dep/repo" ]]; then
+            app_as "$app" timeout 15 git --git-dir="${home}/.dep/repo" --no-pager log -1 --format='%h|%s|%an|%ad' \
+                --date=format:'%Y-%m-%d %H:%M' "$rev" 2>/dev/null < /dev/null || true
+            return 0
+        fi
+        dir="${home}/current"
+        [[ -d "${dir}/.git" ]] || return 0
+    fi
     # git, as the app user: a repository carries its own configuration, and
     # root does not run git on one an app user controls (app_as in common.sh).
     # As root git refused these trees anyway ("dubious ownership") and the
@@ -493,7 +521,7 @@ _deploy_release_details() {
     [[ -n "$author" ]]  && printf 'Author: %s\n' "$author"
     [[ -n "$cdate" ]]   && printf 'Committed: %s\n' "$cdate"
     printf 'Duration: %ss\n' "$secs"
-    printf 'Time: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+    printf 'Time: %s\n' "$(notify_now)"
     printf 'Deploy log: %s\n' "$(deploy_log_file "$app")"
 }
 
@@ -1213,11 +1241,20 @@ _deploy_rollback() {
         if [[ -x /usr/local/bin/cipi-scan-manifest ]]; then
             /usr/local/bin/cipi-scan-manifest "$app" >/dev/null 2>&1 || true
         fi
+        # The page cache holds the pages of the release that was just left.
+        if [[ -n "$(app_get "$app" page_cache)" ]]; then
+            declare -f cache_after_deploy >/dev/null 2>&1 || source "${CIPI_LIB}/cache.sh" 2>/dev/null || true
+            if declare -f cache_after_deploy >/dev/null 2>&1; then
+                local rb_cache=""
+                rb_cache=$(cache_after_deploy "$app" 2>/dev/null) || rb_cache=""
+                [[ -n "$rb_cache" ]] && info "$rb_cache"
+            fi
+        fi
         success "Rollback done${rel_after:+  (now on release ${rel_after})}"
         log_action "ROLLBACK OK: $app ${rel_before:-?} → ${rel_after:-?}"
         cipi_notify \
             "Cipi deploy rollback: ${app} on $(hostname)" \
-            "Deploy rollback completed.\n\nServer: $(hostname)\nApp: ${app}\nRelease: ${rel_before:-?} → ${rel_after:-?}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "Deploy rollback completed.\n\nServer: $(hostname)\nApp: ${app}\nRelease: ${rel_before:-?} → ${rel_after:-?}\nTime: $(notify_now)" \
             deploy_rollback
     else
         deploy_log_close "$app" "ROLLBACK FAILED" "$rel_after" "$secs" "$rc"
@@ -1226,7 +1263,7 @@ _deploy_rollback() {
         log_action "ROLLBACK FAIL: $app exit=$rc"
         cipi_notify \
             "Cipi deploy rollback failed: ${app} on $(hostname)" \
-            "Rollback exited with code ${rc}.\n\nServer: $(hostname)\nApp: ${app}\nRelease still live: ${rel_after:-?}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nLast lines of ${lf}:\n$(tail -n 30 "$lf" 2>/dev/null || echo '<log unreadable>')" \
+            "Rollback exited with code ${rc}.\n\nServer: $(hostname)\nApp: ${app}\nRelease still live: ${rel_after:-?}\nTime: $(notify_now)\n\nLast lines of ${lf}:\n$(tail -n 30 "$lf" 2>/dev/null || echo '<log unreadable>')" \
             deploy_fail
         return "$rc"
     fi

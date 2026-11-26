@@ -29,6 +29,7 @@ app_unsuspend|Apps|App unsuspended
 app_ssh_password_reset|Apps|App SSH password reset
 app_ssh_access|Apps|App user SSH access enabled or disabled
 app_db_password_reset|Apps|App DB password reset
+app_cache|Apps|Page cache turned on or off for an app
 alias_add|Domains|Alias added
 alias_remove|Domains|Alias removed
 www_add|Domains|WWW alias added
@@ -239,10 +240,102 @@ _notify_smtp_events() {
 # stops the others, nor the command that raised the notification. The PAM,
 # cron and deploy-webhook helpers send through here too — before 5.15.0 they
 # reached SMTP alone.
+# ── How a notification reads: its time zone, the server's name ──
+# Two settings of notifications.json, next to the triggers (5.17.0):
+#
+#   timezone     the zone the "Time:" of a notification is written in. Unset:
+#                the server's own (timedatectl), which on a cloud image is
+#                UTC. Setting it changes how notifications read and nothing
+#                else — not the server's clock, cron, or the logs.
+#   server_name  the name the server goes by in notifications, next to its
+#                hostname: "production (vmi12334)" where the provider named
+#                the machine vmi12334 and the panel calls it production.
+
+# An IANA name this server has the rules for (Europe/Rome, UTC, Etc/GMT+3).
+_notify_timezone_valid() {
+    local tz="${1:-}"
+    [[ "$tz" =~ ^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+){0,2}$ ]] || return 1
+    [[ -f "${NOTIFY_ZONEINFO:-/usr/share/zoneinfo}/${tz}" ]]
+}
+
+# Letters, digits, spaces, dots, dashes and underscores; 40 characters. What
+# a hostname or a panel's name for a server is made of — and nothing a mail
+# subject, a chat message or a sed replacement reads as its own.
+_notify_server_name_valid() {
+    local re='^[A-Za-z0-9]([A-Za-z0-9 ._-]{0,38}[A-Za-z0-9._-])?$'
+    [[ "${1:-}" =~ $re ]]
+}
+
+_notify_setting() {   # <key> → its value in notifications.json, or nothing
+    [[ -f "$NOTIFICATIONS_CFG" ]] || return 0
+    vault_read notifications.json 2>/dev/null | jq -r --arg k "$1" '.[$k] // empty | strings' 2>/dev/null || true
+}
+
+# The zone notifications are written in, when one is set and still valid.
+_notify_timezone() {
+    local tz; tz=$(_notify_setting timezone)
+    if _notify_timezone_valid "$tz"; then printf '%s' "$tz"; fi
+    return 0
+}
+
+_notify_server_name() {
+    local n; n=$(_notify_setting server_name)
+    if _notify_server_name_valid "$n"; then printf '%s' "$n"; fi
+    return 0
+}
+
+# "2026-11-26 16:03:49 CET" — the time of a notification, with the zone it
+# is in: the one of `cipi notification timezone`, or the server's. Arguments
+# go to date (notify_now -d "@1764169429").
+notify_now() {
+    local tz; tz=$(_notify_timezone 2>/dev/null || true)
+    if [[ -n "$tz" ]]; then
+        TZ="$tz" date "$@" '+%Y-%m-%d %H:%M:%S %Z'
+    else
+        date "$@" '+%Y-%m-%d %H:%M:%S %Z'
+    fi
+}
+
+# <text> with the hostname replaced by <replacement>, where the hostname
+# stands as a word of its own: not inside a longer name (vmi12334-db), not as
+# the first label of a domain (vmi12334.example.net).
+_notify_host_replace() {   # <text> <hostname> <replacement>
+    CIPI_NH_HOST="$2" CIPI_NH_REPL="$3" awk '
+        function apply(s, host, repl,   out, i, L, pre, post, post2) {
+            out = ""; L = length(host)
+            while ((i = index(s, host)) > 0) {
+                pre = (i == 1) ? "" : substr(s, i - 1, 1)
+                post = substr(s, i + L, 1); post2 = substr(s, i + L + 1, 1)
+                if (pre !~ /[A-Za-z0-9._-]/ && post !~ /[A-Za-z0-9_-]/ && !(post == "." && post2 ~ /[A-Za-z0-9]/))
+                    out = out substr(s, 1, i - 1) repl
+                else
+                    out = out substr(s, 1, i + L - 1)
+                s = substr(s, i + L)
+            }
+            return out s
+        }
+        { buf = buf (NR > 1 ? "\n" : "") $0 }
+        END { printf "%s", apply(buf, ENVIRON["CIPI_NH_HOST"], ENVIRON["CIPI_NH_REPL"]) }' <<< "$1"
+}
+
 _notify_fanout() {   # <subject> <body> [trigger]
     local subject="$1" body="$2" trigger="${3:-}"
     declare -f log_event >/dev/null 2>&1 || log_event() { :; }
     declare -f _alerts_deliver >/dev/null 2>&1 || source "${CIPI_LIB}/alerts.sh" 2>/dev/null || true
+    # The server by the name it was given (cipi notification server-name):
+    # the subject carries the name, the body the name and the hostname. Here,
+    # where every notification passes, and not in each of the messages.
+    local _sname _host _s _b
+    _sname=$(_notify_server_name 2>/dev/null || true)
+    if [[ -n "$_sname" ]]; then
+        _host=$(hostname 2>/dev/null || true)
+        if [[ -n "$_host" && "$_host" != "$_sname" ]]; then
+            _s=$(_notify_host_replace "$subject" "$_host" "$_sname" 2>/dev/null) || _s=""
+            _b=$(_notify_host_replace "$body" "$_host" "${_sname} (${_host})" 2>/dev/null) || _b=""
+            [[ -n "$_s" ]] && subject="$_s"
+            [[ -n "$_b" ]] && body="$_b"
+        fi
+    fi
     if declare -f _smtp_send >/dev/null 2>&1 && _notify_events_take "$(_notify_smtp_events)" "$trigger"; then
         _smtp_send "$subject" "$body" 2>/dev/null || true
     fi
@@ -488,10 +581,12 @@ _notify_status() {
         chans=$(_alerts_list --json | jq -c '.channels')
         jq -n --argjson s "$smtp" --argjson c "$chans" --argjson on "$on" --argjson t "$total" \
             --arg types "smtp $(_alert_types)" --argjson cats "$(_notify_categories_json)" \
+            --argjson set "$(_notify_settings_json)" \
             '{channels: ((if $s == null then [] else [$s] end) + ($c | map(.events = (.events // null)))),
               triggers: {enabled: $on, total: $t},
               types: ($types | split(" ")),
-              categories: $cats, selectors: (["all", "urgent"] + [$cats[].id])}'
+              categories: $cats, selectors: (["all", "urgent"] + [$cats[].id]),
+              settings: $set}'
         return 0
     fi
     echo -e "\n${BOLD}Notifications${NC} ${DIM}— an enabled trigger reaches every enabled channel that takes it${NC}"
@@ -504,7 +599,9 @@ _notify_status() {
         echo -e "  ${DIM}not configured — cipi notification add smtp --host= --user= --password= --from= --to=${NC}"
     fi
     _alerts_list
-    echo -e "${BOLD}Triggers${NC}  ${on}/${total} on  ${DIM}— cipi notification triggers${NC}\n"
+    echo -e "${BOLD}Triggers${NC}  ${on}/${total} on  ${DIM}— cipi notification triggers${NC}"
+    local _sn _tz; _sn=$(_notify_server_name); _tz=$(_notify_timezone)
+    echo -e "${BOLD}Written as${NC}  server ${_sn:-$(hostname)}${_sn:+ ($(hostname))}, times in ${_tz:-$(_notify_system_timezone)}  ${DIM}— cipi notification server-name · cipi notification timezone${NC}\n"
 }
 
 # Which one an `enable|disable <name>` means: a trigger (the older form) or a channel.
@@ -591,6 +688,108 @@ _notify_triggers_command() {
     esac
 }
 
+# The server's own zone, by name ("Etc/UTC", "Europe/Rome").
+_notify_system_timezone() {
+    local tz=""
+    tz=$(timedatectl show -p Timezone --value 2>/dev/null || true)
+    if [[ -z "$tz" && -L /etc/localtime ]]; then
+        tz=$(readlink -f /etc/localtime 2>/dev/null || true); tz="${tz#*/zoneinfo/}"
+    fi
+    [[ -n "$tz" ]] || tz=$(date '+%Z' 2>/dev/null || echo UTC)
+    printf '%s' "$tz"
+}
+
+# {timezone, server_timezone, server_name, hostname, now} — what the status
+# JSON and the two commands below answer with.
+_notify_settings_json() {
+    jq -n --arg tz "$(_notify_timezone)" --arg stz "$(_notify_system_timezone)" \
+        --arg n "$(_notify_server_name)" --arg h "$(hostname 2>/dev/null || true)" --arg now "$(notify_now)" \
+        '{timezone: (if $tz == "" then null else $tz end), server_timezone: $stz,
+          server_name: (if $n == "" then null else $n end), hostname: $h, now: $now}'
+}
+
+# cipi notification timezone [<Area/City>|server] [--json]
+_notify_timezone_command() {
+    local arg="" json=false a
+    for a in "$@"; do
+        case "$a" in
+            --json) json=true ;;
+            --*) error "Unknown option: ${a}"; exit 1 ;;
+            *) [[ -n "$arg" ]] || arg="$a" ;;
+        esac
+    done
+    if [[ -n "$arg" ]]; then
+        case "$arg" in
+            server|system|default)
+                _notify_ensure_config
+                vault_read notifications.json | jq 'del(.timezone)' | vault_write notifications.json
+                log_action "NOTIFICATION TIMEZONE: the server's own"
+                [[ "$json" == true ]] || success "Notifications are written in the server's time zone again ($(_notify_system_timezone)) — now: $(notify_now)"
+                ;;
+            *)
+                if ! _notify_timezone_valid "$arg"; then
+                    error "Unknown time zone '${arg}' — an IANA name such as Europe/Rome, America/New_York or UTC (timedatectl list-timezones), or 'server' for the server's own"
+                    exit 1
+                fi
+                _notify_ensure_config
+                vault_read notifications.json | jq --arg tz "$arg" '.timezone = $tz' | vault_write notifications.json
+                log_action "NOTIFICATION TIMEZONE: ${arg}"
+                [[ "$json" == true ]] || success "Notifications are written in ${arg} — now: $(notify_now)"
+                ;;
+        esac
+    fi
+    if [[ "$json" == true ]]; then
+        _notify_settings_json
+    elif [[ -z "$arg" ]]; then
+        local tz; tz=$(_notify_timezone)
+        if [[ -n "$tz" ]]; then
+            echo -e "  Notifications are written in ${BOLD}${tz}${NC} — now: $(notify_now)  ${DIM}(the server is on $(_notify_system_timezone); back to it: cipi notification timezone server)${NC}"
+        else
+            echo -e "  Notifications are written in the server's time zone, ${BOLD}$(_notify_system_timezone)${NC} — now: $(notify_now)"
+            echo -e "  ${DIM}Another one, for the notifications only: cipi notification timezone Europe/Rome${NC}"
+        fi
+    fi
+}
+
+# cipi notification server-name [<name>|--clear] [--json]
+_notify_server_name_command() {
+    local arg="" json=false clear=false a
+    for a in "$@"; do
+        case "$a" in
+            --json) json=true ;;
+            --clear) clear=true ;;
+            --*) error "Unknown option: ${a}"; exit 1 ;;
+            *) [[ -n "$arg" ]] || arg="$a" ;;
+        esac
+    done
+    if [[ "$clear" == true ]]; then
+        _notify_ensure_config
+        vault_read notifications.json | jq 'del(.server_name)' | vault_write notifications.json
+        log_action "NOTIFICATION SERVER NAME: cleared"
+        [[ "$json" == true ]] || success "Notifications name the server by its hostname again ($(hostname))"
+    elif [[ -n "$arg" ]]; then
+        if ! _notify_server_name_valid "$arg"; then
+            error "Invalid name '${arg}' — letters, digits, spaces, dots, dashes and underscores, 40 characters at most"
+            exit 1
+        fi
+        _notify_ensure_config
+        vault_read notifications.json | jq --arg n "$arg" '.server_name = $n' | vault_write notifications.json
+        log_action "NOTIFICATION SERVER NAME: ${arg}"
+        [[ "$json" == true ]] || success "Notifications name this server '${arg}' ($(hostname))"
+    fi
+    if [[ "$json" == true ]]; then
+        _notify_settings_json
+    elif [[ -z "$arg" && "$clear" != true ]]; then
+        local n; n=$(_notify_server_name)
+        if [[ -n "$n" ]]; then
+            echo -e "  Notifications name this server ${BOLD}${n}${NC} ${DIM}(hostname: $(hostname); back to it: cipi notification server-name --clear)${NC}"
+        else
+            echo -e "  Notifications name this server by its hostname, ${BOLD}$(hostname)${NC}"
+            echo -e "  ${DIM}A name of your own: cipi notification server-name production${NC}"
+        fi
+    fi
+}
+
 notifications_command() {
     local sub="${1:-status}"; shift || true
     declare -f alerts_channel_command &>/dev/null || source "${CIPI_LIB}/alerts.sh"
@@ -611,6 +810,8 @@ notifications_command() {
         status|show) _notify_status "$@" ;;
         channels)    _notify_status "$@" ;;
         events|routes|route) _notify_events_command "$@" ;;
+        timezone|tz) _notify_timezone_command "$@" ;;
+        server-name|name) _notify_server_name_command "$@" ;;
         add)
             if [[ "${1:-}" == smtp ]]; then
                 shift
@@ -662,7 +863,7 @@ notifications_command() {
         disable-all|all-off) _notify_disable_all ;;
         reset) _notify_reset ;;
         *)
-            error "Use: cipi notification [status] | add <type> <id> … | update <id> … | remove|test|enable|disable <id> | events [<id> <selectors>] | triggers … | smtp …"
+            error "Use: cipi notification [status] | add <type> <id> … | update <id> … | remove|test|enable|disable <id> | events [<id> <selectors>] | triggers … | timezone [<Area/City>|server] | server-name [<name>|--clear] | smtp …"
             echo "      types: smtp $(_alert_types)"
             exit 1
             ;;

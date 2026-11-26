@@ -41,7 +41,7 @@ echo "$json" | jq -r 'to_entries[] | select(.value.health_url != null and (.valu
     if [[ "$count" -eq 3 ]] && type cipi_notify &>/dev/null; then
         cipi_notify \
             "Cipi healthcheck failed: ${app} on $(hostname)" \
-            "HTTP healthcheck failed 3 consecutive times.\n\nServer: $(hostname)\nApp: ${app}\nURL: ${url}\nExpected: ${expect}\nGot: ${code}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "HTTP healthcheck failed 3 consecutive times.\n\nServer: $(hostname)\nApp: ${app}\nURL: ${url}\nExpected: ${expect}\nGot: ${code}\nTime: $(notify_now)" \
             health_fail
     fi
 done

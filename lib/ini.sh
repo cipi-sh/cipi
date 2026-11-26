@@ -16,6 +16,10 @@
 # defaults.
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 ini_command() {
     local sub="${1:-list}"; shift||true
     case "$sub" in
@@ -472,7 +476,7 @@ _ini_set() {
     log_action "INI SET: ${key}=${val}${app:+ app=$app}"
     cipi_notify \
         "Cipi PHP setting changed: ${key} on $(hostname)" \
-        "PHP configuration changed.\n\nServer: $(hostname)\nScope: ${app:-server-wide}\nSetting: ${key} = ${val}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "PHP configuration changed.\n\nServer: $(hostname)\nScope: ${app:-server-wide}\nSetting: ${key} = ${val}\nTime: $(notify_now)" \
         ini_set
 }
 

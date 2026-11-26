@@ -25,7 +25,8 @@ if [[ $RC -ne 0 ]]; then
 
     HOSTNAME=$(hostname 2>/dev/null || echo "unknown")
     SUBJECT="Cipi cron failed: ${LABEL} (${HOSTNAME})"
-    BODY="Cron job '${LABEL}' failed with exit code ${RC} on ${HOSTNAME} at $(date '+%Y-%m-%d %H:%M:%S').
+    declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+    BODY="Cron job '${LABEL}' failed with exit code ${RC} on ${HOSTNAME} at $(notify_now 2>/dev/null || date '+%Y-%m-%d %H:%M:%S %Z').
 
 Output:
 ${OUTPUT:-<no output>}"

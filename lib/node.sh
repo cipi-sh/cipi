@@ -27,6 +27,10 @@
 # installed; `cipi node default` puts a managed major in front of it.
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 [[ -z "${NODE_ROOT:-}" ]]        && readonly NODE_ROOT="/opt/cipi/node"
 [[ -z "${NODE_STATE_DIR:-}" ]]   && readonly NODE_STATE_DIR="/var/lib/cipi/node"
 [[ -z "${NODE_WEBHOOK_PHP:-}" ]] && readonly NODE_WEBHOOK_PHP="/usr/local/share/cipi/webhook.php"
@@ -228,7 +232,7 @@ _node_default_cmd() {
 _node_default_notify() {
     cipi_notify \
         "Cipi Node default changed on $(hostname)" \
-        "The server-wide Node version changed.\n\nServer: $(hostname)\nNow: $1\nBefore: Node $2\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The server-wide Node version changed.\n\nServer: $(hostname)\nNow: $1\nBefore: Node $2\nTime: $(notify_now)" \
         node_default 2>/dev/null || true
 }
 

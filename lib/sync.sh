@@ -3,6 +3,10 @@
 # Cipi — Sync (Export / Import / List)
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 # Set by _sync_export when called from _sync_push (avoids glob lookup)
 _SYNC_LAST_ARCHIVE=""
 
@@ -256,7 +260,7 @@ _sync_export() {
     log_action "SYNC EXPORT: ${#apps[@]} apps (${apps[*]}) db=${with_db} storage=${with_storage} → ${archive}"
     cipi_notify \
         "Cipi sync export on $(hostname)" \
-        "Apps were exported.\n\nServer: $(hostname)\nApps: ${apps[*]}\nArchive: ${archive}\nWith DB: ${with_db}\nWith storage: ${with_storage}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Apps were exported.\n\nServer: $(hostname)\nApps: ${apps[*]}\nArchive: ${archive}\nWith DB: ${with_db}\nWith storage: ${with_storage}\nTime: $(notify_now)" \
         sync_export
     [[ "$internal_push" == "true" ]] && _SYNC_LAST_ARCHIVE="$archive"
     return 0
@@ -553,7 +557,7 @@ _sync_import() {
     log_action "SYNC IMPORT: created=${#imported[@]} (${imported[*]}) updated=${#updated[@]} (${updated[*]}) from ${src_host} (${src_ip})"
     cipi_notify \
         "Cipi sync import on $(hostname)" \
-        "Apps were imported.\n\nServer: $(hostname)\nCreated: ${imported[*]:-none}\nUpdated: ${updated[*]:-none}\nFrom: ${src_host} (${src_ip})\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Apps were imported.\n\nServer: $(hostname)\nCreated: ${imported[*]:-none}\nUpdated: ${updated[*]:-none}\nFrom: ${src_host} (${src_ip})\nTime: $(notify_now)" \
         sync_import
 }
 
@@ -811,6 +815,7 @@ CRON
         deployer_audit_ensure_hook "$app" || true
         deployer_unlock_ensure_hook "$app" || true
         deployer_release_name_ensure_hook "$app" || true
+        deployer_flow_ensure_hook "$app" || true
         chown -R "${app}:${app}" "${home}/.deployer"
         success "Deployer (restored)"
     else
@@ -825,6 +830,7 @@ ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker stop ${app}
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker status ${app}
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-scan-manifest ${app}
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-deploy-audit ${app} *
+${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-cache-clear ${app}
 SUDO
     chmod 440 "/etc/sudoers.d/cipi-${app}"
     _sync_yml_auto_sudoers "$app"
@@ -1197,7 +1203,7 @@ _sync_push() {
     log_action "SYNC PUSH: → ${remote_user}@${remote_host}:${remote_port} import=${remote_import}"
     cipi_notify \
         "Cipi sync push on $(hostname)" \
-        "Apps were pushed to a remote server.\n\nServer: $(hostname)\nRemote: ${remote_user}@${remote_host}:${remote_port}\nImport on remote: ${remote_import}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Apps were pushed to a remote server.\n\nServer: $(hostname)\nRemote: ${remote_user}@${remote_host}:${remote_port}\nImport on remote: ${remote_import}\nTime: $(notify_now)" \
         sync_push
 }
 

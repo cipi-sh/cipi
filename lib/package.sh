@@ -35,6 +35,10 @@
 # Nothing here is installed by setup.sh or self-update.
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 [[ -z "${PKG_MIN_DISK_KB:-}" ]] && readonly PKG_MIN_DISK_KB=1048576
 
 # id|apt packages|binaries to verify|description
@@ -853,7 +857,7 @@ _pkg_up_install() {
     log_action "PACKAGE: installed ${id} ${version} (upstream ${method}${hash:+, ${hash}})"
     cipi_notify \
         "Cipi: package installed on $(hostname)" \
-        "An optional package was installed.\n\nServer: $(hostname)\nEntry: ${id} ${version} (upstream)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "An optional package was installed.\n\nServer: $(hostname)\nEntry: ${id} ${version} (upstream)\nTime: $(notify_now)" \
         package_install
 
     echo ""
@@ -919,7 +923,7 @@ _pkg_up_remove() {
     log_action "PACKAGE: removed ${id}${cur:+ ${cur}} (upstream)"
     cipi_notify \
         "Cipi: package removed from $(hostname)" \
-        "An optional package was removed.\n\nServer: $(hostname)\nEntry: ${id}${cur:+ ${cur}} (upstream)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "An optional package was removed.\n\nServer: $(hostname)\nEntry: ${id}${cur:+ ${cur}} (upstream)\nTime: $(notify_now)" \
         package_remove
 
     echo ""
@@ -998,7 +1002,7 @@ _pkg_install() {
     log_action "PACKAGE: installed ${id} (${apt_pkgs})"
     cipi_notify \
         "Cipi: package installed on $(hostname)" \
-        "An optional package was installed.\n\nServer: $(hostname)\nEntry: ${id}\nPackages: ${apt_pkgs}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "An optional package was installed.\n\nServer: $(hostname)\nEntry: ${id}\nPackages: ${apt_pkgs}\nTime: $(notify_now)" \
         package_install
 
     echo ""
@@ -1129,7 +1133,7 @@ _pkg_remove() {
     log_action "PACKAGE: removed ${id} (${plan_line})"
     cipi_notify \
         "Cipi: package removed from $(hostname)" \
-        "An optional package was removed.\n\nServer: $(hostname)\nEntry: ${id}\nPackages: ${plan_line}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "An optional package was removed.\n\nServer: $(hostname)\nEntry: ${id}\nPackages: ${plan_line}\nTime: $(notify_now)" \
         package_remove
 
     echo ""

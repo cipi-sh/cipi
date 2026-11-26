@@ -13,6 +13,10 @@
 # — they are not silent and they are not "clean".
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 [[ -z "${SCAN_CRON:-}" ]]       && readonly SCAN_CRON="/etc/cron.d/cipi-scan"
 [[ -z "${SCAN_LOG:-}" ]]        && readonly SCAN_LOG="${CIPI_LOG}/scan.log"
 [[ -z "${SCAN_REPORT_DIR:-}" ]] && readonly SCAN_REPORT_DIR="${CIPI_LOG}/scan"
@@ -395,7 +399,7 @@ _scan_enable() {
     log_event "Integrity + upload scan enabled on $(hostname)"
     cipi_notify \
         "Cipi scan enabled on $(hostname)" \
-        "Nightly job is on (04:40):\n  • integrity of current/ (or htdocs/) against the deploy manifest\n  • one ClamAV pass on upload dirs only, with rfxn PHP-webshell signatures\n\nA deploy writes a new manifest. Incomplete runs (timeout, failed signature update) email scan_incomplete — they are not reported as clean.\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Nightly job is on (04:40):\n  • integrity of current/ (or htdocs/) against the deploy manifest\n  • one ClamAV pass on upload dirs only, with rfxn PHP-webshell signatures\n\nA deploy writes a new manifest. Incomplete runs (timeout, failed signature update) email scan_incomplete — they are not reported as clean.\nTime: $(notify_now)" \
         scan_enable
     success "Nightly integrity + upload scan enabled (04:40)"
 }
@@ -615,18 +619,18 @@ _scan_run() {
 
     [[ "$hits" -gt 0 ]] && cipi_notify \
         "Cipi scan: infected uploads on $(hostname)" \
-        "ClamAV found infected files in upload directories.\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\n${hit_body}\nReport: ${report}" \
+        "ClamAV found infected files in upload directories.\n\nServer: $(hostname)\nTime: $(notify_now)\n\n${hit_body}\nReport: ${report}" \
         scan_hit
 
     [[ "$drift" -gt 0 ]] && cipi_notify \
         "Cipi scan: release integrity drift on $(hostname)" \
-        "Files under current/ (or htdocs/) do not match the manifest written at deploy.\nThat is how a dropped webshell looks, with or without a virus signature.\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\n${drift_body}\nReport: ${report}" \
+        "Files under current/ (or htdocs/) do not match the manifest written at deploy.\nThat is how a dropped webshell looks, with or without a virus signature.\n\nServer: $(hostname)\nTime: $(notify_now)\n\n${drift_body}\nReport: ${report}" \
         scan_integrity
 
     if [[ "$incomplete" -gt 0 ]]; then
         cipi_notify \
             "Cipi scan: incomplete run on $(hostname)" \
-            "The nightly scan did not finish cleanly. This is not a clean bill of health.\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\n${inc_body}\nReport: ${report}" \
+            "The nightly scan did not finish cleanly. This is not a clean bill of health.\n\nServer: $(hostname)\nTime: $(notify_now)\n\n${inc_body}\nReport: ${report}" \
             scan_incomplete
         warn "Scan incomplete — see ${report}"
     fi

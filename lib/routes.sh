@@ -16,6 +16,10 @@
 # refuses it, apps.json and the vhost are put back as they were.
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 declare -f _create_nginx_vhost >/dev/null 2>&1 || source "${CIPI_LIB}/app.sh"
 
 # ── validation ────────────────────────────────────────────────
@@ -353,7 +357,7 @@ _routes_notify() {
     log_action "${what}"
     cipi_notify \
         "Cipi ${what%%:*}: ${app} on $(hostname)" \
-        "${what}\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "${what}\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\nTime: $(notify_now)" \
         "$trigger"
 }
 

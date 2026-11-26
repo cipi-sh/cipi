@@ -4,6 +4,60 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.17.0] — 2026-11-26
+
+Four reports, fixed: a deploy that ran its migrations and `optimize` twice, a logrotate warning in `cipi pending` that its own hint could not clear, deploy notifications with "Branch: ?", and an Octane app told to `upgrade` towards a PHP it could not reach. And what was asked for next to them: a page cache in nginx per app (`cipi cache`), an Octane app's PHP chosen by its number, the time zone and the server's name in notifications, and — in the panel (cipi/api 1.47.0, cipi/gui 4.9.0) — Octane, the page cache and Valkey per app.
+
+### Fixed
+
+- **Every deploy ran `artisan:storage:link`, `artisan:optimize` and `artisan:migrate` twice.** `recipe/laravel.php` runs the three after `deploy:vendors` in its own `deploy` task, and Cipi's hooks run the same three right before it. The deploy log showed it:
+
+  ```
+  task artisan:storage:link
+  task artisan:migrate
+  task artisan:optimize
+  task artisan:storage:link
+  task artisan:optimize
+  task artisan:migrate
+  ```
+
+  Worse than the wasted seconds: **a step turned off with `cipi app deploy-config` still ran once**, from the recipe — `--no-migrate` did not stop a deploy from migrating. The `deploy` task is Cipi's own from here (`lib/deployer/flow.php`, appended to each recipe like the audit hooks): `deploy:prepare`, `deploy:vendors`, `deploy:publish` — and `artisan:reload` where the recipe has it (Deployer 8). After the vendors only the hooks run, each as the app's deploy-config says. Checked with Deployer 8.0.5's own `dep tree deploy`: one of each; with migrate off, none.
+  - The migration appends the flow to the `deploy.php` of every Laravel and Octane app. **An app with a step off in its deploy-config is named**: from its next deploy that step is really skipped.
+  - A `deploy.php` that defines its own `deploy` task, or whose three hooks are not where Cipi writes them (edited by hand), is left as it is and named — taking the recipe's steps away from it could leave it without a migration at all.
+- **`cipi pending`: "logrotate reports a problem with a Cipi rule: error: skipping "/var/log/auth.log" because parent directory has insecure permissions"**, on servers whose image has rsyslog (there `/var/log` is `root:syslog 0775`) — and `cipi app fix-permissions`, the command the warning named, changed nothing. logrotate, as root, refuses a log in a directory a group other than root can write unless the rule says who to rotate as (`su`). Ubuntu's `/etc/logrotate.conf` says it for every rule it includes (`su root adm`), so the nightly run rotated `auth.log`, `fail2ban.log` and `ufw.log` all along; but `cipi pending` reads Cipi's rules on their own (`logrotate -d /etc/logrotate.d/cipi-*`), where that line is not, and called them skipped. Cipi's rules now say it themselves:
+  - `setup.sh` and `cipi api` write `su root adm` in every block that names a log directly in `/var/log` (`cipi-security-logs`, `cipi-queue.log` in `cipi-app-logs`, `cipi-api-maintain`, `cipi-api-update`);
+  - the migration adds the line to the rules of an existing server (`logrotate_cipi_su`), block by block: one that has a `su` line keeps it, the per-app rules and nginx's logs are not touched;
+  - `cipi app fix-permissions` does the same, with or without apps, so the hint of `cipi pending` is true. A server whose `logrotate.conf` had lost its own `su` line gets those logs rotated for real.
+- **Deploy notifications of a Git push said "Branch: ?"** and had no commit. The webhook deploy asked the release's `.git` for both, and a release made by Deployer 7 or 8 is an archive of the commit: there is no `.git` in it. The branch is now the one of the recipe (what Deployer deploys), in the notification and in the deploy log (`branch=main`); the commit is read from the release's `REVISION` in Deployer's mirror of the repository (`~/.dep/repo`) — `Commit: 3f2a91c — Fix the cart total`, author and date. `cipi deploy` reads the commit the same way: its notifications had lost those lines too.
+- **An Octane app on two PHP versions was told to run `cipi frankenphp upgrade`, which did nothing.** "gameportal is on PHP 8.5, but Octane answers on PHP 8.6.0": the app's FrankenPHP build — the one Octane downloaded before it was pinned — carries the PHP of the newest FrankenPHP release, and `upgrade` stays on the app's own PHP, for which no build was on the server. `cipi pending`, `cipi frankenphp status` and `cipi php` now say what runs on which PHP (requests on the build's, Composer, artisan, cron and the workers on the app's) and name the command that settles it, with the version: `cipi frankenphp php gameportal 8.6` — or back to 8.5 when a build on it is on the server.
+- **The PAM, cron and deploy-webhook notifications gave a time without its zone** ("at 2026-11-26 15:03:49"). Every notification now says it: `15:03:49 UTC`.
+
+### Added
+
+- **`cipi cache` — a page cache in nginx, per app.** OPcache, which every PHP on the server has on, keeps the compiled code: PHP still runs for every request, boots the framework, asks the database, builds the page. This is the other cache: nginx keeps the page and answers the next visitors with it, without starting PHP. Made for WordPress and the sites whose pages are the same for everyone who is not signed in — a page in a millisecond instead of a few hundred, and a small server that holds a traffic peak.
+  - `cipi cache <app> on [--ttl=10m] [--size=256m]`, `off`, `ttl <time>` (`30s`, `10m`, `1h`, `7d`), `size <size>`, `clear`, `status [--json]`; `cipi cache [list] [--json]` for every app. One zone per app — `fastcgi_cache` for PHP-FPM (Laravel, WordPress, any PHP app), `proxy_cache` for Octane — in `/var/cache/nginx/cipi/<app>`; not for Node apps. Off unless turned on. Tested with `nginx -t` before nginx reloads; refused, the settings and the vhost go back.
+  - **Never cached** — each rule fails towards "slower", never towards a private page shown to someone else: anything but GET and HEAD; a request with a login or session cookie (WordPress, WooCommerce and its cart, `PHPSESSID`, Laravel's `<app>_session`); an `Authorization` header; `/wp-admin`, `wp-login.php`, `wp-cron.php`, `xmlrpc.php`, `/wp-json`, cipi/agent's routes; a query string, unless made of tracking parameters only (`utm_*`, `fbclid`, `gclid`…); a response that sets a cookie or says `Cache-Control: private`, `no-cache` or `no-store`. **The app's headers are respected** (no `fastcgi_ignore_headers`): what WordPress and WooCommerce mark private stays private, and a Laravel app — which marks every response `no-cache, private` — caches only what it marks public itself (`cache.headers`).
+  - The time to live is for pages that say nothing; a response with its own `max-age` is kept that long. An expired page is served once more while nginx fetches the new one, and the cached copy keeps answering when PHP is down. `X-Cache-Status` in the response: `HIT`, `MISS`, `BYPASS`, `EXPIRED`, `STALE`.
+  - **Emptied after every successful deploy and rollback** — `cipi deploy`, the Git webhook, the panel — before Cloudflare's purge when that is on, and said in the deploy notification (`--no-deploy-clear` to keep the pages). For everything else — a Deployer recipe of your own, a CI job, WordPress when a post is published — the app's own user may empty its cache: `sudo /usr/local/bin/cipi-cache-clear <app>` (a rule `cipi cache <app> on` adds to the app's sudoers; the helper takes the app's name and nothing else, and deletes as nginx's user, following no symlink).
+  - Trigger `app_cache`; `page_cache` in `apps-public.json`; removed with the app.
+- **`cipi frankenphp php <app> [<X.Y>]` — an Octane app's PHP, by its number.** An Octane app runs two PHP: the one inside its FrankenPHP build answers the requests, the server's `php<X.Y>` runs Composer, artisan, cron and the workers. `cipi frankenphp php shop 8.6` puts both on 8.6: the build that carries it is looked for first — on the server, then in the release GitHub publishes — and **nothing changes when there is none** (a FrankenPHP release carries one PHP; the message says which, and how to import a build of your own); then Octane moves to it — restart, check, and back to its build when it does not answer — and the rest moves the way `cipi app edit --php` moves it. Without a version: what the app runs, and the PHP versions the builds on the server can give it (`--json`: `php`, `octane_php`, `available_php`, `fix`).
+  - **`cipi app edit <octane app> --php=X.Y` does the same**, and so does the panel's PHP selector: until now it moved everything but Octane and left a warning. `--force` moves the rest alone, as before.
+  - `cipi frankenphp restart <app>`: Octane restarted on its pinned build, and checked.
+  - `cipi frankenphp status --json`: `available_php` and `fix` (`command`, `why`) per app.
+- **`cipi notification timezone [<Area/City>|server]`** — the zone the `Time:` of a notification is written in. A cloud image is on UTC, and so were the notifications: `cipi notification timezone Europe/Rome` makes them read `16:03:49 CET`, and changes nothing else — not the server's clock, cron or the logs. One function writes the time of every notification (`notify_now`), the helpers' included.
+- **`cipi notification server-name [<name>|--clear]`** — the name the server goes by in notifications. The provider calls the machine `vmi12334`, the panel calls it `production`: with `cipi notification server-name production` a subject reads "Cipi deploy succeeded: shop (production)" and a body "Server: production (vmi12334)". The webhook payload keeps `server` (the hostname) and gains `server_name`. The panel offers to set it to the name it knows the server by.
+- `cipi notification status --json`: `settings` (`timezone`, `server_timezone`, `server_name`, `hostname`, `now`).
+- **The panel's sudoers** allow `cache`, `valkey list --json`, `valkey isolate|share|restart`, `valkey flush-shared --yes` (never `--force`: it refuses while an app still uses the shared instance), `frankenphp php`, `frankenphp restart`, `notification timezone`, `notification server-name`. Valkey per app (5.9.0) had no way in from the panel.
+
+### Notes
+
+- One migration, which restarts and deploys nothing: logrotate's rules and each app's `deploy.php`. The page cache, the notification time zone and the server's name are off until someone sets them.
+- **If an app relied on a step that was off in its deploy-config but ran anyway** (`--no-migrate` with migrations in every release), turn it back on: `cipi app deploy-config <app> --migrate`. The migration names these apps.
+- logrotate itself is not on the machine the release was prepared on: `logrotate_cipi_su` was checked against logrotate 3.21.0's source (the directory check is skipped for a rule with `su`; a `su` line of `logrotate.conf` reaches every rule it includes) and against the rules of 5.16.0, not by a run of logrotate. On a server: `logrotate -d /etc/logrotate.d/cipi-* 2>&1 | grep -c '^error'` is 0 after the update. The page cache's directives were not run through an nginx either — `cipi cache <app> on` itself runs `nginx -t` and takes everything back when nginx refuses.
+- The panel's side: cipi/api 1.47.0 and cipi/gui 4.9.0.
+
+---
+
 ## [5.16.0] — 2026-11-26
 
 Cloudflare Tunnel grows from "a site behind Access" into the way a server is reached: Access on chosen paths and for chosen people, service tokens for the machines, databases and Valkey from a laptop with their ports closed, SSH with certificates instead of keys, previews of a branch on their own hostname, the same tunnel on more servers, and a single command that leaves no inbound port open. The monitor says when the tunnel goes down. The panel (cipi/gui 4.8.0) adds connectors for Cloudflare, DigitalOcean, AWS, Hetzner, Google Cloud, Azure, OVHcloud, Vultr, Akamai (Linode) and Scaleway, and passkeys.

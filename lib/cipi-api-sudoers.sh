@@ -5,6 +5,15 @@
 # sudo-rs (Ubuntu 25.10+) allows '*' only as the final argument token.
 # Use "db restore *" (not "db restore * *") for multi-arg commands.
 #
+# 5.17.0 adds, for the panel's new pages: the nginx page cache of an app
+# (`cache` — list, on, off, ttl, size, clear: every argument is checked by
+# the command, none is a path), Valkey per app from the server's page
+# (`valkey list --json`, isolate, share, restart and `flush-shared --yes`,
+# which refuses while an app still uses the shared instance — --force is not
+# here), an Octane app's PHP by its number and its restart (`frankenphp php`,
+# `frankenphp restart`), and how notifications read (`notification timezone`,
+# `notification server-name`). Not here: `frankenphp use|import`, as before.
+#
 # 5.15.0 adds the visitor's address behind Cloudflare (`nginx real-ip`) to
 # the panel's Firewall tab: its state, on (`cloudflare`), the ranges fetched
 # again, off (`off --yes`: the panel asks first, with what `off` warns of).
@@ -208,6 +217,15 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi frankenphp status, \
                                /usr/local/bin/cipi frankenphp status *, \
                                /usr/local/bin/cipi frankenphp upgrade *, \
+                               /usr/local/bin/cipi frankenphp php *, \
+                               /usr/local/bin/cipi frankenphp restart *, \
+                               /usr/local/bin/cipi cache, \
+                               /usr/local/bin/cipi cache *, \
+                               /usr/local/bin/cipi valkey list --json, \
+                               /usr/local/bin/cipi valkey isolate *, \
+                               /usr/local/bin/cipi valkey share *, \
+                               /usr/local/bin/cipi valkey restart *, \
+                               /usr/local/bin/cipi valkey flush-shared --yes, \
                                /usr/local/bin/cipi ssh list, \
                                /usr/local/bin/cipi ssh list *, \
                                /usr/local/bin/cipi ssh add *, \
@@ -252,6 +270,8 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi crowdsec disable --force, \
                                /usr/local/bin/cipi crowdsec allow *, \
                                /usr/local/bin/cipi crowdsec unallow *, \
+                               /usr/local/bin/cipi notification timezone *, \
+                               /usr/local/bin/cipi notification server-name *, \
                                /usr/local/bin/cipi-read-app-logs *, \
                                /bin/cat /etc/cipi/apps.json
 SUDOEOF

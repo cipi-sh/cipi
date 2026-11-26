@@ -3,6 +3,10 @@
 # Cipi — API & MCP Server Management
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 # When sourced inside migrations, CIPI_API_* may already be readonly — only assign when unset.
 if [[ -z "${CIPI_API_ROOT:-}" ]]; then
     readonly CIPI_API_ROOT="/opt/cipi/api"
@@ -434,7 +438,7 @@ api_setup() {
     log_action "API CONFIGURED: $domain"
     cipi_notify \
         "Cipi API configured: ${domain} on $(hostname)" \
-        "The panel API was configured.\n\nServer: $(hostname)\nDomain: ${domain}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The panel API was configured.\n\nServer: $(hostname)\nDomain: ${domain}\nTime: $(notify_now)" \
         api_configure
 
     local ssl_ok=false
@@ -792,6 +796,7 @@ UPDATE
     if [[ -d /etc/logrotate.d ]]; then
         cat > /etc/logrotate.d/cipi-api-maintain <<'LR'
 /var/log/cipi-api-maintain.log {
+    su root adm
     weekly
     missingok
     rotate 8
@@ -803,6 +808,7 @@ UPDATE
 LR
         cat > /etc/logrotate.d/cipi-api-update <<'LR'
 /var/log/cipi-api-update.log {
+    su root adm
     weekly
     missingok
     rotate 8
@@ -979,7 +985,7 @@ api_update() {
     log_action "API UPDATED: cipi/api ${ver_before:-?} → ${ver_after:-?}"
     cipi_notify \
         "Cipi API updated on $(hostname)" \
-        "The panel API was updated.\n\nServer: $(hostname)\ncipi/api: ${ver_before:-?} → ${ver_after:-?}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The panel API was updated.\n\nServer: $(hostname)\ncipi/api: ${ver_before:-?} → ${ver_after:-?}\nTime: $(notify_now)" \
         api_update
     echo ""; success "API updated successfully"; echo ""
 }
@@ -1113,7 +1119,7 @@ api_upgrade() {
     log_action "API UPGRADED (full rebuild)"
     cipi_notify \
         "Cipi API upgraded on $(hostname)" \
-        "The panel API was fully rebuilt.\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The panel API was fully rebuilt.\n\nServer: $(hostname)\nTime: $(notify_now)" \
         api_upgrade
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -1230,7 +1236,7 @@ _api_ssl_issue() {
         log_action "API SSL INSTALLED: $domain"
         cipi_notify \
             "Cipi API SSL installed: ${domain} on $(hostname)" \
-            "SSL was installed for the panel API.\n\nServer: $(hostname)\nDomain: ${domain}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "SSL was installed for the panel API.\n\nServer: $(hostname)\nDomain: ${domain}\nTime: $(notify_now)" \
             api_ssl
         echo ""; success "SSL installed for ${domain}"
         return 0
@@ -1325,7 +1331,7 @@ api_move() {
     log_action "API MOVED: ${old:-?} → ${new}"
     cipi_notify \
         "Cipi API moved to ${new} on $(hostname)" \
-        "The panel API changed domain.\n\nServer: $(hostname)\nOld domain: ${old:-?}\nNew domain: ${new}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The panel API changed domain.\n\nServer: $(hostname)\nOld domain: ${old:-?}\nNew domain: ${new}\nTime: $(notify_now)" \
         api_configure
     local scheme=https
     [[ "$ssl_ok" == "true" ]] || scheme=http

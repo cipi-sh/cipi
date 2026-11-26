@@ -3,6 +3,10 @@
 # Cipi — Database Management (MariaDB + PostgreSQL)
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 # Engines: mariadb (native, port 3306) and pgsql (optional, port 5432).
 # Aliases accepted on CLI: postgres → pgsql, postgresql → pgsql, mysql → mariadb.
 #
@@ -1053,7 +1057,7 @@ _db_switch_run() {   # <from> <to>
     log_action "DB SWITCH: ${from} → ${to} done (${ver:-?}); ${from} data kept in ${kept}"
     cipi_notify \
         "Cipi: port 3306 now runs ${lt} on $(hostname)" \
-        "${lf} was replaced with ${lt} ${ver}.\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\nThe ${lf} data directory is kept in ${kept}." \
+        "${lf} was replaced with ${lt} ${ver}.\n\nServer: $(hostname)\nTime: $(notify_now)\nThe ${lf} data directory is kept in ${kept}." \
         db_switch 2>/dev/null || true
     success "Port 3306 runs ${lt} ${ver} — same root password, same apps' settings (DB_CONNECTION=mysql)"
     [[ -d "$kept" ]] && info "The ${lf} data directory is kept in ${kept} — remove it when you no longer need it"
@@ -1189,7 +1193,7 @@ HBA
     log_action "DB ENGINE INSTALLED: pgsql"
     cipi_notify \
         "Cipi PostgreSQL installed on $(hostname)" \
-        "PostgreSQL was installed.\n\nServer: $(hostname)\nPort: 5432\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "PostgreSQL was installed.\n\nServer: $(hostname)\nPort: 5432\nTime: $(notify_now)" \
         db_install
     success "PostgreSQL installed on port 5432"
     echo -e "  Set as default: ${CYAN}cipi db default pgsql${NC}"
@@ -1277,7 +1281,7 @@ _db_uninstall_engine() {
     log_action "DB ENGINE UNINSTALLED: $engine"
     cipi_notify \
         "Cipi $(db_engine_label "$engine") uninstalled on $(hostname)" \
-        "$(db_engine_label "$engine") was uninstalled (data destroyed).\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "$(db_engine_label "$engine") was uninstalled (data destroyed).\n\nServer: $(hostname)\nTime: $(notify_now)" \
         db_uninstall
     success "$(db_engine_label "$engine") uninstalled"
 }
@@ -1391,7 +1395,7 @@ _db_create() {
     log_action "DB CREATED: $name ($engine)${link_app:+ for $link_app}"
     cipi_notify \
         "Cipi database created: ${name} ($(_db_engine_shown "$engine" always)) on $(hostname)" \
-        "A database was created.\n\nServer: $(hostname)\nEngine: $(_db_engine_shown "$engine" always)\nDatabase: ${name}\nUser: ${user}${link_app:+\\nApp: ${link_app}}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A database was created.\n\nServer: $(hostname)\nEngine: $(_db_engine_shown "$engine" always)\nDatabase: ${name}\nUser: ${user}${link_app:+\\nApp: ${link_app}}\nTime: $(notify_now)" \
         db_create
     echo -e "\n${GREEN}✓${NC} Engine: ${CYAN}$(_db_engine_shown "$engine")${NC}  Database: ${CYAN}${name}${NC}  User: ${CYAN}${user}${NC}  Password: ${CYAN}${pass}${NC}"
     [[ -n "$link_app" ]] && echo -e "  App: ${CYAN}${link_app}${NC}"
@@ -1610,7 +1614,7 @@ _db_delete() {
     log_action "DB DELETED: $name ($engine)"
     cipi_notify \
         "Cipi database deleted: ${name} ($(_db_engine_shown "$engine" always)) on $(hostname)" \
-        "A database was deleted.\n\nServer: $(hostname)\nEngine: $(_db_engine_shown "$engine" always)\nDatabase: ${name}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A database was deleted.\n\nServer: $(hostname)\nEngine: $(_db_engine_shown "$engine" always)\nDatabase: ${name}\nTime: $(notify_now)" \
         db_delete
     success "'${name}' deleted ($(_db_engine_shown "$engine"))"
 }

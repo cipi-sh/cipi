@@ -3,6 +3,10 @@
 # Cipi — Reset Server Passwords
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 # ── ROOT SSH PASSWORD ────────────────────────────────────────
 
 reset_root_password() {
@@ -21,7 +25,7 @@ reset_root_password() {
 
     cipi_notify \
         "Cipi root SSH password reset on $(hostname)" \
-        "The root SSH password was regenerated.\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The root SSH password was regenerated.\n\nServer: $(hostname)\nTime: $(notify_now)" \
         reset_root_password
 
     echo ""
@@ -79,7 +83,7 @@ reset_db_root_password() {
     log_action "DB ROOT PASSWORD RESET: $engine"
     cipi_notify \
         "Cipi $(db_engine_label "$engine") root password reset on $(hostname)" \
-        "The $(db_engine_label "$engine") root password was regenerated.\n\nServer: $(hostname)\nEngine: ${engine}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The $(db_engine_label "$engine") root password was regenerated.\n\nServer: $(hostname)\nEngine: ${engine}\nTime: $(notify_now)" \
         reset_db_password
 
     echo ""
@@ -140,7 +144,7 @@ reset_valkey_password() {
 
     cipi_notify \
         "Cipi Valkey password reset on $(hostname)" \
-        "The Valkey password was regenerated.\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The Valkey password was regenerated.\n\nServer: $(hostname)\nTime: $(notify_now)" \
         reset_valkey_password
 
     local synced

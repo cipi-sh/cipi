@@ -3,6 +3,10 @@
 # Cipi — Service Management
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 readonly CIPI_SERVICES=(nginx mariadb valkey-server supervisor fail2ban)
 
 _svc_label() {
@@ -141,7 +145,7 @@ service_restart() {
         log_action "service restart ${svc}"
         cipi_notify \
             "Cipi service restarted: ${svc} on $(hostname)" \
-            "A system service was restarted.\n\nServer: $(hostname)\nService: ${svc}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "A system service was restarted.\n\nServer: $(hostname)\nService: ${svc}\nTime: $(notify_now)" \
             service_restart
     done
 }
@@ -158,7 +162,7 @@ service_start() {
     log_action "service start ${svc}"
     cipi_notify \
         "Cipi service started: ${svc} on $(hostname)" \
-        "A system service was started.\n\nServer: $(hostname)\nService: ${svc}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A system service was started.\n\nServer: $(hostname)\nService: ${svc}\nTime: $(notify_now)" \
         service_start
 }
 
@@ -177,7 +181,7 @@ service_stop() {
     log_action "service stop ${svc}"
     cipi_notify \
         "Cipi service stopped: ${svc} on $(hostname)" \
-        "A system service was stopped.\n\nServer: $(hostname)\nService: ${svc}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A system service was stopped.\n\nServer: $(hostname)\nService: ${svc}\nTime: $(notify_now)" \
         service_stop
 }
 

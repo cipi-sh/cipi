@@ -34,6 +34,12 @@ $user->forceFill([
     'two_factor_confirmed_at' => null,
 ])->save();
 
+// Passkeys (cipi/gui 4.8.0) are a second factor too: left in place, the
+// password set here would still be followed by a passkey the person lost.
+if (Schema::hasTable('cipi_passkeys')) {
+    DB::table('cipi_passkeys')->where('user_id', $user->id)->delete();
+}
+
 if (Schema::hasTable('sessions') && Schema::hasColumn('sessions', 'user_id')) {
     DB::table('sessions')->where('user_id', $user->id)->delete();
 }

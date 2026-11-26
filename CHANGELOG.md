@@ -6,7 +6,7 @@ All notable changes to Cipi are documented in this file.
 
 ## [5.16.0] — 2026-11-26
 
-Cloudflare Tunnel grows from "a site behind Access" into the way a server is reached: Access on chosen paths and for chosen people, service tokens for the machines, databases and Valkey from a laptop with their ports closed, SSH with certificates instead of keys, previews of a branch on their own hostname, the same tunnel on more servers, and a single command that leaves no inbound port open. The monitor says when the tunnel goes down. The panel (cipi/gui 4.8.0) adds connectors for Cloudflare, DigitalOcean, AWS, Hetzner, Google Cloud, Azure, OVHcloud, Vultr, Akamai (Linode) and Scaleway, and passkeys.
+Cloudflare Tunnel grows from "a site behind Access" into the way a server is reached: Access on chosen paths and for chosen people, service tokens for the machines, databases and Valkey from a laptop with their ports closed, SSH with certificates instead of keys, previews of a branch on their own hostname, the same tunnel on more servers, and a single command that leaves no inbound port open. The monitor says when the tunnel goes down. The panel (cipi/gui 4.8.0) shows all of it on the server's Zero Trust tab, signs in with passkeys and adds 28 connectors for the providers around the servers — clouds and VPS, domains and DNS, object storage, email, monitoring and security scanners ([the list](https://cipi.sh/docs/gui-connectors)).
 
 ### Added
 
@@ -22,10 +22,14 @@ Cloudflare Tunnel grows from "a site behind Access" into the way a server is rea
 - **The tunnel in the monitor** — a `tunnel` check (`monitor_tunnel`, urgent): critical when cloudflared stops or Cloudflare sees the tunnel down or inactive, a warning when it is degraded, recovery and reminders like every check. Off while Zero Trust is. With 80/443 closed it is the one outage a server can still report: notifications go out, not through the tunnel.
 - **`cipi zt status --json`** — the tunnel (running, Cloudflare's status, connectors and which one is this server), the locks, every hostname with its Access paths, allowed people, service tokens, preview and purge setting, the panel and the API, SSH and its certificates, TCP services, service tokens, previews and what is not on the tunnel yet. The panel's sudoers already allowed `cipi zt status *`.
 
+### Fixed
+
+- `cipi gui reset-user` removes the account's passkeys (cipi/gui 4.8.0) with its authenticator: the break-glass would otherwise set a new password and still ask for a passkey the person lost.
+
 ### Notes
 
 - No migration. Tokens made for 5.15 keep working; the new commands name the permission they miss: Access: Service Tokens (Edit) for service tokens, Access: SSH Auditing (Edit) for certificates, Zone: Cache Purge for purges.
-- The panel's side: cipi/api 1.46.0 (`GET /api/zero-trust`) and cipi/gui 4.8.0 (Zero Trust in the Firewall tab, read-only; connectors; passkeys). Cloudflare DNS from the panel is the panel's own: its token is saved in the panel, not on the servers.
+- The panel's side: cipi/api 1.46.0 (`details` on `GET /api/zt`) and cipi/gui 4.8.0 (the server's Zero Trust tab, read-only; connectors; passkeys). Cloudflare DNS from the panel is the panel's own: its token is saved in the panel, not on the servers.
 
 ---
 

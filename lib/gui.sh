@@ -4,6 +4,10 @@
 # Copy to cipi-sh/cipi/lib/gui.sh and wire in the main `cipi` router:
 #   gui) require_root; source "${CIPI_LIB}/gui.sh"; gui_command "$@" ;;
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 # When sourced inside migrations/self-update, CIPI_GUI_* may already be readonly — only assign when unset.
 if [[ -z "${CIPI_GUI_ROOT:-}" ]]; then
     readonly CIPI_GUI_ROOT="/opt/cipi/gui"
@@ -1255,7 +1259,7 @@ gui_sso_set() {
     log_action "GUI SSO SET: issuer=${issuer}"
     cipi_notify \
         "Cipi GUI single sign-on configured on $(hostname)" \
-        "The panel signs in over OpenID Connect.\n\nServer: $(hostname)\nIssuer: ${issuer}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The panel signs in over OpenID Connect.\n\nServer: $(hostname)\nIssuer: ${issuer}\nTime: $(notify_now)" \
         gui_sso
     success "Single sign-on: $(_gui_env_get CIPI_GUI_SSO_LABEL | grep . || _gui_sso_default_label "$issuer") (${issuer})"
     echo ""
@@ -1328,7 +1332,7 @@ gui_sso_disable() {
     log_action "GUI SSO DISABLED"
     cipi_notify \
         "Cipi GUI single sign-on disabled on $(hostname)" \
-        "The panel is back to password sign-in.\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The panel is back to password sign-in.\n\nServer: $(hostname)\nTime: $(notify_now)" \
         gui_sso
     success "Single sign-on off — password sign-in for everyone; accounts and their SSO links are kept"
 }

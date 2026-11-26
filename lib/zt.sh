@@ -10,6 +10,10 @@
 # setup.sh / self-update never call enable.
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 [[ -z "${ZT_TOKEN_FILE:-}" ]] && readonly ZT_TOKEN_FILE="${CIPI_CONFIG}/zt.token"
 [[ -z "${ZT_STATE:-}" ]]      && readonly ZT_STATE="zt.json"
 [[ -z "${ZT_TOKEN_META:-}" ]] && readonly ZT_TOKEN_META="zt-token.json"
@@ -748,7 +752,7 @@ _zt_enable() {
     log_event "Cloudflare Zero Trust enabled on $(hostname)"
     cipi_notify \
         "Cipi Zero Trust enabled on $(hostname)" \
-        "cloudflared is running. Nginx real_ip uses CF-Connecting-IP. Ports 22/80/443 are still open.\n\nNext:\n  cipi zt hostname add <app>     # public site through the tunnel\n  cipi zt access enable <app>    # IdP in front (staging / GUI)\n  cipi zt ssh enable --hostname=ssh.example.com\n  cipi zt lock http --yes\n  cipi zt lock ssh --yes\n\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "cloudflared is running. Nginx real_ip uses CF-Connecting-IP. Ports 22/80/443 are still open.\n\nNext:\n  cipi zt hostname add <app>     # public site through the tunnel\n  cipi zt access enable <app>    # IdP in front (staging / GUI)\n  cipi zt ssh enable --hostname=ssh.example.com\n  cipi zt lock http --yes\n  cipi zt lock ssh --yes\n\nTime: $(notify_now)" \
         zt_enable
     success "Cloudflare Zero Trust enabled (tunnel + real_ip). Ports are still open."
     echo ""
@@ -868,7 +872,7 @@ _zt_disable() {
     log_event "Cloudflare Zero Trust disabled on $(hostname)"
     cipi_notify \
         "Cipi Zero Trust disabled on $(hostname)" \
-        "cloudflared and the tunnel were removed. UFW 22/80/443 restored. Fail2ban is unchanged. Let's Encrypt certificates were left in place.\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "cloudflared and the tunnel were removed. UFW 22/80/443 restored. Fail2ban is unchanged. Let's Encrypt certificates were left in place.\nTime: $(notify_now)" \
         zt_disable
     success "Cloudflare Zero Trust removed — firewall is back to 22/80/443"
 }
@@ -1928,7 +1932,7 @@ _zt_lock_http() {
     log_action "ZT LOCK HTTP mode=${mode}"
     cipi_notify \
         "Cipi locked HTTP on $(hostname) (${mode})" \
-        "Ports 80/443 are no longer world-open (${mode}). Let's Encrypt HTTP-01 cannot renew. Use DNS-01 or cipi zt origin-cert.\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Ports 80/443 are no longer world-open (${mode}). Let's Encrypt HTTP-01 cannot renew. Use DNS-01 or cipi zt origin-cert.\nTime: $(notify_now)" \
         zt_lock_http
     success "HTTP locked (${mode})"
 }
@@ -1968,7 +1972,7 @@ _zt_lock_ssh() {
     log_event "SSH port 22 closed (Cloudflare Tunnel) on $(hostname)"
     cipi_notify \
         "Cipi locked SSH on $(hostname)" \
-        "Port 22 is closed. SSH is only via cloudflared access on ${host}. Unlock with: cipi zt ssh unlock\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Port 22 is closed. SSH is only via cloudflared access on ${host}. Unlock with: cipi zt ssh unlock\nTime: $(notify_now)" \
         zt_lock_ssh
     success "Port 22 closed. SSH is tunnel-only (${host}). Unlock: cipi zt ssh unlock"
 }

@@ -29,6 +29,10 @@
 # goes back to the previous build when it does not answer.
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 [[ -z "${AUTOUPDATE_CRON:-}" ]]  && readonly AUTOUPDATE_CRON="/etc/cron.d/cipi-autoupdate"
 [[ -z "${AUTOUPDATE_STATE:-}" ]] && readonly AUTOUPDATE_STATE="/var/lib/cipi/autoupdate.state"
 [[ -z "${AUTOUPDATE_LOCK:-}" ]]  && readonly AUTOUPDATE_LOCK="/run/cipi-autoupdate.lock"
@@ -183,7 +187,7 @@ _autoupdate_composer() {
     log_action "COMPOSER UPGRADE: ${before} → ${after}"
     cipi_notify \
         "Cipi Composer upgraded on $(hostname)" \
-        "Composer was upgraded.\n\nServer: $(hostname)\nFrom: ${before}\nTo: ${after}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Composer was upgraded.\n\nServer: $(hostname)\nFrom: ${before}\nTo: ${after}\nTime: $(notify_now)" \
         composer_upgrade
     success "Composer upgraded (${before} → ${after})"
 }
@@ -235,7 +239,7 @@ _autoupdate_node() {
         log_action "NODE UPGRADE:${changed}"
         cipi_notify \
             "Cipi Node.js upgraded on $(hostname)" \
-            "Node.js runtimes were upgraded.\n\nServer: $(hostname)\nChanged:${changed}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "Node.js runtimes were upgraded.\n\nServer: $(hostname)\nChanged:${changed}\nTime: $(notify_now)" \
             node_upgrade
         success "Node.js upgraded:${changed}"
     elif [[ "$rc" -eq 0 ]]; then

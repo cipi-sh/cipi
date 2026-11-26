@@ -3,6 +3,10 @@
 # Cipi — PHP Version Management
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 readonly _PHP_EXT="fpm common cli curl bcmath mbstring mysql sqlite3 pgsql memcached redis zip xml soap gd imagick intl"
 
 # True when apt can install every package given, now. A simulation, not a
@@ -176,7 +180,7 @@ _php_frankenphp_report() {
                 echo -e "  ${app}  FrankenPHP $(fphp_meta "$id" frankenphp) on PHP ${RED}${pv}${NC}  ${RED}VULNERABLE${NC} — needs a build on PHP ${floor:-8.3+}: cipi frankenphp upgrade ${app}${extra}"
                 bad=1 ;;
             mismatch)
-                echo -e "  ${app}  FrankenPHP $(fphp_meta "$id" frankenphp) on PHP ${YELLOW}${pv}${NC} — the app is on PHP $(app_get "$app" php): cipi frankenphp upgrade ${app}${extra}" ;;
+                echo -e "  ${app}  FrankenPHP $(fphp_meta "$id" frankenphp) on PHP ${YELLOW}${pv}${NC} — the rest of the app runs PHP $(app_get "$app" php): $(fphp_mismatch_fix "$app" | cut -f1)${extra}" ;;
             unpinned)
                 floor=$(php_security_floor "$(fphp_minor "$pv")")
                 if [[ -n "$floor" ]] && version_at_least "$pv" "$floor"; then
@@ -250,7 +254,7 @@ _php_upgrade() {
         log_action "PHP UPGRADE: ${upgraded} package(s)"
         cipi_notify \
             "Cipi PHP upgraded on $(hostname)" \
-            "Installed PHP packages were upgraded.\n\nServer: $(hostname)\nPackages upgraded: ${upgraded}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "Installed PHP packages were upgraded.\n\nServer: $(hostname)\nPackages upgraded: ${upgraded}\nTime: $(notify_now)" \
             php_upgrade
         success "PHP packages upgraded (${upgraded})"
     fi
@@ -361,7 +365,7 @@ POOLEOF
     log_action "PHP INSTALLED: $v${missing:+ (without:${missing})}"
     cipi_notify \
         "Cipi PHP installed: ${v} on $(hostname)" \
-        "A PHP version was installed.\n\nServer: $(hostname)\nVersion: ${v}${missing:+\nNot in the repository yet, installed later by cipi php upgrade:${missing}}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A PHP version was installed.\n\nServer: $(hostname)\nVersion: ${v}${missing:+\nNot in the repository yet, installed later by cipi php upgrade:${missing}}\nTime: $(notify_now)" \
         php_install
     success "PHP ${v} installed"
     if [[ -n "$sys_before" && "$sys_before" != "$v" ]]; then
@@ -758,7 +762,7 @@ _php_switch() {
 
     cipi_notify \
         "Cipi system PHP switched on $(hostname)" \
-        "The system default PHP was changed.\n\nServer: $(hostname)\nFrom: ${cur:-unknown}\nTo: ${v}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The system default PHP was changed.\n\nServer: $(hostname)\nFrom: ${cur:-unknown}\nTo: ${v}\nTime: $(notify_now)" \
         php_switch
 
     echo ""
@@ -788,7 +792,7 @@ _php_remove() {
     log_action "PHP REMOVED: $v"
     cipi_notify \
         "Cipi PHP removed: ${v} on $(hostname)" \
-        "A PHP version was removed.\n\nServer: $(hostname)\nVersion: ${v}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A PHP version was removed.\n\nServer: $(hostname)\nVersion: ${v}\nTime: $(notify_now)" \
         php_remove
     success "PHP ${v} removed"
 }

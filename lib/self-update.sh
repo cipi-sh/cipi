@@ -3,6 +3,10 @@
 # Cipi — Self-Update
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 readonly _CIPI_REPO="cipi-sh/cipi"
 readonly _CIPI_SELFUPDATE_BACKUP_KEEP=7
 
@@ -118,6 +122,8 @@ selfupdate_command() {
     [[ -f "${tmp}/lib/cipi-node-run.sh" ]] && cp "${tmp}/lib/cipi-node-run.sh" /usr/local/bin/cipi-node-run && chmod 755 /usr/local/bin/cipi-node-run
     # Run by Deployer as the app user (Octane recipe): 755, root's.
     [[ -f "${tmp}/lib/cipi-frankenphp-link.sh" ]] && cp "${tmp}/lib/cipi-frankenphp-link.sh" /usr/local/bin/cipi-frankenphp-link && chmod 755 /usr/local/bin/cipi-frankenphp-link
+    # Run through sudo by an app user (cipi cache): root's, and nobody else's to write.
+    [[ -f "${tmp}/lib/cipi-cache-clear.sh" ]] && cp "${tmp}/lib/cipi-cache-clear.sh" /usr/local/bin/cipi-cache-clear && chown root:root /usr/local/bin/cipi-cache-clear && chmod 755 /usr/local/bin/cipi-cache-clear
     if [[ -f "${tmp}/lib/cipi-webhook.php" ]]; then
         install -d -m 755 /usr/local/share/cipi && install -m 644 "${tmp}/lib/cipi-webhook.php" /usr/local/share/cipi/webhook.php
     fi
@@ -282,7 +288,7 @@ selfupdate_command() {
     if [[ "$version_changed" == true ]]; then
         cipi_notify \
             "Cipi updated to v${nv} on $(hostname)" \
-            "Cipi updated itself.\n\nServer: $(hostname)\nVersion: v${old_ver} → v${nv}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nChangelog: https://github.com/cipi-sh/cipi/blob/master/CHANGELOG.md\n\nTurn this off with: cipi notifications disable self_update" \
+            "Cipi updated itself.\n\nServer: $(hostname)\nVersion: v${old_ver} → v${nv}\nTime: $(notify_now)\n\nChangelog: https://github.com/cipi-sh/cipi/blob/master/CHANGELOG.md\n\nTurn this off with: cipi notifications disable self_update" \
             self_update
     fi
 

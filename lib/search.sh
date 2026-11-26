@@ -28,6 +28,10 @@
 # data.ms as a last resort.
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 [[ -z "${SEARCH_CFG:-}" ]]           && readonly SEARCH_CFG="search.json"
 [[ -z "${SEARCH_ENV_FILE:-}" ]]      && readonly SEARCH_ENV_FILE="${CIPI_CONFIG}/meilisearch.env"
 [[ -z "${SEARCH_TOML:-}" ]]          && readonly SEARCH_TOML="/etc/meilisearch.toml"
@@ -512,7 +516,7 @@ _search_install() {
     log_action "SEARCH: installed Meilisearch v${version} on ${SEARCH_HOST}:${port}"
     cipi_notify \
         "Cipi: Meilisearch installed on $(hostname)" \
-        "Meilisearch was installed.\n\nServer: $(hostname)\nVersion: ${version}\nListen: ${SEARCH_HOST}:${port}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Meilisearch was installed.\n\nServer: $(hostname)\nVersion: ${version}\nListen: ${SEARCH_HOST}:${port}\nTime: $(notify_now)" \
         search_install
 
     echo ""
@@ -611,7 +615,7 @@ _search_enable() {
     log_action "SEARCH: enabled for ${app} (prefix ${prefix}, key ${uid})"
     cipi_notify \
         "Cipi: search enabled for ${app} on $(hostname)" \
-        "Meilisearch was enabled for an app.\n\nServer: $(hostname)\nApp: ${app}\nIndex prefix: ${prefix}\nKey uid: ${uid}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Meilisearch was enabled for an app.\n\nServer: $(hostname)\nApp: ${app}\nIndex prefix: ${prefix}\nKey uid: ${uid}\nTime: $(notify_now)" \
         search_enable
 
     echo ""
@@ -697,7 +701,7 @@ _search_disable() {
     log_action "SEARCH: disabled for ${app} (purge_indexes=${purge})"
     cipi_notify \
         "Cipi: search disabled for ${app} on $(hostname)" \
-        "Meilisearch was disabled for an app.\n\nServer: $(hostname)\nApp: ${app}\nIndex prefix: ${prefix}\nIndexes dropped: ${purge}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Meilisearch was disabled for an app.\n\nServer: $(hostname)\nApp: ${app}\nIndex prefix: ${prefix}\nIndexes dropped: ${purge}\nTime: $(notify_now)" \
         search_disable
 
     success "Search disabled for '${app}' (SCOUT_DRIVER=${prev})"
@@ -764,7 +768,7 @@ _search_key_rotate() {
     log_action "SEARCH: rotated key for ${app} (${old_uid} → ${uid})"
     cipi_notify \
         "Cipi: search key rotated for ${app} on $(hostname)" \
-        "A Meilisearch API key was rotated.\n\nServer: $(hostname)\nApp: ${app}\nOld uid: ${old_uid}\nNew uid: ${uid}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A Meilisearch API key was rotated.\n\nServer: $(hostname)\nApp: ${app}\nOld uid: ${old_uid}\nNew uid: ${uid}\nTime: $(notify_now)" \
         search_key_rotate
 
     success "New key written to ${envf}"
@@ -816,7 +820,7 @@ _search_master_rotate() {
     log_action "SEARCH: master key rotated (${failed} app(s) not rewritten)"
     cipi_notify \
         "Cipi: Meilisearch master key rotated on $(hostname)" \
-        "The Meilisearch master key was rotated and every app key regenerated.\n\nServer: $(hostname)\nApps rewritten: $(printf '%s ' $apps)\nFailures: ${failed}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The Meilisearch master key was rotated and every app key regenerated.\n\nServer: $(hostname)\nApps rewritten: $(printf '%s ' $apps)\nFailures: ${failed}\nTime: $(notify_now)" \
         search_key_rotate
 
     echo ""
@@ -925,7 +929,7 @@ _search_upgrade() {
         log_action "SEARCH: upgraded Meilisearch ${cur:-?} → ${target}"
         cipi_notify \
             "Cipi: Meilisearch upgraded on $(hostname)" \
-            "Meilisearch was upgraded.\n\nServer: $(hostname)\nFrom: ${cur:-?}\nTo: ${target}\nIndexes: kept\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "Meilisearch was upgraded.\n\nServer: $(hostname)\nFrom: ${cur:-?}\nTo: ${target}\nIndexes: kept\nTime: $(notify_now)" \
             search_upgrade
         success "Meilisearch is on v${target}, indexes intact"
         return 0
@@ -993,7 +997,7 @@ _search_upgrade() {
     log_action "SEARCH: upgraded ${cur:-?} → ${target} with a data reset (${rebuilt} key(s) reissued)"
     cipi_notify \
         "Cipi: Meilisearch upgraded (indexes dropped) on $(hostname)" \
-        "Meilisearch was upgraded and its store reset.\n\nServer: $(hostname)\nFrom: ${cur:-?}\nTo: ${target}\nIndexes: DROPPED — run scout:import\nKeys reissued: ${rebuilt}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Meilisearch was upgraded and its store reset.\n\nServer: $(hostname)\nFrom: ${cur:-?}\nTo: ${target}\nIndexes: DROPPED — run scout:import\nKeys reissued: ${rebuilt}\nTime: $(notify_now)" \
         search_upgrade
 
     echo ""
@@ -1163,7 +1167,7 @@ _search_remove() {
     log_action "SEARCH: removed Meilisearch"
     cipi_notify \
         "Cipi: Meilisearch removed from $(hostname)" \
-        "Meilisearch was removed.\n\nServer: $(hostname)\nApps reverted: $(printf '%s ' $apps)\nData kept: ${ARG_keep_data:-false}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Meilisearch was removed.\n\nServer: $(hostname)\nApps reverted: $(printf '%s ' $apps)\nData kept: ${ARG_keep_data:-false}\nTime: $(notify_now)" \
         search_remove
 
     echo ""

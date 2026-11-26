@@ -5,6 +5,10 @@
 # Cursor Origin, Bitbucket, Azure DevOps, and AWS CodeCommit.
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 # ── SERVER.JSON HELPERS ──────────────────────────────────────
 
 _git_server_get() {
@@ -1725,7 +1729,7 @@ _git_refresh() {
         log_action "GIT REFRESH: ${target} rotate_keys=${rotate_keys:-false} rotate_secret=${rotate_secret:-false}"
         cipi_notify \
             "Cipi git refresh: ${target} on $(hostname)" \
-            "Deploy key and webhook were re-synced.\n\nServer: $(hostname)\nApp: ${target}\nRotate keys: ${rotate_keys:-false}\nRotate secret: ${rotate_secret:-false}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "Deploy key and webhook were re-synced.\n\nServer: $(hostname)\nApp: ${target}\nRotate keys: ${rotate_keys:-false}\nRotate secret: ${rotate_secret:-false}\nTime: $(notify_now)" \
             git_configure
         return 0
     fi
@@ -1767,7 +1771,7 @@ _git_refresh() {
     log_action "GIT REFRESH: all apps ok=${ok} fail=${fail} rotate_keys=${rotate_keys:-false} rotate_secret=${rotate_secret:-false}"
     cipi_notify \
         "Cipi git refresh on $(hostname)" \
-        "Deploy keys and webhooks were re-synced.\n\nServer: $(hostname)\nSucceeded: ${ok}\nFailed: ${fail}\nRotate keys: ${rotate_keys:-false}\nRotate secret: ${rotate_secret:-false}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Deploy keys and webhooks were re-synced.\n\nServer: $(hostname)\nSucceeded: ${ok}\nFailed: ${fail}\nRotate keys: ${rotate_keys:-false}\nRotate secret: ${rotate_secret:-false}\nTime: $(notify_now)" \
         git_configure
 
     if [[ "$fail" -gt 0 ]]; then
@@ -1783,7 +1787,7 @@ _git_notify_creds() {
     local label="$1" action="$2"
     cipi_notify \
         "Cipi ${label} ${action} on $(hostname)" \
-        "Git provider credentials were ${action}.\n\nServer: $(hostname)\nProvider: ${label}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Git provider credentials were ${action}.\n\nServer: $(hostname)\nProvider: ${label}\nTime: $(notify_now)" \
         git_configure
 }
 
@@ -1838,7 +1842,7 @@ _git_set_gitlab_url() {
     log_action "GIT: GitLab URL set to ${url}"
     cipi_notify \
         "Cipi GitLab URL configured on $(hostname)" \
-        "Git provider settings were updated.\n\nServer: $(hostname)\nGitLab URL: ${url}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Git provider settings were updated.\n\nServer: $(hostname)\nGitLab URL: ${url}\nTime: $(notify_now)" \
         git_configure
     success "GitLab URL set to ${url}"
 }

@@ -16,6 +16,10 @@
 [[ -z "${MONITOR_HELPER:-}" ]]       && readonly MONITOR_HELPER="/usr/local/bin/cipi-monitor"
 
 # id|label — one per line, run order
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 _mon_catalog() {
     cat <<'EOF'
 disk|Disk usage
@@ -504,11 +508,11 @@ _mon_apply_state() {
             if [[ -f "$since_file" ]]; then
                 local since; since=$(cat "$since_file" 2>/dev/null || echo "")
                 [[ "$since" =~ ^[0-9]+$ && "$since" -gt 0 ]] \
-                    && since_line="\nWas failing since: $(date -d "@${since}" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo '?')"
+                    && since_line="\nWas failing since: $(notify_now -d "@${since}" 2>/dev/null || echo '?')"
             fi
             cipi_notify \
                 "Cipi monitor recovered: ${label} on ${host}" \
-                "The check is healthy again.\n\nServer: ${host}\nCheck: ${id}\nNow: ${summary}${since_line}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+                "The check is healthy again.\n\nServer: ${host}\nCheck: ${id}\nNow: ${summary}${since_line}\nTime: $(notify_now)" \
                 monitor_ok >/dev/null
         fi
         rm -f "$alert_file" "$since_file" 2>/dev/null || true
@@ -518,7 +522,7 @@ _mon_apply_state() {
     local body
     body="Server: ${host}\nCheck: ${id}\nSeverity: ${status}\n${summary}"
     [[ -n "$detail" ]] && body="${body}\n\n${detail}"
-    body="${body}\n\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\nState and thresholds: cipi monitor list"
+    body="${body}\n\nTime: $(notify_now)\nState and thresholds: cipi monitor list"
 
     if [[ "$prev" == "ok" || "$prev" != "$status" ]]; then
         # Fresh failure, or warn↔crit escalation.
@@ -538,7 +542,7 @@ _mon_apply_state() {
     if (( now - last >= $(_mon_reminder_sec) )); then
         cipi_notify \
             "Cipi monitor reminder: ${label} still ${status} on ${host}" \
-            "${body}\nFailing since: $(date -d "@${since}" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo '?')" \
+            "${body}\nFailing since: $(notify_now -d "@${since}" 2>/dev/null || echo '?')" \
             "$trigger" >/dev/null
         echo "$now" > "$alert_file" 2>/dev/null || true
     fi
@@ -747,7 +751,7 @@ _mon_test() {
     step "Sending a test alert through every configured channel (and email)..."
     cipi_notify \
         "Cipi monitor test on $(hostname)" \
-        "This is how a monitor alert looks.\n\nServer: $(hostname)\nCheck: test\nSeverity: warn\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "This is how a monitor alert looks.\n\nServer: $(hostname)\nCheck: test\nSeverity: warn\nTime: $(notify_now)" \
         ""
     success "Test sent — to every enabled channel (cipi notification; add one: cipi notification add <type> …)"
 }

@@ -23,6 +23,7 @@ readonly EVENTS_LOG="${CIPI_LOG}/events.log"
 
 HOSTNAME=$(hostname 2>/dev/null || echo "unknown")
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+EPOCH=$(date '+%s')
 SERVICE="${PAM_SERVICE:-unknown}"
 USER="${PAM_USER:-unknown}"
 RHOST="${PAM_RHOST:-local}"
@@ -232,6 +233,13 @@ source "${CIPI_LIB}/smtp.sh" 2>/dev/null || true
 
 if [[ -n "$NOTIFY_TRIGGER" ]] && declare -f _notify_trigger_enabled &>/dev/null && ! _notify_trigger_enabled "$NOTIFY_TRIGGER"; then
     exit 0
+fi
+
+# The same moment, in the zone notifications are written in and with its
+# name (cipi notification timezone): the log line above keeps the server's.
+if declare -f notify_now &>/dev/null; then
+    NOTIFY_TIME=$(notify_now -d "@${EPOCH}" 2>/dev/null || true)
+    [[ -n "$NOTIFY_TIME" ]] && BODY="${BODY/Time:      ${TIMESTAMP}/Time:      ${NOTIFY_TIME}}"
 fi
 
 # In the background: a login never waits on a mail server or a webhook.

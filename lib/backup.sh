@@ -20,6 +20,10 @@
 # unpacking the app.
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 [[ -z "${BACKUP_KEY_FILE:-}" ]] && readonly BACKUP_KEY_FILE="${CIPI_CONFIG}/.backup_key"
 
 # The AWS CLI installs into /usr/local/bin, which root's crontab PATH
@@ -1217,7 +1221,7 @@ _bk_run_profile() {
         error "Backup '${p}' completed with errors: ${errors}"
         cipi_notify \
             "Cipi backup failed: profile ${p} on $(hostname)" \
-            "Backup profile '${p}' finished with errors.\n\nServer: $(hostname)\nProfile: ${p}\nRun: ${ts}\nFailed: ${errors}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nLog: ${CIPI_LOG}/backup.log" \
+            "Backup profile '${p}' finished with errors.\n\nServer: $(hostname)\nProfile: ${p}\nRun: ${ts}\nFailed: ${errors}\nTime: $(notify_now)\n\nLog: ${CIPI_LOG}/backup.log" \
             backup_fail
         log_action "BACKUP ERROR: profile=${p} run=${ts} ${errors}"
         _bk_retention_after_run "$p"
@@ -1522,7 +1526,7 @@ _bk_retention_after_run() {
     log_action "BACKUP PRUNE ERROR: profile=${p} ${_BK_PRUNE_ERRORS}"
     cipi_notify \
         "Cipi backup retention failed: profile ${p} on $(hostname)" \
-        "Old backups could not be deleted, so they keep accumulating.\n\nServer: $(hostname)\nProfile: ${p}\nProblem: ${_BK_PRUNE_ERRORS}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nPreview what should go: cipi backup prune --dry-run" \
+        "Old backups could not be deleted, so they keep accumulating.\n\nServer: $(hostname)\nProfile: ${p}\nProblem: ${_BK_PRUNE_ERRORS}\nTime: $(notify_now)\n\nPreview what should go: cipi backup prune --dry-run" \
         backup_fail
 }
 
@@ -1910,7 +1914,7 @@ _bk_check_stale() {
     fi
     cipi_notify \
         "Cipi backup overdue on $(hostname)" \
-        "One or more backup profiles have not completed successfully within their expected window.\n\nServer: $(hostname)\nOverdue: ${overdue_list}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nCheck: cipi backup status" \
+        "One or more backup profiles have not completed successfully within their expected window.\n\nServer: $(hostname)\nOverdue: ${overdue_list}\nTime: $(notify_now)\n\nCheck: cipi backup status" \
         backup_stale
     return 0
 }

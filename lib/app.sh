@@ -3,6 +3,10 @@
 # Cipi — Application Management
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 # ── CREATE ────────────────────────────────────────────────────
 
 app_create() {
@@ -577,7 +581,7 @@ JSON
     fi
     cipi_notify \
         "Cipi app created: ${app_user} on $(hostname)" \
-        "A new app was created.\n\nServer: $(hostname)\nApp: ${app_user}\nDomain: ${domain}\nPHP: ${php_ver}\nBranch: ${_notify_branch}\nRepository: ${_notify_repo}\nRepository access: ${GIT_REPO_ACCESS:-not checked}\nOctane: ${octane_server:-no}\nBuild: ${node_build:-none}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A new app was created.\n\nServer: $(hostname)\nApp: ${app_user}\nDomain: ${domain}\nPHP: ${php_ver}\nBranch: ${_notify_branch}\nRepository: ${_notify_repo}\nRepository access: ${GIT_REPO_ACCESS:-not checked}\nOctane: ${octane_server:-no}\nBuild: ${node_build:-none}\nTime: $(notify_now)" \
         app_create
 
     # 8. Nginx vhost
@@ -664,6 +668,7 @@ ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-app-notify ${app_user} *
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi health postdeploy ${app_user} --auto
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-scan-manifest ${app_user}
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-deploy-audit ${app_user} *
+${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-cache-clear ${app_user}
 SUDO
     if [[ "$app_type" == "node" ]]; then
         echo "${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-node-switch ${app_user} *" >> "/etc/sudoers.d/cipi-${app_user}"
@@ -1147,6 +1152,32 @@ app_edit() {
         php_ext_pending_refuse "${ARG_php}" "To use ${ARG_php} anyway: cipi app edit ${app} --php=${ARG_php} --force" || exit 1
     fi
 
+    # An Octane app answers on the PHP inside its FrankenPHP build, and that
+    # build moves with the app (5.17.0): the one that carries the new PHP is
+    # looked for now — on this server, then in the release GitHub publishes —
+    # and --php is refused when there is none, instead of leaving the requests
+    # on one PHP and Composer, artisan, cron and the workers on another.
+    # --force moves the rest alone, as every --php did before. Not when
+    # `cipi frankenphp php` calls: it has settled the build already. Not for
+    # an app without a pinned build: nothing answers on any PHP yet.
+    local fphp_target=""
+    if [[ -n "${ARG_php:-}" && "${ARG_php}" != "$cur_php" && "$(app_get "$app" octane)" == "frankenphp" && -z "${CIPI_FPHP_SWITCHING:-}" ]]; then
+        declare -f fphp_build_for_php >/dev/null 2>&1 || source "${CIPI_LIB}/frankenphp.sh"
+        if [[ -n "$(fphp_app_build "$app")" ]]; then
+            validate_php_version "${ARG_php}" || { error "Invalid PHP: ${ARG_php}"; exit 1; }
+            php_is_installed "${ARG_php}" || { error "PHP ${ARG_php} not installed. Run: cipi php install ${ARG_php}"; exit 1; }
+            if ! fphp_target=$(fphp_build_for_php "$app" "${ARG_php}"); then
+                fphp_target=""
+                if [[ "${ARG_force:-}" == "true" ]]; then
+                    warn "--force: Composer, artisan, cron and the workers move to PHP ${ARG_php}; Octane keeps answering on the PHP of its build"
+                else
+                    echo "  Nothing was changed. Everything but Octane, on purpose: cipi app edit ${app} --php=${ARG_php} --force" >&2
+                    exit 1
+                fi
+            fi
+        fi
+    fi
+
     if [[ -n "${ARG_domain:-}" ]]; then
         domain_change_from=$(app_get "$app" domain)
         _app_change_domain "$app" "${ARG_domain}"
@@ -1172,6 +1203,15 @@ app_edit() {
         else
             validate_php_version "$np" || { error "Invalid PHP: $np"; exit 1; }
             php_is_installed "$np" || { error "PHP $np not installed. Run: cipi php install $np"; exit 1; }
+            if [[ -n "$fphp_target" && "$fphp_target" != "$(fphp_app_build "$app")" ]]; then
+                # Octane first: it restarts on the build that carries ${np}, has
+                # to answer, and is put back on its build when it does not —
+                # with the rest of the app still on ${cur_php}.
+                if ! fphp_activate "$app" "$fphp_target"; then
+                    error "PHP not changed: '${app}' stays on ${cur_php}"
+                    exit 1
+                fi
+            fi
             step "PHP ${cur_php} → ${np}..."
             if [[ -n "$(app_get "$app" octane)" ]]; then
                 # Octane apps have no FPM pool — only CLI paths in supervisor/cron/deployer
@@ -1206,7 +1246,7 @@ app_edit() {
                 declare -f fphp_app_build >/dev/null 2>&1 || source "${CIPI_LIB}/frankenphp.sh"
                 local fb; fb=$(fphp_app_build "$app")
                 if [[ -n "$fb" && "$(fphp_minor "$(fphp_meta "$fb" php)")" != "$np" ]]; then
-                    warn "Octane still answers on PHP $(fphp_meta "$fb" php) (FrankenPHP build ${fb}). Move it to a build on ${np}: cipi frankenphp upgrade ${app}"
+                    warn "Octane still answers on PHP $(fphp_meta "$fb" php) (FrankenPHP build ${fb}). One PHP for the whole app: $(fphp_mismatch_fix "$app" | cut -f1)"
                 fi
             elif [[ -n "$(app_jit_mode "$app")" && "$(app_get "$app" runtime)" != "node" ]]; then
                 # The old version's FPM no longer serves an app with JIT.
@@ -1393,7 +1433,7 @@ app_edit() {
         [[ "${ARG_predeploy_snapshot:-}" == "true" || "${ARG_no_predeploy_snapshot:-}" == "true" ]] && edit_details="${edit_details}Predeploy snapshot updated\n"
         cipi_notify \
             "Cipi app modified: ${app} on $(hostname)" \
-            "An app was modified.\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\n\nChanges:\n${edit_details}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "An app was modified.\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\n\nChanges:\n${edit_details}\nTime: $(notify_now)" \
             app_edit
     fi
 }
@@ -1425,7 +1465,11 @@ app_delete() {
         step "Node processes..."; node_app_cleanup "$app"
     fi
     step "Workers...";     supervisorctl stop "${app}-worker-"* 2>/dev/null||true; supervisorctl stop "${app}-octane" 2>/dev/null||true; supervisorctl stop "${app}-reverb" 2>/dev/null||true; supervisorctl stop "${app}-horizon" 2>/dev/null||true; rm -f "/etc/supervisor/conf.d/${app}.conf"; reload_supervisor
-    step "Nginx...";       rm -f "/etc/nginx/sites-enabled/${app}" "/etc/nginx/sites-available/${app}" "$(_nginx_custom_file "$app")"; reload_nginx
+    # The vhost first, then the zone of its page cache (cipi cache), then the
+    # reload: a zone nothing uses is harmless, a vhost that names a zone that
+    # is gone would stop every reload of nginx.
+    declare -f cache_remove_app >/dev/null 2>&1 || source "${CIPI_LIB}/cache.sh" 2>/dev/null || true
+    step "Nginx...";       rm -f "/etc/nginx/sites-enabled/${app}" "/etc/nginx/sites-available/${app}"; if declare -f cache_remove_app >/dev/null 2>&1; then cache_remove_app "$app"; fi; rm -f "$(_nginx_custom_file "$app")"; reload_nginx
     step "PHP-FPM...";     rm -f "/etc/php/${p}/fpm/pool.d/${app}.conf"; jit_fpm_global_sync "$p" "" "$app" >/dev/null 2>&1 || true; reload_php_fpm "$p" 2>/dev/null||true
     if [[ -n "$(app_get "$app" octane)" ]]; then
         rm -rf "${OCTANE_APP_INI_ROOT:?}/${app}"
@@ -1483,7 +1527,7 @@ app_delete() {
     # Email notification
     cipi_notify \
         "Cipi app deleted: ${app} on $(hostname)" \
-        "An app was deleted.\n\nServer: $(hostname)\nApp: ${app}\nDomain: ${d}\nPHP: ${p}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "An app was deleted.\n\nServer: $(hostname)\nApp: ${app}\nDomain: ${d}\nPHP: ${p}\nTime: $(notify_now)" \
         app_delete
 
     echo ""; success "'${app}' deleted"
@@ -2224,7 +2268,7 @@ alias_add() {
     log_action "ALIAS ADDED: $dom → $app"
     cipi_notify \
         "Cipi alias added: ${dom} → ${app} on $(hostname)" \
-        "A domain alias was added.\n\nServer: $(hostname)\nApp: ${app}\nAlias: ${dom}\nPrimary: $(app_get "$app" domain)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A domain alias was added.\n\nServer: $(hostname)\nApp: ${app}\nAlias: ${dom}\nPrimary: $(app_get "$app" domain)\nTime: $(notify_now)" \
         alias_add
     success "'${dom}' added to '${app}'"
     _alias_cert_hint "$app" "$dom"
@@ -2269,7 +2313,7 @@ alias_remove() {
     log_action "ALIAS REMOVED: $dom ← $app"
     cipi_notify \
         "Cipi alias removed: ${dom} from ${app} on $(hostname)" \
-        "A domain alias was removed.\n\nServer: $(hostname)\nApp: ${app}\nAlias: ${dom}\nPrimary: $(app_get "$app" domain)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A domain alias was removed.\n\nServer: $(hostname)\nApp: ${app}\nAlias: ${dom}\nPrimary: $(app_get "$app" domain)\nTime: $(notify_now)" \
         alias_remove
     success "'${dom}' removed from '${app}'"
 }
@@ -2361,7 +2405,7 @@ www_add() {
     log_action "WWW ADDED: $other → $app"
     cipi_notify \
         "Cipi www alias added: ${other} → ${app} on $(hostname)" \
-        "A www/apex alias was added.\n\nServer: $(hostname)\nApp: ${app}\nAlias: ${other}\nPrimary: ${primary}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A www/apex alias was added.\n\nServer: $(hostname)\nApp: ${app}\nAlias: ${other}\nPrimary: ${primary}\nTime: $(notify_now)" \
         www_add
     success "'${other}' added to '${app}'"
     _alias_cert_hint "$app" "$other"
@@ -2381,7 +2425,7 @@ www_force_to_root() {
     log_action "WWW FORCE TO-ROOT: $app (${WWW_PAIR_HOST} → ${WWW_PAIR_APEX})"
     cipi_notify \
         "Cipi www force to-root: ${app} on $(hostname)" \
-        "WWW canonical redirect enabled (www → apex).\n\nServer: $(hostname)\nApp: ${app}\nRedirect: ${WWW_PAIR_HOST} → ${WWW_PAIR_APEX}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "WWW canonical redirect enabled (www → apex).\n\nServer: $(hostname)\nApp: ${app}\nRedirect: ${WWW_PAIR_HOST} → ${WWW_PAIR_APEX}\nTime: $(notify_now)" \
         www_force_to_root
     success "WWW redirect: ${WWW_PAIR_HOST} → ${WWW_PAIR_APEX}"
     [[ -n "$WWW_PAIR_ADDED" ]] && _alias_cert_hint "$app" "$WWW_PAIR_ADDED"
@@ -2402,7 +2446,7 @@ www_force_from_root() {
     log_action "WWW FORCE FROM-ROOT: $app (${WWW_PAIR_APEX} → ${WWW_PAIR_HOST})"
     cipi_notify \
         "Cipi www force from-root: ${app} on $(hostname)" \
-        "WWW canonical redirect enabled (apex → www).\n\nServer: $(hostname)\nApp: ${app}\nRedirect: ${WWW_PAIR_APEX} → ${WWW_PAIR_HOST}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "WWW canonical redirect enabled (apex → www).\n\nServer: $(hostname)\nApp: ${app}\nRedirect: ${WWW_PAIR_APEX} → ${WWW_PAIR_HOST}\nTime: $(notify_now)" \
         www_force_from_root
     success "WWW redirect: ${WWW_PAIR_APEX} → ${WWW_PAIR_HOST}"
     [[ -n "$WWW_PAIR_ADDED" ]] && _alias_cert_hint "$app" "$WWW_PAIR_ADDED"
@@ -2425,7 +2469,7 @@ www_clear() {
     log_action "WWW CLEAR: $app"
     cipi_notify \
         "Cipi www redirect cleared: ${app} on $(hostname)" \
-        "WWW canonical redirect was cleared.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "WWW canonical redirect was cleared.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(notify_now)" \
         www_clear
     success "WWW redirect cleared for '${app}'"
 }
@@ -3102,6 +3146,19 @@ EOF
         return 0
     fi
 
+    # The page cache (cipi cache <app> on): the app's zone, and the lines
+    # that go in the server block and in the location that reaches PHP. All
+    # empty while it is off. Written at every regeneration, like the rest.
+    local cache_header="" cache_fpm="" cache_proxy=""
+    declare -f cache_render >/dev/null 2>&1 || source "${CIPI_LIB}/cache.sh" 2>/dev/null || true
+    if declare -f cache_render >/dev/null 2>&1; then
+        if cache_render "$app"; then
+            cache_header="$CACHE_HEADER_LINE"; cache_fpm="$CACHE_FPM_BLOCK"; cache_proxy="$CACHE_PROXY_BLOCK"
+        else
+            warn "Could not write the page cache of '${app}' — its vhost is written without it"
+        fi
+    fi
+
     local root_path="/home/${app}/current"
     if [[ "$vhost_type" == "custom" ]]; then
         root_path="/home/${app}/htdocs"
@@ -3141,7 +3198,7 @@ ${www_redirect_block}server {
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-    client_max_body_size 256M;
+${cache_header}    client_max_body_size 256M;
 ${reverb_block}${route_blocks}    location / {
 ${auth_block}        try_files \$uri \$uri/ /index.php?\$args;
     }
@@ -3151,7 +3208,7 @@ ${auth_block}        fastcgi_pass unix:/run/php/${app}.sock;
         include fastcgi_params;
         fastcgi_hide_header X-Powered-By;
         fastcgi_read_timeout 300;
-    }
+${cache_fpm}    }
 ${cipi_yml_deny}    location ~ /\.(?!well-known) { deny all; }
     location = /favicon.ico { access_log off; log_not_found off; }
     location = /robots.txt  { access_log off; log_not_found off; }
@@ -3172,7 +3229,7 @@ ${www_redirect_block}server {
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-    client_max_body_size 256M;
+${cache_header}    client_max_body_size 256M;
 ${agent_block}${reverb_block}${route_blocks}    location /index.php {
 ${auth_block}        try_files /not_exists @octane;
     }
@@ -3195,7 +3252,7 @@ ${auth_block}        set \$suffix "";
         proxy_set_header Connection \$connection_upgrade;
         proxy_pass http://127.0.0.1:${octane_port}\$suffix;
         proxy_read_timeout 300;
-    }
+${cache_proxy}    }
 ${cipi_yml_deny}    location ~ /\.(?!well-known) { deny all; }
     location = /favicon.ico { access_log off; log_not_found off; }
     location = /robots.txt  { access_log off; log_not_found off; }
@@ -3215,7 +3272,7 @@ ${www_redirect_block}server {
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-    client_max_body_size 256M;
+${cache_header}    client_max_body_size 256M;
 ${agent_block}${reverb_block}${route_blocks}    location / {
 ${auth_block}        try_files \$uri \$uri/ /index.php?\$query_string;
     }
@@ -3225,7 +3282,7 @@ ${auth_block}        fastcgi_pass unix:/run/php/${app}.sock;
         include fastcgi_params;
         fastcgi_hide_header X-Powered-By;
         fastcgi_read_timeout 300;
-    }
+${cache_fpm}    }
 ${cipi_yml_deny}    location ~ /\.(?!well-known) { deny all; }
     location = /favicon.ico { access_log off; log_not_found off; }
     location = /robots.txt  { access_log off; log_not_found off; }
@@ -3388,6 +3445,8 @@ _create_deployer_config_from_template() {
     rm -f "$tmp"
     deployer_audit_ensure_hook "$an" false || warn "Deploy audit hook not added to ${dh}/.deployer/deploy.php"
     deployer_release_name_ensure_hook "$an" || warn "Release numbering guard not added to ${dh}/.deployer/deploy.php"
+    # The recipe just written has the three hooks: the flow always goes with it.
+    deployer_flow_ensure_hook "$an" || warn "Deploy flow not added to ${dh}/.deployer/deploy.php — storage:link, optimize and migrate run twice"
 }
 
 # Recreate deploy.php for an existing app (detects type from apps.json)
@@ -3588,7 +3647,7 @@ JSON
     log_action "AUTH CREATED: $app"
     cipi_notify \
         "Cipi auth.json created: ${app} on $(hostname)" \
-        "Composer auth.json was created.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Composer auth.json was created.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(notify_now)" \
         auth_create
     success "auth.json created at ${auth_file}"
     # On a terminal the editor opens right away: an auth.json with no
@@ -3619,7 +3678,7 @@ auth_edit() {
         log_action "AUTH EDITED: $app"
         cipi_notify \
             "Cipi auth.json edited: ${app} on $(hostname)" \
-            "Composer auth.json was edited.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "Composer auth.json was edited.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(notify_now)" \
             auth_edit
         success "auth.json updated"
         return 0
@@ -3632,7 +3691,7 @@ auth_edit() {
         log_action "AUTH EDITED: $app"
         cipi_notify \
             "Cipi auth.json edited: ${app} on $(hostname)" \
-            "Composer auth.json was edited.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "Composer auth.json was edited.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(notify_now)" \
             auth_edit
         success "auth.json updated"
     else
@@ -3682,7 +3741,7 @@ auth_delete() {
     log_action "AUTH DELETED: $app"
     cipi_notify \
         "Cipi auth.json deleted: ${app} on $(hostname)" \
-        "Composer auth.json was deleted.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "Composer auth.json was deleted.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(notify_now)" \
         auth_delete
     success "auth.json deleted for '${app}'"
 }
@@ -3816,7 +3875,7 @@ basicauth_enable() {
     log_action "BASICAUTH ENABLED: $app user=$user"
     cipi_notify \
         "Cipi basic auth enabled: ${app} on $(hostname)" \
-        "HTTP basic auth was enabled.\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\nUser: ${user}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "HTTP basic auth was enabled.\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\nUser: ${user}\nTime: $(notify_now)" \
         basicauth_enable
 
     echo ""
@@ -3855,7 +3914,7 @@ basicauth_disable() {
     log_action "BASICAUTH DISABLED: $app"
     cipi_notify \
         "Cipi basic auth disabled: ${app} on $(hostname)" \
-        "HTTP basic auth was disabled.\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "HTTP basic auth was disabled.\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\nTime: $(notify_now)" \
         basicauth_disable
 }
 
@@ -4074,7 +4133,7 @@ app_suspend() {
     log_action "APP SUSPENDED: $app"
     cipi_notify \
         "Cipi app suspended: ${app} on $(hostname)" \
-        "An app was suspended and is now serving the offline page.\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "An app was suspended and is now serving the offline page.\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\nTime: $(notify_now)" \
         app_suspend
 
     echo ""
@@ -4102,7 +4161,7 @@ app_unsuspend() {
     log_action "APP UNSUSPENDED: $app"
     cipi_notify \
         "Cipi app unsuspended: ${app} on $(hostname)" \
-        "An app was unsuspended and is back online.\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "An app was unsuspended and is back online.\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\nTime: $(notify_now)" \
         app_unsuspend
 }
 
@@ -4121,7 +4180,7 @@ app_reset_password() {
 
     cipi_notify \
         "Cipi app SSH password reset: ${app} on $(hostname)" \
-        "The SSH password for app '${app}' was regenerated.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The SSH password for app '${app}' was regenerated.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(notify_now)" \
         app_ssh_password_reset
 
     echo ""
@@ -4156,7 +4215,7 @@ app_reset_db_password() {
 
     cipi_notify \
         "Cipi app DB password reset: ${app} on $(hostname)" \
-        "The database password for app '${app}' was regenerated.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The database password for app '${app}' was regenerated.\n\nServer: $(hostname)\nApp: ${app}\nTime: $(notify_now)" \
         app_db_password_reset
 
     echo ""
@@ -4930,7 +4989,7 @@ app_jit() {
             exit 1
         fi
         log_action "APP JIT: ${app} off"
-        cipi_notify "Cipi JIT off: ${app} on $(hostname)"             "JIT was turned off for an app.\n\nServer: $(hostname)\nApp: ${app}\nRuntime: ${rt}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" app_jit
+        cipi_notify "Cipi JIT off: ${app} on $(hostname)"             "JIT was turned off for an app.\n\nServer: $(hostname)\nApp: ${app}\nRuntime: ${rt}\nTime: $(notify_now)" app_jit
         success "JIT off for '${app}'"
         return 0
     fi
@@ -4976,7 +5035,7 @@ app_jit() {
     fi
     log_action "APP JIT: ${app} on mode=${mode} buffer=${buf}"
     cipi_notify "Cipi JIT on: ${app} on $(hostname)" \
-        "JIT was turned on for an app.\n\nServer: $(hostname)\nApp: ${app}\nRuntime: ${rt}\nMode: ${mode}\nBuffer: ${buf}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" app_jit
+        "JIT was turned on for an app.\n\nServer: $(hostname)\nApp: ${app}\nRuntime: ${rt}\nMode: ${mode}\nBuffer: ${buf}\nTime: $(notify_now)" app_jit
     success "JIT on for '${app}' (mode=${mode}, buffer=${buf})"
     [[ "$rt" == fpm ]] && echo -e "  ${DIM}The buffer is shared by every app on PHP ${v} with JIT; the largest asked for is used.${NC}"
     return 0
@@ -5163,6 +5222,13 @@ app_fix_permissions() {
         success "Permissions restored for ${app}"
         return 0
     fi
+
+    # Cipi's shared logrotate rules, with apps or without: a log directly in
+    # /var/log needs a "su" line (logrotate_cipi_su in common.sh). This is the
+    # command `cipi pending` names for a rule logrotate refuses.
+    local lr_fixed
+    lr_fixed=$(logrotate_cipi_su | paste -sd' ' - || true)
+    if [[ -n "$lr_fixed" ]]; then info "logrotate: \"su root adm\" added to ${lr_fixed}"; fi
 
     if [[ ! -f "${CIPI_CONFIG}/apps.json" ]]; then
         info "No apps"

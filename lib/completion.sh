@@ -55,8 +55,8 @@ _cipi_complete() {
         words=("${COMP_WORDS[@]}"); cword=$COMP_CWORD
     fi
 
-    local commands="status disk version self-update pending autoupdate reboot valkey service app use node alias domains www redirect proxy auth basicauth deploy worker schedule health monitor metrics db search ssl php frankenphp package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh notification smtp reset credentials completion help"
-    local topics="app use node domains www redirect proxy deploy worker schedule health monitor metrics db search service ssl php frankenphp package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui notification smtp reset credentials server updates valkey completion all"
+    local commands="status disk version self-update pending autoupdate reboot valkey service app use node alias domains www redirect proxy auth basicauth deploy worker schedule health monitor metrics db search ssl php frankenphp package firewall ban crowdsec zt scan compliance backup ini yml nginx cache api gui git sync ssh notification smtp reset credentials completion help"
+    local topics="app use node domains www redirect proxy deploy worker schedule health monitor metrics db search service ssl php frankenphp package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx cache api gui notification smtp reset credentials server updates valkey completion all"
 
     # skip a leading path/wrapper (e.g. `sudo cipi`, `/usr/local/bin/cipi`)
     local start=1 j
@@ -311,18 +311,20 @@ _cipi_complete() {
         php)      [[ $pos -eq 1 ]] && sub="list install switch upgrade" ;;
         frankenphp|franken)
             case $pos in
-                1) sub="status upgrade use fetch import adopt remove prune" ;;
+                1) sub="status php upgrade restart use fetch import adopt remove prune" ;;
                 2) case "$w1" in
                        upgrade)    sub="$(_cipi_apps) --all" ;;
-                       use|adopt)  sub="$(_cipi_apps)" ;;
+                       use|adopt|php|restart)  sub="$(_cipi_apps)" ;;
                        status)     sub="--json" ;;
                        fetch)      sub="latest" ;;
                    esac ;;
                 3) case "$w1" in
                        upgrade) sub="--to= --no-fetch --yes" ;;
+                       php)     sub="8.3 8.4 8.5 8.6 --json" ;;
                    esac ;;
                 *) case "$w1" in
                        use) sub="--no-restart --force" ;;
+                       php) sub="--yes --no-fetch" ;;
                    esac ;;
             esac ;;
 
@@ -422,6 +424,23 @@ _cipi_complete() {
                 4) [[ "$w1" == auto ]] && sub="--json" ;;
             esac ;;
 
+        cache)
+            case $pos in
+                1) sub="list $(_cipi_apps) --json" ;;
+                2) sub="on off ttl size clear exclude status --json" ;;
+                3) case "$w2" in
+                       on)      sub="--ttl= --size= --exclude= --no-deploy-clear --deploy-clear" ;;
+                       ttl)     sub="30s 5m 10m 1h 1d" ;;
+                       size)    sub="128m 256m 512m 1g" ;;
+                       exclude) sub="add remove set --json" ;;
+                       status)  sub="--json" ;;
+                   esac ;;
+                *) case "$w2" in
+                       on)      sub="--ttl= --size= --exclude= --no-deploy-clear --deploy-clear" ;;
+                       exclude) [[ "${words[vi+3]:-}" == remove ]] && sub="--all" ;;
+                   esac ;;
+            esac ;;
+
         nginx)
             case $pos in
                 1) sub="show edit set reset real-ip default-server upgrade security" ;;
@@ -491,8 +510,10 @@ _cipi_complete() {
         smtp|mail|email)          [[ $pos -eq 1 ]] && sub="configure status test disable enable delete" ;;
         notification|notifications|notify|triggers)
             case $pos in
-                1) sub="status add update remove test enable disable events triggers smtp --json" ;;
+                1) sub="status add update remove test enable disable events triggers timezone server-name smtp --json" ;;
                 2) case "$w1" in
+                       timezone)    sub="server UTC Europe/Rome Europe/London Europe/Berlin America/New_York --json" ;;
+                       server-name) sub="--clear --json" ;;
                        add)     sub="smtp resend ses slack discord mattermost googlechat telegram ntfy pushover webhook" ;;
                        test)    sub="smtp all" ;;
                        remove|enable|disable|update) sub="smtp" ;;

@@ -31,6 +31,10 @@
 #   cipi reboot auto off
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 [[ -z "${PENDING_STATE:-}" ]] && readonly PENDING_STATE="/var/lib/cipi/pending.state"
 [[ -z "${PENDING_CRON:-}" ]]  && readonly PENDING_CRON="/etc/cron.d/cipi-pending"
 [[ -z "${REBOOT_CRON:-}" ]]   && readonly REBOOT_CRON="/etc/cron.d/cipi-auto-reboot"
@@ -135,7 +139,14 @@ _pending_frankenphp() {
                 floor=$(php_security_floor "$(fphp_minor "$pv")")
                 _pending_add critical "frankenphp-${app}" "${app} (Octane) answers on PHP ${pv}, inside FrankenPHP build ${id}: below ${floor:-a supported branch}" "cipi frankenphp upgrade ${app}" ;;
             mismatch)
-                _pending_add warning "frankenphp-${app}-php" "${app} is on PHP $(app_get "$app" php), but Octane answers on PHP ${pv} (FrankenPHP build ${id})" "cipi frankenphp upgrade ${app}" ;;
+                # Two PHP versions in one app. The command names the version
+                # the app ends on: `cipi frankenphp upgrade` (the hint until
+                # 5.17.0) stays on the app's PHP, and did nothing where no
+                # build on it was on the server.
+                local fix fix_cmd fix_why
+                fix=$(fphp_mismatch_fix "$app"); IFS=$'\t' read -r fix_cmd fix_why <<< "$fix"
+                _pending_add warning "frankenphp-${app}-php" "${app}: Octane answers requests on PHP ${pv} (FrankenPHP build ${id}), while Composer, artisan, cron and the workers run PHP $(app_get "$app" php)" \
+                    "${fix_cmd:-cipi frankenphp php ${app}}${fix_why:+   (${fix_why})}" ;;
             unpinned)
                 floor=$(php_security_floor "$(fphp_minor "$pv")")
                 if [[ -n "$floor" ]] && version_at_least "$pv" "$floor"; then
@@ -145,7 +156,7 @@ _pending_frankenphp() {
                 fi ;;
         esac
         if [[ "$rs" == yes ]]; then
-            _pending_add warning "frankenphp-${app}-restart" "${app}: Octane still runs the FrankenPHP binary it started with, not the pinned build ${id}" "supervisorctl restart ${app}-octane"
+            _pending_add warning "frankenphp-${app}-restart" "${app}: Octane still runs the FrankenPHP binary it started with, not the pinned build ${id}" "cipi frankenphp restart ${app}"
         fi
     done
     return 0
@@ -336,7 +347,7 @@ _pending_logrotate() {
     local out
     out=$(logrotate_cipi_check) && return 0
     _pending_add warning logrotate "logrotate reports a problem with a Cipi rule: $(head -n 1 <<< "$out" | cut -c1-200)" \
-        "logrotate -d /etc/logrotate.d/cipi-*   then: cipi app fix-permissions"
+        "cipi app fix-permissions   (it rewrites Cipi's rules; to see what logrotate says: logrotate -d /etc/logrotate.d/cipi-*)"
 }
 
 # Fills PENDING_ITEMS, and keeps the list for `cipi status` (the panel asks
@@ -437,7 +448,7 @@ _pending_cron() {
     body="$(_pending_plain)"
     cipi_notify \
         "Cipi: ${n} thing(s) need attention on $(hostname)" \
-        "Server: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\n${body}\n\nThe same list, any time: cipi pending" \
+        "Server: $(hostname)\nTime: $(notify_now)\n\n${body}\n\nThe same list, any time: cipi pending" \
         pending_report
     printf '%s\n%s\n' "$hash" "$now" > "$PENDING_STATE" 2>/dev/null || true
     return 0
@@ -555,7 +566,7 @@ _reboot_now() {
     log_action "REBOOT: requested"
     cipi_notify \
         "Cipi: $(hostname) is restarting" \
-        "A reboot was requested.\n\nServer: $(hostname)\nKernel now: $(uname -r)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A reboot was requested.\n\nServer: $(hostname)\nKernel now: $(uname -r)\nTime: $(notify_now)" \
         reboot
     shutdown -r +1 "Cipi: reboot requested" || { error "shutdown failed"; return 1; }
     success "The server restarts in one minute (cancel: shutdown -c)"
@@ -575,7 +586,7 @@ _reboot_if_required() {
     log_action "REBOOT: automatic (running ${running}, installed ${newest})"
     cipi_notify \
         "Cipi: $(hostname) is restarting (automatic)" \
-        "Installed updates need a reboot, and automatic reboot is on.\n\nServer: $(hostname)\nKernel now: ${running}\nKernel after: ${newest}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nSwitch it off: cipi reboot auto off" \
+        "Installed updates need a reboot, and automatic reboot is on.\n\nServer: $(hostname)\nKernel now: ${running}\nKernel after: ${newest}\nTime: $(notify_now)\n\nSwitch it off: cipi reboot auto off" \
         reboot
     shutdown -r +2 "Cipi: automatic reboot (installed updates need it)"
 }

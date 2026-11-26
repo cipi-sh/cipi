@@ -35,6 +35,10 @@
 #   cipi valkey flush-shared [--yes]
 #############################################
 
+# The time of a notification is common.sh's (and follows `cipi notification
+# timezone`); loaded on its own, this file still has a clock.
+declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
+
 [[ -z "${VALKEY_CONF_DIR:-}" ]] && readonly VALKEY_CONF_DIR="/etc/cipi-valkey"
 [[ -z "${VALKEY_DATA_DIR:-}" ]] && readonly VALKEY_DATA_DIR="/var/lib/cipi-valkey"
 [[ -z "${VALKEY_UNIT_FILE:-}" ]] && readonly VALKEY_UNIT_FILE="/etc/systemd/system/cipi-valkey@.service"
@@ -548,7 +552,7 @@ _valkey_move() {   # <app> <own|shared> — options in ARG_*
         log_action "VALKEY ISOLATE: ${app} port=${port} keys_copied=${n}"
         cipi_notify \
             "Cipi: ${app} has its own Valkey on $(hostname)" \
-            "The app now uses an instance of its own.\n\nServer: $(hostname)\nApp: ${app}\nInstance: 127.0.0.1:${port} (cipi-valkey@${app})\nKeys copied: ${n}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            "The app now uses an instance of its own.\n\nServer: $(hostname)\nApp: ${app}\nInstance: 127.0.0.1:${port} (cipi-valkey@${app})\nKeys copied: ${n}\nTime: $(notify_now)" \
             valkey_isolate
         success "${app}: own Valkey on 127.0.0.1:${port}$([[ "$copy" == true ]] && echo " — ${n} key(s) copied")"
         return 0
@@ -585,7 +589,7 @@ _valkey_move() {   # <app> <own|shared> — options in ARG_*
     log_action "VALKEY SHARE: ${app} keys_copied=${n}"
     cipi_notify \
         "Cipi: ${app} is back on the shared Valkey on $(hostname)" \
-        "The app's own instance was removed.\n\nServer: $(hostname)\nApp: ${app}\nKeys copied back: ${n}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "The app's own instance was removed.\n\nServer: $(hostname)\nApp: ${app}\nKeys copied back: ${n}\nTime: $(notify_now)" \
         valkey_isolate
     success "${app}: back on the shared Valkey (127.0.0.1:${VALKEY_SHARED_PORT})"
 }

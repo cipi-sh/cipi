@@ -427,14 +427,18 @@ _cipi_complete() {
         cache)
             case $pos in
                 1) sub="list $(_cipi_apps) --json" ;;
-                2) sub="on off ttl size clear status --json" ;;
+                2) sub="on off ttl size clear exclude status --json" ;;
                 3) case "$w2" in
-                       on)     sub="--ttl= --size= --no-deploy-clear --deploy-clear" ;;
-                       ttl)    sub="30s 5m 10m 1h 1d" ;;
-                       size)   sub="128m 256m 512m 1g" ;;
-                       status) sub="--json" ;;
+                       on)      sub="--ttl= --size= --exclude= --no-deploy-clear --deploy-clear" ;;
+                       ttl)     sub="30s 5m 10m 1h 1d" ;;
+                       size)    sub="128m 256m 512m 1g" ;;
+                       exclude) sub="add remove set --json" ;;
+                       status)  sub="--json" ;;
                    esac ;;
-                *) [[ "$w2" == on ]] && sub="--ttl= --size= --no-deploy-clear --deploy-clear" ;;
+                *) case "$w2" in
+                       on)      sub="--ttl= --size= --exclude= --no-deploy-clear --deploy-clear" ;;
+                       exclude) [[ "${words[vi+3]:-}" == remove ]] && sub="--all" ;;
+                   esac ;;
             esac ;;
 
         nginx)

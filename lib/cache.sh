@@ -20,6 +20,7 @@
 #   cipi cache <app> ttl 10m
 #   cipi cache <app> size 512m
 #   cipi cache <app> clear
+#   cipi cache <app> exclude [add|remove|set <path>…]
 #   cipi cache <app> [status] [--json]
 #   cipi cache [list] [--json]
 #
@@ -42,7 +43,10 @@
 #     or no-store. The app's headers are respected — nothing here ignores
 #     them — so what WordPress and WooCommerce mark as private stays private,
 #     and a Laravel app, which marks every response "no-cache, private" by
-#     default, caches only the responses it marks public itself.
+#     default, caches only the responses it marks public itself;
+#   - the paths the app adds itself (cipi cache <app> exclude add '/cart*'):
+#     a page that is different for each visitor without a cookie or a header
+#     saying so, a feed, a page with a counter.
 #
 # The time to live is for pages that say nothing: a response with its own
 # Cache-Control max-age (or X-Accel-Expires) is kept that long instead. A
@@ -65,6 +69,8 @@ declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:
 CACHE_MAPS_FILE="${CACHE_CONF_DIR}/cipi-cache-maps.conf"
 CACHE_DEFAULT_TTL="10m"
 CACHE_DEFAULT_SIZE="256m"
+# Paths of its own an app may keep out of its cache.
+CACHE_EXCLUDE_MAX=50
 # Set by cache_render for the vhost being written.
 CACHE_FPM_BLOCK=""
 CACHE_PROXY_BLOCK=""
@@ -141,6 +147,46 @@ cache_size() {
 # Emptied after a successful deploy unless the app said no.
 cache_clear_on_deploy() { [[ "$(_cache_setting "$1" clear_on_deploy)" != "false" ]]; }
 
+# A path the app keeps out of its cache, as it is kept: "/cart*", "/feed",
+# "/shop/*/reviews". It starts with / (added when missing) and is made of
+# letters, digits, . _ ~ % - / and of * for "anything, slashes included" —
+# nothing nginx's configuration or a regular expression could read as its
+# own. 1 when it is not one; "/*" is every page, which is `cache <app> off`.
+cache_exclude_normalize() {   # <path>
+    local p="${1:-}"
+    [[ -n "$p" ]] || return 1
+    [[ "$p" == /* ]] || p="/${p}"
+    [[ "$p" =~ ^/[A-Za-z0-9._~%/*-]{0,127}$ ]] || return 1
+    while [[ "$p" == *'**'* ]]; do p="${p//\*\*/*}"; done
+    [[ "$p" != "/*" ]] || return 1
+    printf '%s\n' "$p"
+}
+
+# What nginx matches $request_uri with (case does not count). Without a
+# final *, the path itself — with or without its last slash, and whatever
+# its query string; with it, everything that starts so.
+_cache_exclude_regex() {   # <normalized path>
+    local p="$1" r
+    r="${p//./\\.}"
+    r="${r//\*/[^?]*}"
+    if [[ "$p" == *'*' ]]; then
+        printf '^%s\n' "$r"
+    else
+        printf '^%s/?(\\?|$)\n' "${r%/}"
+    fi
+}
+
+# The app's own paths, one per line — only what is one (the file is the
+# app's settings, not something to trust).
+cache_excludes() {   # <app>
+    local p n
+    while IFS= read -r p; do
+        n=$(cache_exclude_normalize "$p") || continue
+        printf '%s\n' "$n"
+    done < <(vault_read apps.json 2>/dev/null | jq -r --arg a "$1" \
+        '(.[$a].page_cache.exclude // []) | if type == "array" then .[] else empty end | strings' 2>/dev/null || true)
+}
+
 # ── what nginx reads ─────────────────────────────────────────
 
 # The rules that keep a request out of the cache, once for the server: a map
@@ -194,10 +240,12 @@ _cache_maps_ensure() {
 
 # The app's zone: where its pages are kept and how much of the disk they may
 # take. `inactive` is how long a page nobody asks for stays: an hour, or the
-# time to live when that is longer.
+# time to live when that is longer. With it, the map of the paths the app
+# keeps out of its cache — a map of its own, since a map is global in nginx.
 _cache_zone_ensure() {   # <app> <fastcgi|proxy>
-    local app="$1" kind="$2" file dir size ttl_s inactive nuser tmp
+    local app="$1" kind="$2" file dir size ttl_s inactive nuser tmp excludes ex
     file=$(_cache_zone_file "$app"); dir=$(_cache_dir "$app")
+    excludes=$(cache_excludes "$app")
     size=$(cache_size "$app")
     ttl_s=$(cache_ttl_seconds "$(cache_ttl "$app")")
     inactive=3600; (( ttl_s > inactive )) && inactive="$ttl_s"
@@ -211,6 +259,16 @@ _cache_zone_ensure() {   # <app> <fastcgi|proxy>
     {
         echo "# Managed by Cipi (cipi cache ${app}) — rewritten with the app's vhost."
         echo "${kind}_cache_path ${dir} levels=1:2 keys_zone=cipi_${app}:10m max_size=${size} inactive=${inactive}s use_temp_path=off;"
+        # The paths the app keeps out of its cache (cipi cache <app> exclude).
+        if [[ -n "$excludes" ]]; then
+            echo
+            echo "map \$request_uri \$cipi_cache_skip_${app} {"
+            echo "    default 0;"
+            while IFS= read -r ex; do
+                if [[ -n "$ex" ]]; then echo "    \"~*$(_cache_exclude_regex "$ex")\" 1;"; fi
+            done <<< "$excludes"
+            echo "}"
+        fi
     } > "$tmp"
     if [[ -f "$file" && ! -L "$file" ]] && cmp -s "$tmp" "$file"; then
         rm -f "$tmp"; return 0
@@ -250,6 +308,7 @@ cache_render() {   # <app>
     # thousands of them, and a page created meanwhile must show up soon.
     nf=60; (( ttl_s < nf )) && nf="$ttl_s"
     skip='$cipi_cache_skip_cookie $cipi_cache_skip_uri $cipi_cache_skip_args $cipi_cache_skip_auth'
+    if [[ -n "$(cache_excludes "$app")" ]]; then skip+=" \$cipi_cache_skip_${app}"; fi
     CACHE_HEADER_LINE='    add_header X-Cache-Status $upstream_cache_status always;'$'\n'
     if [[ "$kind" == fastcgi ]]; then
         CACHE_FPM_BLOCK="        fastcgi_cache cipi_${app};
@@ -362,6 +421,11 @@ _cache_sudoers_ensure() {   # <app>
 
 # ── commands ─────────────────────────────────────────────────
 
+# The app's own paths as a JSON array.
+_cache_excludes_json() {   # <app>
+    cache_excludes "$1" | jq -Rnc '[inputs | select(length > 0)]' 2>/dev/null || echo '[]'
+}
+
 _cache_status_json() {   # <app>
     local app="$1" kind files bytes active=false
     kind=$(cache_app_kind "$app")
@@ -374,9 +438,11 @@ _cache_status_json() {   # <app>
         --argjson ttl_s "$(cache_ttl_seconds "$(cache_ttl "$app")")" \
         --argjson suspended "$([[ "$(app_get "$app" suspended)" == "true" ]] && echo true || echo false)" \
         --arg dir "$(_cache_dir "$app")" \
+        --argjson exclude "$(_cache_excludes_json "$app")" --argjson exmax "$CACHE_EXCLUDE_MAX" \
         '{app: $app, supported: ($kind != ""), kind: (if $kind == "" then null else $kind end),
           enabled: $enabled, active: $active, ttl: $ttl, ttl_seconds: $ttl_s, size: $size,
-          clear_on_deploy: $cod, files: $files, bytes: $bytes, path: $dir, suspended: $suspended,
+          clear_on_deploy: $cod, exclude: $exclude, exclude_max: $exmax,
+          files: $files, bytes: $bytes, path: $dir, suspended: $suspended,
           clear_command: ("sudo /usr/local/bin/cipi-cache-clear " + $app)}'
 }
 
@@ -407,6 +473,10 @@ _cache_status() {   # <app> [--json]
         echo -e "  Emptied after every successful deploy and rollback"
     else
         echo -e "  ${YELLOW}Not emptied after a deploy${NC} ${DIM}(cipi cache ${app} on --deploy-clear)${NC}"
+    fi
+    local own; own=$(cache_excludes "$app" | paste -sd' ' -)
+    if [[ -n "$own" ]]; then
+        echo -e "  Never cached, of its own: ${BOLD}${own}${NC}  ${DIM}(cipi cache ${app} exclude)${NC}"
     fi
     [[ "$(app_get "$app" suspended)" == "true" ]] && echo -e "  ${YELLOW}The app is suspended${NC} ${DIM}— the cache is back with: cipi app unsuspend ${app}${NC}"
     echo -e "  ${DIM}Look at a response: curl -sI https://$(app_get "$app" domain)/ | grep -i x-cache-status   (HIT, MISS, BYPASS, EXPIRED, STALE)${NC}"
@@ -441,7 +511,7 @@ _cache_list() {
         fi
     done < <(jq -r '.[] | [.app, (.enabled | tostring), .ttl, (.files | tostring), (.bytes | tostring), (.supported | tostring)] | @tsv' <<< "$rows")
     tbl_print
-    echo -e "  ${DIM}cipi cache <app> on [--ttl=10m] · off · ttl <time> · clear${NC}\n"
+    echo -e "  ${DIM}cipi cache <app> on [--ttl=10m] · off · ttl <time> · clear · exclude add '/cart*'${NC}\n"
 }
 
 # Saves the settings ($2: a jq filter on the app's page_cache), writes the
@@ -476,10 +546,16 @@ _cache_need_supported() {
 
 _cache_on() {
     local app="$1"; shift
-    unset ARG_ttl ARG_size ARG_deploy_clear ARG_no_deploy_clear 2>/dev/null || true
+    unset ARG_ttl ARG_size ARG_deploy_clear ARG_no_deploy_clear ARG_exclude 2>/dev/null || true
     parse_args "$@"
     _cache_need_supported "$app"
-    local ttl size cod was=false
+    local ttl size cod was=false ex ex_now
+    ex_now=$(_cache_excludes_json "$app"); ex="$ex_now"
+    # --exclude=/cart*,/checkout* is the whole list; --exclude= is none.
+    if [[ -n "${ARG_exclude+x}" ]]; then
+        [[ "$ARG_exclude" == "true" ]] && { error "--exclude wants paths: --exclude='/cart*,/checkout*' (or --exclude= for none)"; exit 1; }
+        ex=$(_cache_exclude_list "$ARG_exclude") || exit 1
+    fi
     ttl="${ARG_ttl:-$(cache_ttl "$app")}"; size="${ARG_size:-$(cache_size "$app")}"
     cache_ttl_seconds "$ttl" >/dev/null || { error "Invalid --ttl '${ttl}' — a number and s, m, h or d (30s, 10m, 1h, 7d), thirty days at most"; exit 1; }
     cache_size_valid "$size" || { error "Invalid --size '${size}' — megabytes or gigabytes, 16m to 100g (256m, 2g)"; exit 1; }
@@ -487,25 +563,26 @@ _cache_on() {
     [[ "${ARG_deploy_clear:-}" == "true" ]] && cod=true
     [[ "${ARG_no_deploy_clear:-}" == "true" ]] && cod=false
     cache_enabled "$app" && was=true
-    if [[ "$was" == true && "$ttl" == "$(cache_ttl "$app")" && "$size" == "$(cache_size "$app")" \
+    if [[ "$was" == true && "$ttl" == "$(cache_ttl "$app")" && "$size" == "$(cache_size "$app")" && "$ex" == "$ex_now" \
           && "$cod" == "$(cache_clear_on_deploy "$app" && echo true || echo false)" ]]; then
         info "The page cache of '${app}' is on already (pages kept ${ttl})"
         return 0
     fi
-    _cache_apply "$app" '.enabled = true | .ttl = $ttl | .size = $size | .clear_on_deploy = $cod' \
-        --arg ttl "$ttl" --arg size "$size" --argjson cod "$cod" || exit 1
+    _cache_apply "$app" '.enabled = true | .ttl = $ttl | .size = $size | .clear_on_deploy = $cod | .exclude = $ex' \
+        --arg ttl "$ttl" --arg size "$size" --argjson cod "$cod" --argjson ex "$ex" || exit 1
     _cache_sudoers_ensure "$app" || warn "Could not add cipi-cache-clear to /etc/sudoers.d/cipi-${app} — the app's user cannot empty the cache itself (cipi cache ${app} clear still does)"
-    log_action "PAGE CACHE ON: ${app} ttl=${ttl} size=${size}"
+    log_action "PAGE CACHE ON: ${app} ttl=${ttl} size=${size} exclude=$(jq -r 'join(",")' <<< "$ex")"
     if [[ "$was" == true ]]; then
-        success "Page cache of '${app}': pages kept ${ttl}, up to ${size} on disk"
+        success "Page cache of '${app}': pages kept ${ttl}, up to ${size} on disk$(_cache_exclude_tail "$ex")"
         return 0
     fi
     cipi_notify \
         "Cipi page cache on: ${app} on $(hostname)" \
         "The nginx page cache was turned on for an app.\n\nServer: $(hostname)\nApp: ${app}\nDomain: $(app_get "$app" domain)\nPages kept: ${ttl}\nTime: $(notify_now)" \
         app_cache
-    success "Page cache on for '${app}' — pages kept ${ttl}, up to ${size} on disk"
+    success "Page cache on for '${app}' — pages kept ${ttl}, up to ${size} on disk$(_cache_exclude_tail "$ex")"
     echo -e "  ${DIM}Not cached: signed-in visitors, carts, admin pages, query strings, anything the app marks private.${NC}"
+    echo -e "  ${DIM}A path of your own to keep out: ${CYAN}cipi cache ${app} exclude add '/cart*'${NC}"
     echo -e "  ${DIM}Check: curl -sI https://$(app_get "$app" domain)/ | grep -i x-cache-status   (MISS first, HIT after)${NC}"
     if [[ "$(app_get "$app" custom)" != "true" ]]; then
         echo -e "  ${DIM}A Laravel app marks its responses \"no-cache, private\": only those it marks public are cached (the cache.headers middleware).${NC}"
@@ -569,6 +646,133 @@ _cache_size_cmd() {
     success "The cache of '${app}' may take ${size} on disk"
 }
 
+# ", never cached: /cart* /feed" — or nothing.
+_cache_exclude_tail() {   # <json array>
+    local l; l=$(jq -r 'join(" ")' <<< "${1:-[]}" 2>/dev/null || true)
+    [[ -n "$l" ]] && printf '; never cached: %s' "$l"
+    return 0
+}
+
+# Paths given as arguments or in one comma-separated value → a JSON array,
+# each as it is kept, once. Says which one is not a path, and returns 1.
+_cache_exclude_list() {   # <path|a,b,c>…
+    local arg p n out="[]" parts
+    for arg in "$@"; do
+        IFS=',' read -ra parts <<< "$arg"
+        for p in "${parts[@]}"; do
+            p="${p#"${p%%[![:space:]]*}"}"; p="${p%"${p##*[![:space:]]}"}"
+            [[ -n "$p" ]] || continue
+            if ! n=$(cache_exclude_normalize "$p"); then
+                if [[ "$p" == "*" || "$p" == "/*" ]]; then
+                    error "'${p}' is every page — turn the cache off instead: cipi cache <app> off"
+                else
+                    error "'${p}' is not a path to exclude — letters, digits, . _ ~ % - / and * for anything: /cart*, /feed, /shop/*/reviews (128 characters at most)"
+                fi
+                return 1
+            fi
+            out=$(jq -c --arg p "$n" 'if index($p) then . else . + [$p] end' <<< "$out")
+        done
+    done
+    if (( $(jq 'length' <<< "$out") > CACHE_EXCLUDE_MAX )); then
+        error "Too many paths — ${CACHE_EXCLUDE_MAX} at most. One with a * covers many: /shop/*"
+        return 1
+    fi
+    printf '%s\n' "$out"
+}
+
+# Keeps the list: with the cache on the vhost is written again and nginx
+# reloaded (and everything goes back when nginx refuses); off, it waits.
+_cache_exclude_save() {   # <app> <json array>
+    local app="$1" ex="$2"
+    if cache_enabled "$app"; then
+        _cache_apply "$app" '.exclude = $ex' --argjson ex "$ex" || return 1
+    else
+        vault_read apps.json | jq --arg a "$app" --argjson ex "$ex" '.[$a].page_cache = ((.[$a].page_cache // {}) | .exclude = $ex)' | vault_write apps.json
+        ensure_apps_json_api_access
+    fi
+    log_action "PAGE CACHE EXCLUDE: ${app} $(jq -r 'join(",")' <<< "$ex")"
+}
+
+_cache_exclude_show() {   # <app>
+    local app="$1" own
+    echo -e "\n${BOLD}Never cached — ${app}${NC}"
+    echo -e "  ${DIM}Always, for every app:${NC} signed-in visitors and carts (cookies), anything but GET and HEAD, an Authorization header,"
+    echo -e "  query strings (tracking parameters apart), what the app marks private or answers with a cookie, and"
+    echo -e "  /wp-admin  /wp-login.php  /wp-cron.php  /xmlrpc.php  /wp-comments-post.php  /wp-json  /cipi/"
+    own=$(cache_excludes "$app")
+    if [[ -z "$own" ]]; then
+        echo -e "  ${DIM}Of its own:${NC} none  ${DIM}— cipi cache ${app} exclude add '/cart*' '/checkout*'${NC}\n"
+        return 0
+    fi
+    echo -e "  ${DIM}Of its own:${NC}"
+    while IFS= read -r own; do echo -e "    ${BOLD}${own}${NC}"; done < <(cache_excludes "$app")
+    cache_enabled "$app" || echo -e "  ${DIM}(the cache is off: they apply when it is turned on)${NC}"
+    echo -e "  ${DIM}* is anything; without it, the path itself. cipi cache ${app} exclude add|remove <path>…${NC}\n"
+}
+
+_cache_exclude_cmd() {
+    local app="$1"; shift || true
+    local action="${1:-list}" now new args=() a all=false
+    [[ "$action" == --* ]] && action=list || { shift || true; }
+    for a in "$@"; do
+        case "$a" in
+            --all) all=true ;;
+            --json|--yes) ;;
+            *) args+=("$a") ;;
+        esac
+    done
+    unset ARG_json 2>/dev/null || true
+    parse_args "$@"
+    now=$(_cache_excludes_json "$app")
+    case "$action" in
+        list|ls|show)
+            if [[ "${ARG_json:-}" == "true" || " $* " == *" --json "* ]]; then
+                jq -n --arg app "$app" --argjson ex "$now" --argjson max "$CACHE_EXCLUDE_MAX" --argjson en "$(cache_enabled "$app" && echo true || echo false)" \
+                    '{app: $app, enabled: $en, exclude: $ex, exclude_max: $max}'
+            else
+                _cache_exclude_show "$app"
+            fi
+            return 0 ;;
+        add)
+            _cache_need_supported "$app"
+            [[ ${#args[@]} -gt 0 ]] || { error "Which path? cipi cache ${app} exclude add '/cart*' '/checkout*'"; exit 1; }
+            new=$(_cache_exclude_list "${args[@]}") || exit 1
+            new=$(jq -c --argjson add "$new" '. + ($add - .)' <<< "$now")
+            if (( $(jq 'length' <<< "$new") > CACHE_EXCLUDE_MAX )); then
+                error "Too many paths — ${CACHE_EXCLUDE_MAX} at most. One with a * covers many: /shop/*"; exit 1
+            fi
+            ;;
+        remove|rm|delete)
+            if [[ "$all" == true ]]; then
+                new='[]'
+            else
+                [[ ${#args[@]} -gt 0 ]] || { error "Which path? cipi cache ${app} exclude remove '/cart*' (or --all)"; exit 1; }
+                new=$(_cache_exclude_list "${args[@]}") || exit 1
+                if [[ "$(jq -c --argjson rm "$new" '. - $rm' <<< "$now")" == "$now" ]]; then
+                    info "Not in the list of '${app}': $(jq -r 'join(" ")' <<< "$new")  ${DIM}(cipi cache ${app} exclude)${NC}"
+                    return 0
+                fi
+                new=$(jq -c --argjson rm "$new" '. - $rm' <<< "$now")
+            fi
+            ;;
+        set)
+            _cache_need_supported "$app"
+            new=$(_cache_exclude_list "${args[@]}") || exit 1
+            ;;
+        *) error "Use: cipi cache ${app} exclude [add|remove|set <path>…] — remove --all for none"; exit 1 ;;
+    esac
+    if [[ "$new" == "$now" ]]; then
+        info "Nothing to change — never cached for '${app}', of its own: $(jq -r 'if length == 0 then "none" else join(" ") end' <<< "$now")"
+        return 0
+    fi
+    _cache_exclude_save "$app" "$new" || exit 1
+    if [[ "$(jq 'length' <<< "$new")" -eq 0 ]]; then
+        success "'${app}' keeps no path of its own out of its cache any more — Cipi's own rules stay"
+    else
+        success "Never cached for '${app}': $(jq -r 'join(" ")' <<< "$new")$(cache_enabled "$app" || echo " — when the cache is turned on (cipi cache ${app} on)")"
+    fi
+}
+
 _cache_clear_cmd() {
     local app="$1" n
     if ! cache_enabled "$app"; then
@@ -600,6 +804,7 @@ cache_command() {
         ttl)                  _cache_ttl_cmd "$app" "$@" ;;
         size)                 _cache_size_cmd "$app" "$@" ;;
         clear|purge|flush)    _cache_clear_cmd "$app" ;;
-        *) error "Use: cipi cache <app> on [--ttl=10m] [--size=256m] | off | ttl <time> | size <size> | clear | status [--json]"; exit 1 ;;
+        exclude|excludes)     _cache_exclude_cmd "$app" "$@" ;;
+        *) error "Use: cipi cache <app> on [--ttl=10m] [--size=256m] [--exclude=/cart*,/feed] | off | ttl <time> | size <size> | clear | exclude [add|remove|set <path>…] | status [--json]"; exit 1 ;;
     esac
 }

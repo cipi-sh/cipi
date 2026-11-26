@@ -583,6 +583,10 @@ for v in "$CG"/sites/*; do
     if grep -q 'cipi_cache_skip_' "\$v" && ! grep -qs 'map \$http_cookie \$cipi_cache_skip_cookie' "$CG/confd/cipi-cache-maps.conf"; then
         echo 'nginx: [emerg] unknown "cipi_cache_skip_cookie" variable' >&2; rc=1
     fi
+    for m in \$(grep -oE 'cipi_cache_skip_[a-z0-9]+' "\$v" | sort -u); do
+        case "\$m" in cipi_cache_skip_cookie|cipi_cache_skip_uri|cipi_cache_skip_args|cipi_cache_skip_auth) continue ;; esac
+        grep -qsF "map \\\$request_uri \\\$\${m} {" "$CG"/confd/*.conf || { echo "nginx: [emerg] unknown \"\${m}\" variable" >&2; rc=1; }
+    done
 done
 (( rc == 0 )) && echo "nginx: configuration file /etc/nginx/nginx.conf test is successful" >&2
 exit \$rc
@@ -666,6 +670,78 @@ cache wpress ttl 10m >/dev/null
 out=$(cache wpress size 1g); [[ $? -eq 0 ]] && grep -q 'max_size=1g' "$Z" && pass "cache wpress size 1g" || fail "size: ${out}"
 out=$(cache wpress size 8m); [[ $? -ne 0 ]] && grep -q 'Invalid size' <<< "$out" && pass "a size under 16m is refused" || fail "size 8m: ${out}"
 out=$(cache wpress on --ttl=5m --size=128m); grep -qx '        fastcgi_cache_valid 200 301 300s;' "$V" && grep -q 'max_size=128m' "$Z" && pass "on --ttl= --size= changes both" || fail "on with options: ${out}"
+
+# paths of its own an app keeps out of the cache
+echo "--- page cache: exclude"
+nrm() { bash -c "$CH cache_exclude_normalize \"\$1\"" _ "$1" 2>/dev/null; }
+rgx() { bash -c "$CH _cache_exclude_regex \"\$1\"" _ "$1" 2>/dev/null; }
+[[ "$(nrm 'cart*')" == '/cart*' && "$(nrm '/a**b***')" == '/a*b*' && "$(nrm '/My-Account/')" == '/My-Account/' && "$(nrm '/caff%C3%A8_1.0~x')" == '/caff%C3%A8_1.0~x' && "$(nrm '/')" == '/' ]] \
+    && pass "a path: a / is added, ** is *, letters digits . _ ~ % - / *" || fail "normalize: $(nrm 'cart*') $(nrm '/a**b***')"
+bad_ok=true
+for bad in '' '*' '/*' '/**' '/a b' '/a;b' '/a"b' "/a'b" '/a$b' '/a{b}' '/a|b' '/(a)' '/a\b' '/a?b=1' '/a#b' '/a[b]' '/a^b' '/a+b' '/a,b' "$(printf '/%0128d' 0)" $'/a\nb'; do
+    nrm "$bad" >/dev/null && { bad_ok=false; fail "exclude accepted '${bad}'"; }
+done
+$bad_ok && pass "…a space, a quote, ; \$ { | ( \\ ? # [ ^ + , a line break, 129 characters, and /* (every page) are not paths"
+m() { grep -qiE -- "$(rgx "$1")" <<< "$2"; }
+m '/cart*' '/cart' && m '/cart*' '/cart/' && m '/cart*' '/Cart/items?x=1' && m '/cart*' '/cartoon' && ! m '/cart*' '/shop/cart' && ! m '/cart*' '/car' \
+    && pass "/cart*: everything that starts so, whatever the case — not /shop/cart" || fail "regex /cart*: $(rgx '/cart*')"
+m '/feed' '/feed' && m '/feed' '/feed/' && m '/feed' '/feed?utm_source=x' && m '/feed/' '/feed' && ! m '/feed' '/feeds' && ! m '/feed' '/feed/atom' && ! m '/feed' '/a/feed' \
+    && pass "/feed: the path itself, with or without its last slash and its query string — not /feeds, not /feed/atom" || fail "regex /feed: $(rgx '/feed')"
+m '/shop/*/reviews' '/shop/a/b/reviews' && ! m '/shop/*/reviews' '/shop/reviews' && ! m '/shop/*/reviews' '/shop/a/reviews/2' && ! m '/shop/*/reviews' '/shop/a?x=/reviews' \
+    && m '/sitemap*.xml' '/sitemap_index.xml' && m '/sitemap*.xml' '/sitemap.xml' && ! m '/sitemap*.xml' '/sitemap.xml.gz' && ! m '/a.b' '/axb' && m '/' '/' && ! m '/' '/x' \
+    && pass "a * in the middle stops at the query string; a . is a dot; / is the home page alone" || fail "regex middle: $(rgx '/shop/*/reviews') $(rgx '/sitemap*.xml')"
+cp "$V" "$CG/wpress.noex"
+out=$(cache wpress exclude add '/cart*' checkout); rc=$?
+[[ $rc -eq 0 ]] && grep -q "Never cached for 'wpress': /cart\* /checkout" <<< "$out" && pass "cache wpress exclude add '/cart*' checkout" || fail "exclude add: rc=${rc} ${out}"
+grep -qxF 'map $request_uri $cipi_cache_skip_wpress {' "$Z" && grep -qxF '    default 0;' "$Z" && grep -qxF '    "~*^/cart[^?]*" 1;' "$Z" && grep -qxF '    "~*^/checkout/?(\?|$)" 1;' "$Z" \
+    && pass "a map of its own next to the app's zone: one line per path" || fail "exclude map: $(cat "$Z")"
+skipx="${skip} \$cipi_cache_skip_wpress"
+grep -qxF "        fastcgi_cache_bypass ${skipx};" "$V" && grep -qxF "        fastcgi_no_cache ${skipx};" "$V" \
+    && pass "…named in bypass and in no_cache: neither read from the cache nor written to it" || fail "exclude in vhost: $(grep 'bypass\|no_cache' "$V")"
+! grep -q 'cipi_cache_skip_wpress' "$M" && pass "…the server's maps are not touched" || fail "exclude in the shared maps"
+[[ "$(cache wpress --json | jq -c '[.exclude, .exclude_max]')" == '[["/cart*","/checkout"],50]' && "$(cache wpress exclude --json | jq -c '[.app, .enabled, .exclude]')" == '["wpress",true,["/cart*","/checkout"]]' ]] \
+    && pass "status --json and exclude --json carry the list" || fail "exclude json: $(cache wpress --json | jq -c .exclude) $(cache wpress exclude --json)"
+grep -q 'Never cached, of its own: /cart\* /checkout' <<< "$(cache wpress)" && grep -q '/wp-admin' <<< "$(cache wpress exclude)" && grep -q '    /cart\*' <<< "$(cache wpress exclude)" \
+    && pass "cache <app> and cache <app> exclude show it, the second with Cipi's own rules" || fail "exclude shown: $(cache wpress exclude)"
+out=$(cache wpress exclude add /checkout '/cart*'); grep -q 'Nothing to change' <<< "$out" && pass "a path twice: nothing to change" || fail "exclude add twice: ${out}"
+cp "$CG/apps.json" "$CG/apps.ex"; cp "$Z" "$CG/zone.ex"
+for bad in '/a b' '/x;return 200' '/*' '/a"b'; do
+    out=$(cache wpress exclude add /ok "$bad"); rc=$?
+    [[ $rc -ne 0 ]] && cmp -s "$CG/apps.json" "$CG/apps.ex" && cmp -s "$Z" "$CG/zone.ex" || fail "exclude add accepted '${bad}': ${out}"
+done
+pass "a path that is not one refuses the whole command: nothing kept, nothing written"
+grep -q 'is every page' <<< "$(cache wpress exclude add '/*')" && pass "/*: said to turn the cache off instead" || fail "exclude /*"
+out=$(cache wpress exclude set "$(seq -s, -f '/p%g' 1 51)"); [[ $? -ne 0 ]] && grep -q '50 at most' <<< "$out" && cmp -s "$CG/apps.json" "$CG/apps.ex" && pass "51 paths: refused" || fail "exclude max: ${out}"
+echo 'feed/?(' > "$CG/refuse-on"; cp "$V" "$CG/wpress.ex"
+out=$(cache wpress exclude add /feed); rc=$?
+rm -f "$CG/refuse-on"
+[[ $rc -ne 0 ]] && grep -q 'nginx refused the configuration' <<< "$out" && cmp -s "$CG/apps.json" "$CG/apps.ex" && cmp -s "$Z" "$CG/zone.ex" && cmp -s "$V" "$CG/wpress.ex" \
+    && pass "nginx refuses a path: the list, the map and the vhost go back" || fail "exclude refusal: rc=${rc} ${out}"
+out=$(cache wpress exclude remove /checkout /nothere); [[ $? -eq 0 ]] && ! grep -q 'checkout' "$Z" && grep -qxF '    "~*^/cart[^?]*" 1;' "$Z" && pass "exclude remove: that line goes, the others stay" || fail "exclude remove: ${out}"
+grep -q 'Not in the list' <<< "$(cache wpress exclude remove /nothere)" && pass "…a path that is not in the list: said, nothing done" || fail "exclude remove unknown"
+out=$(cache wpress exclude set '/a*, /b' /c); [[ "$(cache wpress --json | jq -c .exclude)" == '["/a*","/b","/c"]' ]] && pass "exclude set: the whole list, commas or arguments" || fail "exclude set: ${out}"
+out=$(cache wpress on --exclude='/my-account*,/feed'); [[ $? -eq 0 && "$(cache wpress --json | jq -c .exclude)" == '["/my-account*","/feed"]' ]] && grep -qxF '    "~*^/feed/?(\?|$)" 1;' "$Z" \
+    && pass "on --exclude=: the whole list with the rest" || fail "on --exclude: ${out}"
+out=$(cache wpress on --exclude); [[ $? -ne 0 ]] && grep -q -- '--exclude wants paths' <<< "$out" && pass "on --exclude without paths: refused" || fail "on --exclude bare: ${out}"
+out=$(cache wpress exclude remove --all); rc=$?
+[[ $rc -eq 0 ]] && ! grep -q 'cipi_cache_skip_wpress' "$Z" "$V" && cmp -s "$V" "$CG/wpress.noex" && [[ "$(cache wpress --json | jq -c .exclude)" == '[]' ]] \
+    && pass "exclude remove --all: the map and its name in the vhost are gone, the vhost as before" || fail "exclude remove --all: rc=${rc} ${out}"
+out=$(cache shop exclude add '/account*'); [[ $? -eq 0 ]] && grep -q 'when the cache is turned on' <<< "$out" && [[ ! -e "$CG/confd/cipi-cache-shop.conf" ]] && ! grep -q 'cipi_cache' "$CG/sites/shop" \
+    && pass "with the cache off the list is kept for later: nothing in nginx" || fail "exclude, cache off: ${out}"
+cache shop on >/dev/null; grep -qxF '    "~*^/account[^?]*" 1;' "$CG/confd/cipi-cache-shop.conf" && grep -q 'fastcgi_no_cache .* \$cipi_cache_skip_shop;' "$CG/sites/shop" && ! grep -q 'cipi_cache_skip_shop' "$V" \
+    && pass "…and applies when it is turned on — to that app only" || fail "exclude at on: $(cat "$CG/confd/cipi-cache-shop.conf" 2>/dev/null)"
+cache shop off >/dev/null; [[ "$(jq -c '.shop.page_cache.exclude' "$CG/apps.json")" == '["/account*"]' ]] && pass "…off keeps the list" || fail "exclude after off"
+cache shop exclude remove --all >/dev/null
+printf '%s\n' "$(jq '.wpress.page_cache.exclude = ["/ok", "/bad;path", 7, "/x*"]' "$CG/apps.json")" > "$CG/apps.json"
+[[ "$(cache wpress --json | jq -c .exclude)" == '["/ok","/x*"]' ]] && pass "a list edited by hand: what is not a path is not read" || fail "tampered list: $(cache wpress --json | jq -c .exclude)"
+cache wpress exclude remove --all >/dev/null
+# as cipi runs it: set -euo pipefail, where a list that finds nothing must not end the command
+out=$(bash -c "set -euo pipefail; $CH cache_command wpress exclude; cache_command wpress exclude add /strict '/s*'; cache_command wpress exclude remove /nope; cache_command wpress exclude set; cache_command wpress exclude --json; cache_command wpress; cache_command wpress on --exclude=/one; cache_command wpress on --exclude=; echo END" 2>&1); rc=$?
+[[ $rc -eq 0 ]] && grep -q '^END$' <<< "$out" && grep -q 'Of its own: none' <<< "$out" && grep -q "Never cached for 'wpress': /strict /s\*" <<< "$out" && grep -q 'Not in the list' <<< "$out" && grep -q 'keeps no path of its own' <<< "$out" \
+    && [[ "$(cache wpress --json | jq -c .exclude)" == '[]' ]] && ! grep -q 'cipi_cache_skip_wpress' "$Z" "$V" \
+    && pass "under set -euo pipefail every exclude command runs to its end" || fail "exclude, strict shell: rc=${rc} ${out}"
+out=$(cache spa exclude add /x); [[ $? -ne 0 ]] && grep -q 'is a Node app' <<< "$out" && pass "a Node app: refused" || fail "exclude node: ${out}"
+out=$(cache wpress exclude frobnicate); [[ $? -ne 0 ]] && grep -q 'exclude \[add|remove|set' <<< "$out" && pass "an unknown exclude action: the usage" || fail "exclude usage: ${out}"
 
 # pages, and their clear
 mkdir -p "$CG/root/wpress/a/bc" "$CG/root/wpress/d/ef"; echo page > "$CG/root/wpress/a/bc/k1"; echo page > "$CG/root/wpress/d/ef/k2"; echo page > "$CG/root/wpress/d/ef/k3"

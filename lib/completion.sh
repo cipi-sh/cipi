@@ -350,14 +350,35 @@ _cipi_complete() {
 
         zt|zerotrust)
             case $pos in
-                1) sub="token enable disable status refresh hostname access ssh lock unlock origin-cert" ;;
+                1) sub="token enable disable status refresh hostname access service-token tcp ssh lock unlock lockdown preview replica purge origin-cert" ;;
                 2) case "$w1" in
                        token)    sub="set show" ;;
                        hostname) sub="add remove list" ;;
                        access)   sub="enable disable" ;;
-                       ssh)      sub="enable disable unlock" ;;
+                       service-token) sub="create list revoke" ;;
+                       tcp)      sub="add remove list" ;;
+                       ssh)      sub="enable disable unlock cert" ;;
                        lock)     sub="http ssh" ;;
                        unlock)   sub="http ssh" ;;
+                       preview)  sub="create list remove" ;;
+                       replica)  sub="export join leave list" ;;
+                       purge|origin-cert) sub="$(_cipi_apps)" ;;
+                       status)   sub="--json" ;;
+                       lockdown) sub="--yes --force" ;;
+                   esac ;;
+                3) case "$w1 $w2" in
+                       "hostname add"|"hostname remove"|"access enable"|"access disable") sub="$(_cipi_apps) --gui --api" ;;
+                       "tcp add")      sub="mysql mariadb pgsql redis valkey" ;;
+                       "ssh cert")     sub="enable disable status" ;;
+                       "preview create"|"preview list") sub="$(_cipi_apps)" ;;
+                   esac ;;
+                *) case "$w1" in
+                       access)   sub="--path= --allow=" ;;
+                       service-token) sub="--for= --duration= --json" ;;
+                       tcp)      sub="--hostname= --allow=" ;;
+                       ssh)      sub="--hostname= --allow= --principals= --user=" ;;
+                       preview)  sub="--branch= --hostname= --allow= --public --no-deploy --yes" ;;
+                       purge)    sub="--everything --on-deploy=" ;;
                    esac ;;
             esac ;;
 

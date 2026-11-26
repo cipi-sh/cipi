@@ -352,6 +352,16 @@ _deploy_run() {
         local post_line post_rc=0
         post_line=$(_deploy_run_post_deploy "$app") || post_rc=$?
         local health_line; health_line=$(_deploy_health_check "$app")
+        # cipi zt purge <app> --on-deploy=on: Cloudflare's cache of the app's
+        # hostnames, once the new release answers.
+        local purge_line=""
+        if [[ "$(app_get "$app" cf_purge)" == "true" ]]; then
+            declare -f zt_purge_after_deploy >/dev/null 2>&1 || source "${CIPI_LIB}/zt.sh" 2>/dev/null || true
+            if declare -f zt_purge_after_deploy >/dev/null 2>&1; then
+                purge_line=$(zt_purge_after_deploy "$app" 2>/dev/null) || purge_line=""
+                [[ -n "$purge_line" ]] && info "$purge_line"
+            fi
+        fi
         if [[ -x /usr/local/bin/cipi-scan-manifest ]]; then
             /usr/local/bin/cipi-scan-manifest "$app" >/dev/null 2>&1 || true
         fi
@@ -360,7 +370,7 @@ _deploy_run() {
         [[ -n "${_DEPLOY_YML_LINE:-}" ]] && yml_mail="cipi.yml: ${_DEPLOY_YML_LINE}\n"
         cipi_notify \
             "Cipi deploy succeeded: ${app} release ${rel_after:-?} on $(hostname)" \
-            "Deploy completed successfully.\n\n$(_deploy_release_details "$app" "$rel_after" "$branch_disp" "$secs")Previous release: ${rel_before:-none}\nPost-deploy: ${post_line}\n${yml_mail}Healthcheck: ${health_line}\n" \
+            "Deploy completed successfully.\n\n$(_deploy_release_details "$app" "$rel_after" "$branch_disp" "$secs")Previous release: ${rel_before:-none}\nPost-deploy: ${post_line}\n${yml_mail}Healthcheck: ${health_line}\n${purge_line:+${purge_line}\n}" \
             deploy_success
         # A plain return: `[[ … ]] && return` on this line was false (status 1)
         # whenever the steps passed, and under `set -e` that 1 became the exit

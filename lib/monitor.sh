@@ -26,6 +26,7 @@ workers|Queue workers / Horizon
 http_5xx|HTTP 5xx spike
 fs|Filesystem read-only
 load|Load average
+tunnel|Cloudflare Tunnel
 EOF
 }
 
@@ -62,7 +63,8 @@ _mon_default_config() {
             workers:  {enabled: true},
             http_5xx: {enabled: true, count: 20, ratio: 5},
             fs:       {enabled: true},
-            load:     {enabled: true, factor: 4, runs: 2}
+            load:     {enabled: true, factor: 4, runs: 2},
+            tunnel:   {enabled: true}
         }
     }'
 }
@@ -432,6 +434,38 @@ _mon_check_load() {
 # message on fail→ok, and a reminder every reminder_minutes while failing.
 # label and trigger default to the catalog entry of <id>; a check that keeps a
 # state per item (app_disk: one per app) passes its own.
+# Cloudflare Tunnel (cipi zt): with 80/443 closed it is the only way in, and
+# the server can still say it is down — notifications go out, not through it.
+# ok while Zero Trust is off. crit: cloudflared stopped, or Cloudflare sees
+# the tunnel down or inactive; warn: degraded (fewer connections). When
+# Cloudflare cannot be asked, the local service alone decides.
+_mon_check_tunnel() {
+    local zt="${CIPI_CONFIG}/zt.json"
+    [[ -f "$zt" ]] || { _mon_result ok "Zero Trust not enabled"; return 0; }
+    declare -f _zt_enabled >/dev/null 2>&1 || source "${CIPI_LIB}/zt.sh" 2>/dev/null || { _mon_result ok "Zero Trust module not found"; return 0; }
+    _zt_enabled 2>/dev/null || { _mon_result ok "Zero Trust not enabled"; return 0; }
+    local unit="${ZT_UNIT:-cloudflared}" lock=""
+    [[ "$(_zt_state 2>/dev/null | jq -r '.lock_http // false')" == "true" ]] && lock=" — with 80/443 closed, every site on it is unreachable"
+    if ! systemctl is-active --quiet "$unit" 2>/dev/null; then
+        _mon_result crit "cloudflared is not running${lock}" "systemctl status ${unit}\njournalctl -u ${unit} -n 30 --no-pager\nRestart it: systemctl restart ${unit}"
+        return 0
+    fi
+    local remote status conns
+    remote=$(ZT_STATUS_TIMEOUT=10 _zt_tunnel_remote 2>/dev/null) || remote=""
+    if [[ -z "$remote" ]]; then
+        _mon_result ok "cloudflared running (Cloudflare not asked: no token or no answer)"
+        return 0
+    fi
+    status=$(jq -r '.status // "unknown"' <<< "$remote" 2>/dev/null)
+    conns=$(jq -r '[.connectors[].conns] | add // 0' <<< "$remote" 2>/dev/null)
+    case "$status" in
+        healthy)  _mon_result ok "tunnel healthy (${conns} connections)" ;;
+        degraded) _mon_result warn "tunnel degraded (${conns} connections)" "Cloudflare reaches the tunnel on fewer connections than usual: a network problem between this server and Cloudflare, or a replica down.\ncipi zt replica list" ;;
+        down|inactive) _mon_result crit "Cloudflare sees the tunnel ${status}${lock}" "cloudflared runs here but holds no connection to Cloudflare.\njournalctl -u ${unit} -n 30 --no-pager\nOutbound port 7844 (TCP/UDP) must be open." ;;
+        *)        _mon_result ok "cloudflared running (Cloudflare says: ${status})" ;;
+    esac
+}
+
 _mon_apply_state() {
     local id="$1" status="$2" summary="$3" detail="$4" do_alert="${5:-false}"
     local label="${6:-}" trigger="${7:-monitor_${1}}"

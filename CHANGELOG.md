@@ -4,6 +4,31 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.16.0] — 2026-11-26
+
+Cloudflare Tunnel grows from "a site behind Access" into the way a server is reached: Access on chosen paths and for chosen people, service tokens for the machines, databases and Valkey from a laptop with their ports closed, SSH with certificates instead of keys, previews of a branch on their own hostname, the same tunnel on more servers, and a single command that leaves no inbound port open. The monitor says when the tunnel goes down. The panel (cipi/gui 4.8.0) adds connectors for Cloudflare, DigitalOcean, AWS, Hetzner, Google Cloud, Azure, OVHcloud, Vultr, Akamai (Linode) and Scaleway, and passkeys.
+
+### Added
+
+- **Access on some paths, for some people** — `cipi zt access enable <app> --path=/admin,/horizon --allow=me@example.com,@example.com`. `--path=` puts Access in front of those paths only (Filament, Horizon, Pulse, Telescope behind single sign-on, the rest of the site public); `--allow=` replaces "anyone who signs in with the identity provider" with emails and `@domains`; `--allow=none` lets service tokens alone through. Running `access enable` again updates the application, keeping what was not given (`--path=` empty or `--allow=all` clears). The `/cipi/webhook` Bypass is created only when Access covers that path. `--gui` and `--api` take the same options.
+- **The API on the tunnel** — `cipi zt hostname add --api`, `cipi zt access enable --api --allow=none`.
+- **Service tokens** — `cipi zt service-token create <name> --for=<app>|gui|api [--duration=8760h] [--json]`, `list`, `revoke`. Cipi creates the token and a Service Auth policy on the target's Access application, and prints `CF-Access-Client-Id` and `CF-Access-Client-Secret` once. For CI deploys, monitors, and the panel calling a server's API behind Access (cipi/gui 4.8.0: Connections → the server → Cloudflare Access). Re-creating a target's Access application keeps its tokens' policies.
+- **Databases and Valkey through the tunnel** — `cipi zt tcp add mysql|mariadb|pgsql|redis|valkey|<port> --hostname=db.example.com [--allow=…]`, `remove`, `list`. A hostname that reaches `127.0.0.1:<port>`, always behind Access (nothing is published if Access cannot be created); on the laptop `cloudflared access tcp --hostname db.example.com --url 127.0.0.1:13306`, then TablePlus or DBeaver on that address. The port stays closed on the server.
+- **SSH with short-lived certificates** — `cipi zt ssh cert enable --principals=andrea,mario [--user=cipi]`, `disable`, `status`. sshd trusts the CA of the SSH Access application (`TrustedUserCAKeys`) and accepts, for each Unix user, the principals listed for it (`AuthorizedPrincipalsFile`): the part of the email before the @, which Cloudflare signs at every sign-in. `sshd -t` checks the drop-in first; keys in `authorized_keys` keep working. `cipi zt ssh enable` takes `--allow=` too.
+- **`cipi zt lockdown`** — every app, the panel and the API on the tunnel, then 80/443 closed and, when SSH runs through the tunnel, port 22: no inbound port left, the shape of a server behind NAT with no port forwarding. It stops at the first step that fails, and it keeps refusing to close port 80 while a certificate still renews over HTTP-01 (`--force` to accept that).
+- **Previews of a branch** — `cipi zt preview create <app> --branch=feature/login [--hostname=] [--allow=] [--public] [--no-deploy]`, `list`, `remove`. An app of its own (same repository and PHP, its own database and `.env`, environment `preview`) on `feature-login-shop.example.com` — one level below the zone, so Cloudflare's Universal certificate covers it — through the tunnel, behind Access unless `--public`, deployed once. `remove` deletes the app, its database and its hostname.
+- **Replicas** — `cipi zt replica export` prints a bundle (the tunnel's credentials and routes: a secret) that `cipi zt replica join` runs on another server with the same apps; Cloudflare then sends requests to either one. Move a server without touching DNS (the records point at the tunnel), then `cipi zt replica leave` on the old one: it stops the connector and keeps the tunnel, the DNS and Access. `cipi zt replica list` shows the connectors and which one is this server. `cipi zt disable` now refuses on a replica, or while other servers run the tunnel (`--delete-tunnel` to delete it for everyone).
+- **Cloudflare's cache** — `cipi zt purge <app> [--everything]` purges the app's hostnames (purge by hostname is on every plan), and `--on-deploy=on` does it after every successful deploy, `cipi deploy` and the webhook alike; the deploy notification says how it went.
+- **The tunnel in the monitor** — a `tunnel` check (`monitor_tunnel`, urgent): critical when cloudflared stops or Cloudflare sees the tunnel down or inactive, a warning when it is degraded, recovery and reminders like every check. Off while Zero Trust is. With 80/443 closed it is the one outage a server can still report: notifications go out, not through the tunnel.
+- **`cipi zt status --json`** — the tunnel (running, Cloudflare's status, connectors and which one is this server), the locks, every hostname with its Access paths, allowed people, service tokens, preview and purge setting, the panel and the API, SSH and its certificates, TCP services, service tokens, previews and what is not on the tunnel yet. The panel's sudoers already allowed `cipi zt status *`.
+
+### Notes
+
+- No migration. Tokens made for 5.15 keep working; the new commands name the permission they miss: Access: Service Tokens (Edit) for service tokens, Access: SSH Auditing (Edit) for certificates, Zone: Cache Purge for purges.
+- The panel's side: cipi/api 1.46.0 (`GET /api/zero-trust`) and cipi/gui 4.8.0 (Zero Trust in the Firewall tab, read-only; connectors; passkeys). Cloudflare DNS from the panel is the panel's own: its token is saved in the panel, not on the servers.
+
+---
+
 ## [5.15.0] — 2026-11-25
 
 Each notification channel takes only what it is given: one channel for everything, one for the alarms, one for the deploys. The visitor's address behind Cloudflare is turned on from the panel's Firewall tab. And a server switched to MySQL no longer lists the client's warning about passwords as one of its databases — the root password of MySQL and MariaDB is no longer on any command line at all.

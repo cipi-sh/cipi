@@ -56,6 +56,7 @@ monitor_workers|Monitor|Queue worker / Horizon not running
 monitor_http_5xx|Monitor|HTTP 5xx spike in access logs
 monitor_fs|Monitor|Filesystem read-only / config not writable
 monitor_load|Monitor|Load average over threshold
+monitor_tunnel|Monitor|Cloudflare Tunnel down or degraded
 monitor_ok|Monitor|Monitor check recovered
 ssl_install|SSL|SSL certificate installed
 ssl_force|SSL|HTTP → HTTPS redirect forced
@@ -162,7 +163,7 @@ _notify_trigger_category_id() {   # <trigger> → its category, as an id
 _notify_trigger_urgent() {
     local urgent=" ssh_login sudo su scan_hit scan_integrity scan_incomplete crowdsec_rescue"
     urgent+=" backup_fail backup_stale deploy_fail deploy_health_fail deploy_snapshot_fail health_fail"
-    urgent+=" monitor_services monitor_workers monitor_fs monitor_disk monitor_app_disk monitor_http_5xx"
+    urgent+=" monitor_services monitor_workers monitor_fs monitor_disk monitor_app_disk monitor_http_5xx monitor_tunnel"
     urgent+=" cron_fail yml_fail yml_post_fail "
     [[ -n "${1:-}" && "$urgent" == *" ${1} "* ]]
 }

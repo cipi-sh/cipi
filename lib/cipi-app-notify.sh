@@ -73,12 +73,28 @@ source "${CIPI_LIB}/smtp.sh" 2>/dev/null || true
 HOSTNAME=$(hostname 2>/dev/null || echo "unknown")
 LABEL_LC=$(printf '%s' "$LABEL" | tr '[:upper:]' '[:lower:]')
 
+# The webhook deploy succeeded: Cloudflare's cache of the app's hostnames
+# when the app asked for it (cipi zt purge <app> --on-deploy=on). Root work
+# on the caller's own app only (the sudoers rule fixes APP); never fatal.
+PURGE_LINE=""
+if [[ "$IS_SUCCESS" == true ]] && vault_read apps.json 2>/dev/null | jq -e --arg a "$APP" '.[$a].cf_purge == "true"' >/dev/null 2>&1; then
+    # A sourced file's status is its last line's: checked by what it defines.
+    source "${CIPI_LIB}/common.sh" >/dev/null 2>&1 || true
+    source "${CIPI_LIB}/zt.sh" >/dev/null 2>&1 || true
+    if declare -f zt_purge_after_deploy >/dev/null 2>&1 && declare -f app_get >/dev/null 2>&1; then
+        # Said in the notification only: the deploy log is the app user's
+        # file, and root does not write where that user can plant a link.
+        PURGE_LINE=$(zt_purge_after_deploy "$APP" 2>/dev/null) || PURGE_LINE=""
+    fi
+fi
+
 if [[ "$IS_SUCCESS" == true ]]; then
     NOTIFY_TRIGGER="deploy_success"
     SUBJECT="Cipi deploy succeeded: ${APP} (${HOSTNAME})"
     BODY="Automatic deploy for '${APP}' completed on ${HOSTNAME} at $(date '+%Y-%m-%d %H:%M:%S').
 ${EXTRA:+
-${EXTRA}}"
+${EXTRA}}${PURGE_LINE:+
+${PURGE_LINE}}"
 else
     NOTIFY_TRIGGER="cron_fail"
     [[ "$LABEL_LC" == "deploy" ]] && NOTIFY_TRIGGER="deploy_fail"

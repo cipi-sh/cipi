@@ -969,6 +969,8 @@ show_help_topic() {
             _help_note "and (Tailscale) while the node key can expire — join with a tagged key. Who reaches"
             _help_note "what is the network's own policy (tailnet ACL, NetBird policies): allow tcp 22, 80, 443."
             _help_note "A database from a laptop: an SSH tunnel over the mesh (TablePlus/DBeaver: over SSH)."
+            _help_note "The panel does the same (API ability zt-manage): there --force is ignored, lock ssh wants a"
+            _help_note "login sshd accepted over the mesh, and lock http / disable never cut the panel's own way in."
             echo ""
             ;;
 

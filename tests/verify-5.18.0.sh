@@ -10,6 +10,9 @@
 #  - Tailscale SSH on and off; NetBird's own SSH server is never turned on;
 #  - disable: what the locks closed comes back first, then the client goes;
 #  - the `mesh` monitor check and `mesh` in cipi zt status --json;
+#  - from the panel (sudo by www-data): --force ignored, lock ssh on a login
+#    sshd accepted over the mesh, lock http and disable never on the panel's
+#    own way in, and the sudoers that allow exactly these commands;
 #  - UFW rules numbered below ten are removed too ("[ 1]" is not awk's $1).
 # tailscale, netbird, ufw, ip, systemctl, apt-get, curl and sshd are stubs
 # that keep a state; the vault is real.
@@ -85,6 +88,7 @@ if [[ "$*" == "-4 -o addr show dev "* ]]; then
     exit 0
 fi
 if [[ "$1" == "route" && "$2" == "get" ]]; then
+    if [[ "$3" == 127.* || "$3" == "203.0.113.5" ]]; then echo "local $3 dev lo table local src $3 uid 0"; exit 0; fi
     for f in "$STATE"/if.*; do
         [[ -f "$f" ]] || continue
         if [[ "$3" == 100.* ]]; then echo "$3 dev ${f##*/if.} table 52 src $(cut -d/ -f1 < "$f") uid 0"; exit 0; fi
@@ -233,7 +237,7 @@ chmod +x "${BIN}"/* "${PKG}"/*
 ENVV=(PATH="${BIN}:${PATH}" STATE="$STATE" PKG="$PKG" BIN="$BIN" CIPI_LIB="$LIB" CIPI_CONFIG="$CFG" CIPI_LOG="${TMP}/log"
       MESH_TS_KEYRING="${APT}/keyrings/tailscale.gpg" MESH_TS_LIST="${APT}/lists/tailscale.list"
       MESH_NB_KEYRING="${APT}/keyrings/netbird.asc" MESH_NB_LIST="${APT}/lists/netbird.list"
-      MESH_OS_RELEASE="${TMP}/os-release" MESH_LE_LIVE="$LE" MESH_WAIT=2 MESH_JOIN_TIMEOUT=5
+      MESH_OS_RELEASE="${TMP}/os-release" MESH_LE_LIVE="$LE" MESH_WAIT=2 MESH_JOIN_TIMEOUT=5 MESH_AUTH_LOG="${TMP}/auth.log"
       ZT_TOKEN_FILE="${CFG}/zt.token" ZT_CF_DIR="${TMP}/cf" ZT_CF_CONF="${TMP}/cf/config.yml" ZT_IPS_DIR="${TMP}/ips"
       ZT_REALIP="${TMP}/realip.conf" ZT_F2B="${TMP}/f2b.conf" ZT_CRON="${TMP}/zt.cron" ZT_CS_WL="${TMP}/cs.yaml"
       MONITOR_STATE_DIR="${TMP}/mon")
@@ -303,7 +307,8 @@ j=$(Z 'zt_command tailscale status --json')
 jq -e '.enabled and .provider == "tailscale" and .label == "Tailscale" and .connected and .running and .ip == "100.101.102.103" and .ip6 == "fd7a:115c:a1e0::1"
        and .fqdn == "web1.tail1234.ts.net" and .network == "example.com" and .version == "1.80.2" and .tags == ["tag:cipi"]
        and .key_expiry == null and .key_expires_in_days == null and .peers == {"total":3,"online":2}
-       and .ssh == {"provider_ssh":false,"ports":[22],"command":"ssh cipi@100.101.102.103"}
+       and .ssh == {"provider_ssh":false,"ports":[22],"command":"ssh cipi@100.101.102.103","seen":null}
+       and .firewall_active and .http01_apps == [] and .panel == null
        and .lock == {"ssh":false,"http":false} and .direct == {"port":41641,"open":false} and .control_url == null and .warnings == []' <<< "$j" >/dev/null \
     && pass "status --json: address, name, tailnet, peers, node key, locks" || fail "status json: ${j}"
 [[ "$(Z '_zt_status_json' | jq -c '[.enabled, .mesh.provider, .mesh.ip]')" == '[false,"tailscale","100.101.102.103"]' ]] \
@@ -496,6 +501,90 @@ out=$(Z 'zt_command netbird disable --yes' 2>&1); rc=$?
 [[ $rc -eq 0 ]] && has_rule "22/tcp" && ! rules | grep -q 'cipi-zt-mesh' && grep -qx 'netbird deregister' "${STATE}/nb.log" && [[ ! -x "${BIN}/netbird" && ! -e "${APT}/lists/netbird.list" ]] \
     && pass "netbird disable: port 22 back, both rules gone, the peer deregistered, the client removed" || fail "nb disable: ${out} / $(rules)"
 
+# ── from the panel (sudo by www-data) ────────────────────────
+# P: the command as the API runs it — no SSH session, SUDO_USER=www-data.
+P() {
+    env "${ENVV[@]}" SUDO_USER=www-data bash -c 'set -euo pipefail
+        RED=""; GREEN=""; YELLOW=""; CYAN=""; DIM=""; NC=""; BOLD=""
+        source "$CIPI_LIB/common.sh"
+        log_action() { :; }; log_event() { :; }; cipi_notify() { echo "notify $3" >> "$STATE/notify.log"; }
+        source "$CIPI_LIB/zt.sh"
+        '"$1" < /dev/null
+}
+rm -f "${STATE}"/ts.* "${STATE}/apt.log"; reset_fw; SESSION=""
+out=$(P 'zt_command tailscale enable --auth-key=tskey-auth-p1 --hostname=web1' 2>&1); rc=$?
+[[ $rc -eq 0 ]] && grep -qx 'key=tskey-auth-p1' "${STATE}/ts.log" && has_rule "Anywhere on tailscale0" && has_rule "22/tcp" && pass "panel: enable joins the network, and closes nothing" || fail "panel enable: ${out}"
+out=$(P 'zt_command tailscale lock ssh --yes' 2>&1); rc=$?
+[[ $rc -ne 0 ]] && grep -q 'Nobody has signed in over SSH through Tailscale yet' <<< "$out" && grep -q 'ssh cipi@100.101.102.103' <<< "$out" && has_rule "22/tcp" \
+    && pass "panel: lock ssh with no login over the mesh in sshd's log: refused, and told what to do" || fail "panel lock ssh, no proof: ${out}"
+out=$(P 'zt_command tailscale lock ssh --yes --force' 2>&1); rc=$?
+[[ $rc -ne 0 ]] && has_rule "22/tcp" && pass "panel: --force changes nothing" || fail "panel force: ${out}"
+printf '%s\n' 'Nov 27 11:58:01 web1 sshd[811]: Accepted publickey for cipi from 198.51.100.7 port 50211 ssh2: ED25519 SHA256:abc' \
+               'Nov 27 11:59:30 web1 sshd[812]: Failed password for root from 100.99.1.2 port 50212 ssh2' > "${TMP}/auth.log"
+out=$(P 'zt_command tailscale lock ssh --yes' 2>&1); rc=$?
+[[ $rc -ne 0 ]] && has_rule "22/tcp" && pass "panel: a login from the public address, or a failed one from the mesh, is no proof" || fail "panel lock ssh, wrong proof: ${out}"
+printf '%s\n' '2026-11-27T12:00:01.123456+00:00 web1 sshd[900]: Accepted publickey for cipi from 100.99.1.2 port 50213 ssh2: ED25519 SHA256:abc' >> "${TMP}/auth.log"
+j=$(P 'zt_command status --json --via=198.51.100.7' | jq -c .mesh)
+jq -e '.ssh.seen == {"at":"2026-11-27T12:00:01","from":"100.99.1.2"} and .panel.via == "public" and .panel.from == "198.51.100.7"
+       and .panel.blocked.lock_ssh == null and (.panel.blocked.lock_http | test("public address")) and .panel.blocked.disable == null' <<< "$j" >/dev/null \
+    && pass "panel: the status says who came in over the mesh, how the panel reaches the server, and what it may not do" || fail "panel status: ${j}"
+date -u -d '+40 days' '+%Y-%m-%dT%H:%M:%SZ' > "${STATE}/ts.expiry"
+out=$(P 'zt_command tailscale lock ssh --yes --force' 2>&1); rc=$?
+[[ $rc -ne 0 ]] && grep -q 'node key of this machine expires' <<< "$out" && has_rule "22/tcp" && pass "panel: a node key that can expire stops lock ssh, --force or not" || fail "panel expiry: ${out}"
+rm -f "${STATE}/ts.expiry"
+echo true > "${STATE}/ts.ssh"
+out=$(P 'zt_command tailscale lock ssh --yes' 2>&1); rc=$?
+[[ $rc -ne 0 ]] && grep -q "not in sshd's log" <<< "$out" && has_rule "22/tcp" && pass "panel: with Tailscale SSH on, sshd's log proves nothing — locked at the shell" || fail "panel tailscale ssh: ${out}"
+echo false > "${STATE}/ts.ssh"
+out=$(P 'zt_command tailscale lock ssh --yes' 2>&1); rc=$?
+[[ $rc -eq 0 ]] && ! has_rule "22/tcp" && [[ "$(mst | jq -r .lock_ssh)" == true ]] && pass "panel: lock ssh once sshd has accepted a login over the mesh" || fail "panel lock ssh: ${out}"
+out=$(P 'zt_command tailscale unlock ssh' 2>&1); rc=$?
+[[ $rc -eq 0 ]] && has_rule "22/tcp" && pass "panel: unlock ssh" || fail "panel unlock ssh: ${out}"
+# lock http: never the panel's own way in
+for via in '' '--via=198.51.100.7' '--via=nonsense'; do
+    out=$(P "zt_command tailscale lock http --yes ${via}" 2>&1); rc=$?
+    [[ $rc -ne 0 ]] && grep -q "reaches this server's API on its public address" <<< "$out" && has_rule "443/tcp" && pass "panel: lock http ${via:-with no address} — refused, it would cut the panel off" || fail "panel lock http ${via}: ${out}"
+done
+for via in 100.99.1.2 127.0.0.1 203.0.113.5; do
+    out=$(P "zt_command tailscale lock http --yes --via=${via}" 2>&1); rc=$?
+    [[ $rc -eq 0 ]] && ! has_rule "443/tcp" && pass "panel: lock http from ${via} (over the mesh, or on this server)" || fail "panel lock http via ${via}: ${out}"
+    P 'zt_command tailscale unlock http' >/dev/null 2>&1; has_rule "443/tcp" || fail "panel unlock http"
+done
+Z 'echo "{\"enabled\":true,\"api\":{\"domain\":\"api.example.com\"}}" | vault_write zt.json' >/dev/null
+out=$(P 'zt_command tailscale lock http --yes --via=198.51.100.7' 2>&1); rc=$?
+[[ $rc -eq 0 ]] && ! has_rule "443/tcp" && pass "panel: lock http when the API's hostname is on the Cloudflare tunnel" || fail "panel lock http tunnel: ${out}"
+P 'zt_command tailscale unlock http' >/dev/null 2>&1
+Z 'echo "{}" | vault_write zt.json' >/dev/null
+mkdir -p "${LE}/shop.example.com"
+out=$(P 'zt_command tailscale lock http --yes --force --via=100.99.1.2' 2>&1); rc=$?
+[[ $rc -ne 0 ]] && grep -q 'HTTP-01' <<< "$out" && has_rule "443/tcp" && pass "panel: an app on HTTP-01 stops lock http, --force or not" || fail "panel http01: ${out}"
+[[ "$(P 'zt_command tailscale status --json --via=100.99.1.2' | jq -c '[.http01_apps, .panel.via]')" == '[["shop"],"mesh"]' ]] && pass "panel: the status names the apps on HTTP-01" || fail "panel http01 json"
+rmdir "${LE}/shop.example.com"
+# Tailscale SSH and leaving the network
+out=$(P 'zt_command tailscale ssh enable' 2>&1); rc=$?
+[[ $rc -eq 0 ]] && [[ "$(cat "${STATE}/ts.ssh")" == true ]] && pass "panel: Tailscale SSH on" || fail "panel ssh enable: ${out}"
+out=$(P 'zt_command tailscale ssh disable' 2>&1); rc=$?
+[[ $rc -eq 0 ]] && [[ "$(cat "${STATE}/ts.ssh")" == false ]] && pass "panel: Tailscale SSH off" || fail "panel ssh disable: ${out}"
+out=$(P 'zt_command tailscale disable --yes --via=100.99.1.2' 2>&1); rc=$?
+[[ $rc -ne 0 ]] && grep -q 'leaving the network would cut it off' <<< "$out" && [[ -x "${BIN}/tailscale" ]] && pass "panel: disable over the mesh — refused, the panel would lose the server" || fail "panel disable via mesh: ${out}"
+out=$(P 'zt_command tailscale disable --yes --via=198.51.100.7' 2>&1); rc=$?
+[[ $rc -eq 0 && ! -x "${BIN}/tailscale" ]] && [[ "$(mst | jq -r .enabled)" == false ]] && pass "panel: disable from the public address" || fail "panel disable: ${out}"
+out=$(P 'zt_command netbird enable --setup-key=NBP1' 2>&1); rc=$?
+[[ $rc -eq 0 ]] && has_rule "Anywhere on wt0" && pass "panel: netbird enable" || fail "panel nb enable: ${out}"
+out=$(P 'zt_command netbird disable --yes' 2>&1); rc=$?
+[[ $rc -eq 0 && ! -x "${BIN}/netbird" ]] && pass "panel: netbird disable with no address given (the panel is not over the mesh)" || fail "panel nb disable: ${out}"
+rm -f "${TMP}/auth.log"
+# The sudoers: each command spelled out, '*' only last (sudo-rs), nothing of Cloudflare's side.
+S="${LIB}/cipi-api-sudoers.sh"
+for c in 'zt tailscale enable \*' 'zt tailscale disable --yes' 'zt tailscale lock ssh --yes' 'zt tailscale lock http --yes \*' 'zt tailscale unlock ssh' 'zt tailscale unlock http' \
+         'zt tailscale ssh enable' 'zt tailscale ssh disable' 'zt netbird enable \*' 'zt netbird disable --yes \*' 'zt netbird lock ssh --yes' 'zt netbird lock http --yes' 'zt netbird unlock http'; do
+    grep -qE "^ +/usr/local/bin/cipi ${c}, \\\\$" "$S" || fail "sudoers: no '${c}'"
+done
+pass "the panel's sudoers: join, leave, the locks and their unlocks, Tailscale SSH — each spelled out"
+! grep -E '^ +/usr/local/bin/cipi zt ' "$S" | grep -vE 'zt (status|tailscale|netbird)' | grep -q . && ! grep -qE 'cipi zt (tailscale|netbird) \*' "$S" && ! grep -q 'zt netbird ssh' "$S" \
+    && pass "…nothing of Cloudflare's side but its status, no catch-all, no NetBird SSH" || fail "sudoers: too wide"
+! grep -E '^ +/usr/local/bin/cipi zt ' "$S" | grep -qE '\* [^,]|\*[^,]' && pass "…'*' only as the last token (sudo-rs)" || fail "sudoers: a star in the middle"
+
 # ── monitor ──────────────────────────────────────────────────
 M() { env "${ENVV[@]}" bash -c 'set -euo pipefail; RED=""; GREEN=""; YELLOW=""; CYAN=""; DIM=""; NC=""; BOLD=""
       source "$CIPI_LIB/common.sh"; source "$CIPI_LIB/monitor.sh"; '"$1" < /dev/null; }
@@ -526,8 +615,7 @@ Z '_zt_ufw_delete_comment cipi-zt-http' >/dev/null 2>&1
 [[ "$(rules)" == '22/tcp|ALLOW IN|Anywhere|' ]] && pass "_zt_ufw_delete_comment removes rules [ 2] to [ 4] (they stayed: the number is padded)" || fail "single digit: $(rules)"
 
 # ── the panel stays read-only; help; completion ──────────────
-! grep -E 'cipi zt (tailscale|netbird)' "${LIB}/cipi-api-sudoers.sh" && grep -q '/usr/local/bin/cipi zt status \*' "${LIB}/cipi-api-sudoers.sh" \
-    && pass "the panel's sudoers: zt status only — no enable, no lock from the API" || fail "sudoers"
+grep -q '/usr/local/bin/cipi zt status \*' "${LIB}/cipi-api-sudoers.sh" && pass "the panel's sudoers still read the whole status" || fail "sudoers status"
 grep -q '_help_cmd "cipi zt tailscale enable --auth-key="' "${ROOT}/cipi" && grep -q '_help_cmd "cipi zt netbird lock ssh \[--yes\]"' "${ROOT}/cipi" \
     && grep -q 'tailscale|netbird|mesh|zt|zerotrust|zero-trust|cloudflare|tunnel)' "${ROOT}/cipi" && pass "cipi help zt (and tailscale, netbird, mesh): the commands" || fail "help"
 grep -q 'origin-cert tailscale netbird"' "${LIB}/completion.sh" && grep -q 'tailscale|netbird) sub="enable disable status ssh lock unlock"' "${LIB}/completion.sh" && pass "completion: the two providers and their commands" || fail "completion"

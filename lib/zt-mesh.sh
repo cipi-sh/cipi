@@ -23,6 +23,12 @@
 # A client that was on the server before Cipi is adopted as it is: its
 # settings are not touched, and disable leaves it installed and connected.
 # setup.sh / self-update never call enable.
+#
+# From the panel (sudo by www-data, the API's `zt-manage` ability) the same
+# commands run with what protects the operator kept in place: --force is
+# ignored; lock ssh has no session to look at, so the proof that SSH works
+# over the mesh is a login sshd accepted from it; and the panel may not close
+# the way it reaches the server itself (lock http, disable: --via=<address>).
 #############################################
 
 # The time of a notification is common.sh's (and follows `cipi notification
@@ -37,6 +43,8 @@ declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:
 [[ -z "${MESH_NB_LIST:-}" ]]      && readonly MESH_NB_LIST="/etc/apt/sources.list.d/netbird.list"
 [[ -z "${MESH_OS_RELEASE:-}" ]]   && readonly MESH_OS_RELEASE="/etc/os-release"
 [[ -z "${MESH_LE_LIVE:-}" ]]      && readonly MESH_LE_LIVE="/etc/letsencrypt/live"
+# sshd's log: where the panel's lock ssh looks for a login that came over the mesh.
+[[ -z "${MESH_AUTH_LOG:-}" ]]     && readonly MESH_AUTH_LOG="/var/log/auth.log"
 # Calls a status or the monitor make: short, so a client that hangs never holds them up.
 [[ -z "${MESH_TIMEOUT:-}" ]]      && MESH_TIMEOUT=15
 [[ -z "${MESH_JOIN_TIMEOUT:-}" ]] && MESH_JOIN_TIMEOUT=90
@@ -73,6 +81,16 @@ _mesh_usage() {
     [[ "$p" == "tailscale" ]] && echo "  cipi zt ${p} ssh enable|disable          Tailscale SSH (sign-in by the tailnet's policy)"
     echo "  cipi zt ${p} disable [--yes]"
 }
+
+# ── the shell, or the panel ──────────────────────────────────
+
+# The command comes from the panel's API (sudo by www-data), not from someone
+# at the server's shell.
+_mesh_from_panel() { [[ "${SUDO_USER:-}" == "www-data" ]]; }
+
+# --force, where it is honoured: at the shell. A token must not skip what
+# keeps the operator from being locked out.
+_mesh_forced() { [[ "${ARG_force:-}" == "true" ]] && ! _mesh_from_panel; }
 
 # ── the two providers ────────────────────────────────────────
 
@@ -346,6 +364,109 @@ _mesh_session_via() {   # <interface>
     return 0
 }
 
+# The last SSH login sshd accepted from an address this server reaches over
+# the mesh: "<when>|<address>", read from sshd's log and the one before it.
+# Nothing, and 1, when nobody has come in that way. It is what the panel's
+# lock ssh takes as the proof the shell takes from its own session.
+_mesh_ssh_seen() {   # <interface>
+    local iface="$1" f line ip route seen=""
+    local -A over=()
+    for f in "${MESH_AUTH_LOG}.1" "$MESH_AUTH_LOG"; do
+        [[ -r "$f" ]] || continue
+        while IFS= read -r line; do
+            ip=$(sed -n 's/.*Accepted [^ ]* for [^ ]* from \([0-9a-fA-F:.]*\) port .*/\1/p' <<< "$line")
+            [[ -n "$ip" ]] || continue
+            if [[ -z "${over[$ip]:-}" ]]; then
+                route=$(ip route get "$ip" 2>/dev/null) || route=""
+                if grep -qE "(^| )dev ${iface}( |\$)" <<< "$route"; then over[$ip]=yes; else over[$ip]=no; fi
+            fi
+            [[ "${over[$ip]}" == "yes" ]] || continue
+            # "Nov 27 12:00:01 host sshd…" or "2026-11-27T12:00:01.123+00:00 host sshd…"
+            seen="$(awk '{ if ($1 ~ /^[0-9][0-9][0-9][0-9]-/) print substr($1, 1, 19); else print $1 " " $2 " " $3 }' <<< "$line")|${ip}"
+        done < <(grep -a 'sshd.*Accepted ' "$f" 2>/dev/null | tail -n 500 || true)
+    done
+    [[ -n "$seen" ]] || return 1
+    printf '%s' "$seen"
+}
+
+# How the address the panel calls from reaches this server: mesh (over the
+# mesh interface), local (the panel is on this server), tunnel (the API's
+# hostname is on the Cloudflare tunnel), public (its public address — what a
+# lock of 80/443 closes), unknown (no address given).
+_mesh_route_of() {   # <address> <interface>
+    local ip="${1:-}" iface="${2:-}" route
+    [[ "$ip" =~ ^[0-9a-fA-F:.]+$ ]] || { echo "unknown"; return 0; }
+    route=$(ip route get "$ip" 2>/dev/null) || route=""
+    if [[ -n "$iface" ]] && grep -qE "(^| )dev ${iface}( |\$)" <<< "$route"; then
+        echo "mesh"
+    elif grep -qE '^local |(^| )dev lo( |$)' <<< "$route"; then
+        echo "local"
+    elif vault_read zt.json 2>/dev/null | jq -e '(.enabled // false) == true and ((.api.domain // "") != "")' >/dev/null 2>&1; then
+        echo "tunnel"
+    else
+        echo "public"
+    fi
+    return 0
+}
+
+# Why the panel may not do it now, in one line — nothing when it may.
+# What the shell checks on its own session, the panel checks here: the same
+# function answers the command and the status the panel reads before asking.
+_mesh_panel_blocker() {   # <provider> <lock_ssh|lock_http|disable> <live json>
+    local p="$1" what="$2" live="$3" label iface ip via exp days seen bad
+    label=$(_mesh_label "$p"); iface=$(_mesh_iface "$p")
+    ip=$(jq -r '.ip // empty' <<< "$live")
+    via=$(_mesh_route_of "${ARG_via:-}" "$iface")
+    case "$what" in
+        lock_ssh|lock_http)
+            if [[ "$(jq -r '.connected' <<< "$live")" != "true" || -z "$ip" ]]; then
+                echo "${label} is not connected ($(jq -r '.state' <<< "$live")): nothing would reach the server over it."
+                return 0
+            fi
+            _mesh_ufw_active || { echo "UFW is not active on this server: there is nothing to close the port with."; return 0; }
+            ;;
+    esac
+    case "$what" in
+        lock_ssh)
+            if [[ "$(jq -r '.provider_ssh' <<< "$live")" == "true" ]]; then
+                echo "${label} SSH answers on the mesh address and its sessions are not in sshd's log: lock from a session over the network, at the server's shell (cipi zt ${p} lock ssh)."
+                return 0
+            fi
+            _mesh_sshd_listens "$ip" || { echo "sshd does not listen on the mesh address ${ip} (ListenAddress): nothing would answer there."; return 0; }
+            exp=$(jq -r '.key_expiry // empty' <<< "$live")
+            if [[ -n "$exp" ]]; then
+                days=$(_mesh_days_until "$exp")
+                echo "The node key of this machine expires on ${exp%%T*}${days:+ (${days} days)}: that day the server leaves the network, and with port 22 closed the provider's console is the only way in. Disable key expiry for the machine, or join again with a tagged key."
+                return 0
+            fi
+            seen=$(_mesh_ssh_seen "$iface") || seen=""
+            if [[ -z "$seen" ]]; then
+                echo "Nobody has signed in over SSH through ${label} yet. Do it once from a device of the network (ssh $(_mesh_ssh_user)@${ip}): that login is the proof that it works, and then the port can be closed."
+                return 0
+            fi
+            ;;
+        lock_http)
+            bad=$(_mesh_http01_apps)
+            if [[ -n "$bad" ]]; then
+                echo "These apps renew SSL over HTTP-01, which needs port 80 open to the world:${bad}. Switch them to DNS-01 first (cipi ssl install <app> --dns=cloudflare)."
+                return 0
+            fi
+            case "$via" in
+                mesh|local|tunnel) ;;
+                *) echo "The panel reaches this server's API on its public address${ARG_via:+ (from ${ARG_via})}: with 80/443 closed it could not reach it any more, not even to unlock. Have the panel call the API over ${label} (the API's DNS record on ${ip}) or through the Cloudflare tunnel, or lock at the server's shell (cipi zt ${p} lock http)."
+                   return 0 ;;
+            esac
+            ;;
+        disable)
+            if [[ "$via" == "mesh" ]]; then
+                echo "The panel reaches this server over ${label}: leaving the network would cut it off. Do it at the server's shell (cipi zt ${p} disable)."
+                return 0
+            fi
+            ;;
+    esac
+    return 0
+}
+
 # ── UFW ──────────────────────────────────────────────────────
 
 _mesh_ufw_delete_comment() {
@@ -590,7 +711,7 @@ _mesh_enable() {
         echo "  Leave the other first: cipi zt ${cur} disable"
         exit 1
     fi
-    if [[ "${ARG_force:-}" != "true" ]] && { command -v "$(_mesh_bin "$other")" >/dev/null 2>&1 \
+    if ! _mesh_forced && { command -v "$(_mesh_bin "$other")" >/dev/null 2>&1 \
         || [[ -n "$(_mesh_iface_ip "$(_mesh_iface_default "$other")")" ]]; }; then
         error "$(_mesh_label "$other") is installed on this server — one mesh at a time."
         echo "  Both use 100.64.0.0/10, and Tailscale drops that range outside its own interface."
@@ -791,7 +912,12 @@ _mesh_disable() {
     fi
     by_cipi=$(jq -r '.installed_by_cipi // false' <<< "$st")
     iface=$(_mesh_iface "$p")
-    if [[ "${ARG_force:-}" != "true" && "${ARG_yes:-}" != "true" ]]; then
+    if _mesh_from_panel; then
+        local blocked
+        blocked=$(_mesh_panel_blocker "$p" disable "$(_mesh_live "$p")")
+        [[ -z "$blocked" ]] || { error "$blocked"; exit 1; }
+    fi
+    if ! _mesh_forced && [[ "${ARG_yes:-}" != "true" ]]; then
         if [[ "$(_mesh_session_via "$iface")" == "yes" ]]; then
             warn "You are connected through ${label}: this session ends when it stops. Port 22 is reopened first."
         fi
@@ -857,12 +983,26 @@ _mesh_status_json() {
             '{enabled: false, provider: (if $p == "" then null else $p end), active: (if $cur == "" then null else $cur end)}'
         return 0
     fi
-    local live days="" ports
+    local live days="" ports seen="" ufw=false http01 panel='null'
     live=$(_mesh_live "$p")
     days=$(_mesh_days_until "$(jq -r '.key_expiry // empty' <<< "$live")")
     ports=$(_mesh_ssh_ports | tr ' ' '\n' | jq -R 'tonumber?' | jq -sc .) || ports='[22]'
+    # The last SSH login that came over the mesh: what the panel's lock ssh asks for.
+    [[ "$(jq -r '.connected' <<< "$live")" == "true" ]] && { seen=$(_mesh_ssh_seen "$(jq -r '.interface' <<< "$live")") || seen=""; }
+    _mesh_ufw_active && ufw=true
+    http01=$(_mesh_http01_apps | tr ' ' '\n' | grep . | jq -R . | jq -sc . 2>/dev/null) || http01='[]'
+    [[ -n "$http01" ]] || http01='[]'
+    # What the panel may do now, and why not: asked by the panel (or with --via=).
+    if _mesh_from_panel || [[ -n "${ARG_via:-}" ]]; then
+        panel=$(jq -n -c --arg via "$(_mesh_route_of "${ARG_via:-}" "$(jq -r '.interface' <<< "$live")")" --arg from "${ARG_via:-}" \
+            --arg ssh "$(_mesh_panel_blocker "$p" lock_ssh "$live")" --arg http "$(_mesh_panel_blocker "$p" lock_http "$live")" \
+            --arg dis "$(_mesh_panel_blocker "$p" disable "$live")" '
+            def n: if . == "" then null else . end;
+            {via: $via, from: ($from | n), blocked: {lock_ssh: ($ssh | n), lock_http: ($http | n), disable: ($dis | n)}}') || panel='null'
+    fi
     jq -n -c --argjson st "$st" --argjson live "$live" --arg p "$p" --arg label "$(_mesh_label "$p")" \
         --arg days "$days" --argjson ports "$ports" --arg user "$(_mesh_ssh_user)" \
+        --arg seen "$seen" --argjson ufw "$ufw" --argjson http01 "$http01" --argjson panel "$panel" \
         --argjson udp "$(_mesh_udp_port "$p")" '
         ($days | if . == "" then null else tonumber end) as $d
         | {
@@ -877,9 +1017,13 @@ _mesh_status_json() {
             peers: $live.peers,
             ssh: {
                 provider_ssh: $live.provider_ssh, ports: $ports,
-                command: (if $live.ip != null then "ssh \($user)@\($live.ip)" else null end)
+                command: (if $live.ip != null then "ssh \($user)@\($live.ip)" else null end),
+                seen: (if $seen == "" then null else ($seen | split("|") | {at: .[0], from: .[1]}) end)
             },
             lock: {ssh: ($st.lock_ssh // false), http: ($st.lock_http // false)},
+            firewall_active: $ufw,
+            http01_apps: $http01,
+            panel: $panel,
             direct: {port: $udp, open: ($st.direct // false)},
             accept_dns: (if $live.accept_dns != null then $live.accept_dns else ($st.accept_dns // false) end),
             accept_routes: (if $live.accept_routes != null then $live.accept_routes else ($st.accept_routes // false) end),
@@ -914,6 +1058,7 @@ _mesh_status_lines() {   # <status json>
         _mesh_row "Tags" "$(jq -r 'if (.tags | length) > 0 then (.tags | join(", ")) else "none" end' <<< "$j")"
         _mesh_row "Tailscale SSH" "$(jq -r 'if .ssh.provider_ssh then "on (the tailnet policy signs people in)" else "off (OpenSSH, your keys)" end' <<< "$j")"
     fi
+    _mesh_row "SSH over it" "$(jq -r 'if .ssh.seen == null then "nobody has signed in over the mesh yet" else "last login \(.ssh.seen.at) from \(.ssh.seen.from)" end' <<< "$j")"
     _mesh_row "lock ssh" "$(jq -r '.lock.ssh' <<< "$j")"
     _mesh_row "lock http" "$(jq -r '.lock.http' <<< "$j")"
     _mesh_row "Direct port" "$(jq -r '"\(.direct.port)/udp " + (if .direct.open then "open" else "closed (peers reach it through relays or hole punching)" end)' <<< "$j")"
@@ -999,7 +1144,7 @@ _mesh_ssh_provider() {
     local -a a=(set)
     if [[ "$on" == "true" ]]; then a+=(--ssh); else a+=(--ssh=false); fi
     if [[ "$(_mesh_session_via "$iface")" == "yes" ]]; then
-        if [[ "${ARG_force:-}" != "true" ]]; then
+        if ! _mesh_forced; then
             error "You are connected over the tailnet: port 22 of that address changes hands and this session may end."
             echo "  Run it from a session on the public address, or pass --force."
             exit 1
@@ -1053,42 +1198,51 @@ _mesh_lock_ssh() {
     label=$(_mesh_label "$p"); iface=$(_mesh_iface "$p"); user=$(_mesh_ssh_user)
     live=$(_mesh_live "$p")
     ip=$(jq -r '.ip // empty' <<< "$live")
-    if [[ "$(jq -r '.connected' <<< "$live")" != "true" || -z "$ip" ]]; then
-        error "${label} is not connected ($(jq -r '.state' <<< "$live")) — refusing to close the SSH port (you would lock yourself out)."
-        echo "  Check: cipi zt ${p} status   systemctl status $(_mesh_unit "$p")"
-        exit 1
-    fi
-    if [[ "$(jq -r '.provider_ssh' <<< "$live")" != "true" ]] && ! _mesh_sshd_listens "$ip"; then
-        error "sshd does not listen on the mesh address ${ip} (ListenAddress): nothing would answer there."
-        echo "  Let it listen everywhere (the firewall decides who reaches it), then lock."
-        exit 1
-    fi
-    # A node key that expires takes the server off the network on that day:
-    # with port 22 closed, there is no way in then but the provider's console.
-    local exp days
-    exp=$(jq -r '.key_expiry // empty' <<< "$live")
-    if [[ -n "$exp" && "${ARG_force:-}" != "true" ]]; then
-        days=$(_mesh_days_until "$exp")
-        error "The node key of this machine expires on ${exp%%T*}${days:+ (${days} days)}: on that day the server leaves the tailnet,"
-        echo "  and with port 22 closed the only way in is the provider's console."
-        echo "  Admin console → Machines → this server → Disable key expiry — or join again with a tagged"
-        echo "  key, whose node key does not expire: cipi zt tailscale enable --auth-key=KEY --tags=tag:cipi --reauth"
-        echo "  --force locks all the same (the monitor warns before the key expires)."
-        exit 1
-    fi
-    # The proof that SSH over the mesh works is this very session.
-    local via
-    via=$(_mesh_session_via "$iface")
-    if [[ "$via" != "yes" && "${ARG_force:-}" != "true" ]]; then
-        if [[ "$via" == "no" ]]; then
-            error "This session did not come through ${label} — refusing to close the door you came in by."
-        else
-            error "No SSH session to check — closing the SSH port is done from a session that came through ${label}."
+    if _mesh_from_panel; then
+        # No session to look at, and no --force: connected, UFW on, sshd on
+        # the mesh address, a node key that cannot expire, and a login sshd
+        # accepted over the mesh — someone has come in that way.
+        local blocked
+        blocked=$(_mesh_panel_blocker "$p" lock_ssh "$live")
+        [[ -z "$blocked" ]] || { error "$blocked"; exit 1; }
+    else
+        if [[ "$(jq -r '.connected' <<< "$live")" != "true" || -z "$ip" ]]; then
+            error "${label} is not connected ($(jq -r '.state' <<< "$live")) — refusing to close the SSH port (you would lock yourself out)."
+            echo "  Check: cipi zt ${p} status   systemctl status $(_mesh_unit "$p")"
+            exit 1
         fi
-        echo "  From a device of the network:  ssh ${user}@${ip}"
-        echo "  and from there:                cipi zt ${p} lock ssh"
-        echo "  That the command arrives that way is the proof that it works. --force skips the check."
-        exit 1
+        if [[ "$(jq -r '.provider_ssh' <<< "$live")" != "true" ]] && ! _mesh_sshd_listens "$ip"; then
+            error "sshd does not listen on the mesh address ${ip} (ListenAddress): nothing would answer there."
+            echo "  Let it listen everywhere (the firewall decides who reaches it), then lock."
+            exit 1
+        fi
+        # A node key that expires takes the server off the network on that day:
+        # with port 22 closed, there is no way in then but the provider's console.
+        local exp days
+        exp=$(jq -r '.key_expiry // empty' <<< "$live")
+        if [[ -n "$exp" ]] && ! _mesh_forced; then
+            days=$(_mesh_days_until "$exp")
+            error "The node key of this machine expires on ${exp%%T*}${days:+ (${days} days)}: on that day the server leaves the tailnet,"
+            echo "  and with port 22 closed the only way in is the provider's console."
+            echo "  Admin console → Machines → this server → Disable key expiry — or join again with a tagged"
+            echo "  key, whose node key does not expire: cipi zt tailscale enable --auth-key=KEY --tags=tag:cipi --reauth"
+            echo "  --force locks all the same (the monitor warns before the key expires)."
+            exit 1
+        fi
+        # The proof that SSH over the mesh works is this very session.
+        local via
+        via=$(_mesh_session_via "$iface")
+        if [[ "$via" != "yes" ]] && ! _mesh_forced; then
+            if [[ "$via" == "no" ]]; then
+                error "This session did not come through ${label} — refusing to close the door you came in by."
+            else
+                error "No SSH session to check — closing the SSH port is done from a session that came through ${label}."
+            fi
+            echo "  From a device of the network:  ssh ${user}@${ip}"
+            echo "  and from there:                cipi zt ${p} lock ssh"
+            echo "  That the command arrives that way is the proof that it works. --force skips the check."
+            exit 1
+        fi
     fi
     _mesh_require_ufw || exit 1
     local ports; ports=$(_mesh_ssh_ports)
@@ -1151,6 +1305,12 @@ _mesh_lock_http() {
     label=$(_mesh_label "$p")
     live=$(_mesh_live "$p")
     ip=$(jq -r '.ip // empty' <<< "$live")
+    if _mesh_from_panel; then
+        # No --force, and never the panel's own way in: see _mesh_panel_blocker.
+        local blocked
+        blocked=$(_mesh_panel_blocker "$p" lock_http "$live")
+        [[ -z "$blocked" ]] || { error "$blocked"; exit 1; }
+    fi
     if [[ "$(jq -r '.connected' <<< "$live")" != "true" || -z "$ip" ]]; then
         error "${label} is not connected ($(jq -r '.state' <<< "$live")) — with 80/443 closed nothing would reach the sites."
         exit 1
@@ -1158,7 +1318,7 @@ _mesh_lock_http() {
     local bad
     bad=$(_mesh_http01_apps)
     if [[ -n "$bad" ]]; then
-        if [[ "${ARG_force:-}" != "true" ]]; then
+        if ! _mesh_forced; then
             error "These apps renew SSL over HTTP-01, which needs port 80 open to the world:${bad}"
             echo "  Switch each one to DNS-01 first: cipi ssl install <app> --dns=cloudflare"
             echo "  Or pass --force if you accept that those certificates will not renew."

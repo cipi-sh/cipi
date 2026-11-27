@@ -5,6 +5,17 @@
 # sudo-rs (Ubuntu 25.10+) allows '*' only as the final argument token.
 # Use "db restore *" (not "db restore * *") for multi-arg commands.
 #
+# 5.18.0 adds the mesh network of Zero Trust (`zt tailscale`, `zt netbird`)
+# to the panel's Zero Trust tab: join (`enable`, the key passed as a flag and
+# run synchronously, like every other secret), leave (`disable --yes`), the
+# two locks and their unlocks, Tailscale SSH on and off. The commands
+# themselves hold the line when sudo comes from www-data (lib/zt-mesh.sh):
+# --force is ignored; `lock ssh` wants a login sshd accepted over the mesh
+# and a node key that cannot expire; `lock http` and `disable` are refused
+# when they would cut the panel's own way to this server (--via=<address>,
+# the last argument). Nothing of Cloudflare's side is here: `zt status` only,
+# as before.
+#
 # 5.17.0 adds, for the panel's new pages: the nginx page cache of an app
 # (`cache` — list, on, off, ttl, size, clear: every argument is checked by
 # the command, none is a path), Valkey per app from the server's page
@@ -236,6 +247,24 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi status, \
                                /usr/local/bin/cipi zt status, \
                                /usr/local/bin/cipi zt status *, \
+                               /usr/local/bin/cipi zt tailscale enable *, \
+                               /usr/local/bin/cipi zt tailscale disable --yes, \
+                               /usr/local/bin/cipi zt tailscale disable --yes *, \
+                               /usr/local/bin/cipi zt tailscale lock ssh --yes, \
+                               /usr/local/bin/cipi zt tailscale lock http --yes, \
+                               /usr/local/bin/cipi zt tailscale lock http --yes *, \
+                               /usr/local/bin/cipi zt tailscale unlock ssh, \
+                               /usr/local/bin/cipi zt tailscale unlock http, \
+                               /usr/local/bin/cipi zt tailscale ssh enable, \
+                               /usr/local/bin/cipi zt tailscale ssh disable, \
+                               /usr/local/bin/cipi zt netbird enable *, \
+                               /usr/local/bin/cipi zt netbird disable --yes, \
+                               /usr/local/bin/cipi zt netbird disable --yes *, \
+                               /usr/local/bin/cipi zt netbird lock ssh --yes, \
+                               /usr/local/bin/cipi zt netbird lock http --yes, \
+                               /usr/local/bin/cipi zt netbird lock http --yes *, \
+                               /usr/local/bin/cipi zt netbird unlock ssh, \
+                               /usr/local/bin/cipi zt netbird unlock http, \
                                /usr/local/bin/cipi monitor list, \
                                /usr/local/bin/cipi monitor list *, \
                                /usr/local/bin/cipi metrics overview *, \

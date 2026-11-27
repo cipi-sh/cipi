@@ -6,7 +6,7 @@ All notable changes to Cipi are documented in this file.
 
 ## [5.18.0] — 2026-11-27
 
-Zero Trust gets its private side. Cloudflare Tunnel publishes the sites; **Tailscale** and **NetBird** are how the people who run the server reach it — SSH, the panel, the API and the sites on an address only the devices of the network can route to. `cipi zt tailscale …` and `cipi zt netbird …`, next to the Cloudflare commands, which do not change. The panel (cipi/api 1.48.0, cipi/gui 4.10.0) shows the mesh in the Zero Trust tab; like the rest of Zero Trust it reads, it does not change.
+Zero Trust gets its private side. Cloudflare Tunnel publishes the sites; **Tailscale** and **NetBird** are how the people who run the server reach it — SSH, the panel, the API and the sites on an address only the devices of the network can route to. `cipi zt tailscale …` and `cipi zt netbird …`, next to the Cloudflare commands, which do not change. **The panel does all of it too** (cipi/api 1.48.0, cipi/gui 4.10.0): join and leave a network, the two locks, Tailscale SSH — with the checks that keep a click from locking anyone out.
 
 ### Added
 
@@ -25,6 +25,12 @@ Zero Trust gets its private side. Cloudflare Tunnel publishes the sites; **Tails
 - **`cipi zt tailscale ssh enable|disable`** — Tailscale SSH: tailscaled answers port 22 of the tailnet address and signs people in by the tailnet's SSH policy, no keys on the server. Refused from a session that came over the tailnet (it may end with it) unless `--force`. **NetBird's own SSH server is never turned on**: it takes port 22 of the mesh address away from OpenSSH and signs people in its own way; SSH over NetBird is OpenSSH with the keys of `cipi ssh`, and `cipi zt netbird status` says when someone turned that server on elsewhere.
 - **`cipi zt tailscale|netbird status [--json]`** — connected or not and why, the address and name of the server on the network, the network, peers online, the node key's expiry in days, tags, locks, the command to come in, and warnings. **`cipi zt status`** shows the mesh under Cloudflare's lines, and **`cipi zt status --json` gains `mesh`** — what the panel reads.
 - **`cipi zt tailscale|netbird disable`** — what its locks closed is reopened first, then its firewall rules go, and last the server leaves the network and the client, its apt source and its key are removed. A session that came over the mesh ends at that last step: the removal ignores the hangup and runs to its end.
+- **From the panel** — the API runs the same commands (`zt-manage`, a new ability; the sudoers name each one), and they hold the line themselves when sudo comes from `www-data`:
+  - **`--force` is ignored.** A token cannot skip what protects the operator.
+  - **`lock ssh` has no session to look at**: the proof that SSH works over the mesh is a login sshd accepted from an address reached over it (`/var/log/auth.log`). No such login yet, a node key that can expire, Tailscale SSH on (its sessions are not in sshd's log): refused, with what to do.
+  - **`lock http` and `disable` never cut the panel's own way in.** The API says where its caller comes from (`--via=`): over the mesh, from this server, or through the Cloudflare tunnel, the lock goes ahead; from the public address it is refused — the panel could not reach the server again, not even to unlock. `disable` is refused when the panel comes over the mesh.
+  - `cipi zt status --json` says it before the click: `mesh.ssh.seen` (the last login over the mesh), `mesh.firewall_active`, `mesh.http01_apps`, and — asked by the panel — `mesh.panel` (`via`, and `blocked.lock_ssh|lock_http|disable` with the reason, or `null`).
+  - **`zt-manage` is as strong as `ssh-manage`**: whoever holds it can put the server on a network of their own. It is on no token until someone asks for it.
 - **The mesh in the monitor** — a `mesh` check (`monitor_mesh`, urgent): critical when the client is stopped or off the network (a node key that expired, a machine removed from the admin console) or the node key has expired; a warning when the key expires within `days` (14, `cipi monitor set mesh --days=`) or the coordination server cannot be reached. Off while no mesh is on. With port 22 closed it says what that means.
 - `cipi help zt` (also `tailscale`, `netbird`, `mesh`), completion.
 
@@ -41,8 +47,8 @@ Zero Trust gets its private side. Cloudflare Tunnel publishes the sites; **Tails
 - No migration: nothing is installed or changed until `enable`. `setup.sh` and `cipi self-update` never call it.
 - **Who reaches what is the network's own policy**, not UFW's: the mesh interface is allowed as a whole, as Tailscale's own guide does (its client accepts its interface before UFW is asked). Write the tailnet's access rules, or NetBird's policies, so that the people who run the server reach tcp 22, 80 and 443 of it, and nobody else does.
 - A database or Valkey from a laptop over the mesh: an SSH tunnel (TablePlus and DBeaver call it "over SSH") — the ports stay on localhost. There is no `tcp add` for the mesh.
-- The API's sudoers are unchanged: `cipi zt status` only. Joining a network and closing ports stay at the server's shell.
-- **Tailscale and NetBird themselves are not on the machine the release was prepared on.** `tests/verify-5.18.0.sh` runs every command against stubs of `tailscale`, `netbird`, `ufw`, `ip`, `systemctl` and `apt-get` that keep a state and answer as the vendors' documentation says (`tailscale status --json`, NetBird's text `netbird status`); the flags of `tailscale up` and `netbird up` are the documented ones. On a first real server: `cipi zt tailscale enable --auth-key=…`, then `cipi zt tailscale status`, before any lock.
+- Cloudflare's side stays read-only in the panel: `cipi zt status` only, as before. Tunnels, hostnames, Access and their locks are still the server's shell.
+- **Tailscale and NetBird themselves are not on the machine the release was prepared on.** `tests/verify-5.18.0.sh` (133 checks) runs every command, from the shell and as the panel, against stubs of `tailscale`, `netbird`, `ufw`, `ip`, `systemctl` and `apt-get` that keep a state and answer as the vendors' documentation says (`tailscale status --json`, NetBird's text `netbird status`); the flags of `tailscale up` and `netbird up` are the documented ones. On a first real server: `cipi zt tailscale enable --auth-key=…`, then `cipi zt tailscale status`, before any lock.
 - The panel's side: cipi/api 1.48.0 and cipi/gui 4.10.0.
 
 ---

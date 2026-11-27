@@ -5,6 +5,14 @@
 # sudo-rs (Ubuntu 25.10+) allows '*' only as the final argument token.
 # Use "db restore *" (not "db restore * *") for multi-arg commands.
 #
+# 5.18.0 also adds `cipi sync` for the panel's transfer wizard: this server's
+# sync key (`pubkey --raw`), whether a target accepts it (`check`), trusting
+# and no longer trusting the key of another server (`trust --key=`, `untrust
+# --key=`), and the transfer itself (`push … --import --auto-passphrase`: the
+# passphrase of the archive is made by the command, for that one transfer, and
+# never goes through the API). `export`, `import` and `list` are not here: an
+# archive is not left on, or read from, a path the panel names.
+#
 # 5.18.0 adds the mesh network of Zero Trust (`zt tailscale`, `zt netbird`)
 # to the panel's Zero Trust tab: join (`enable`, the key passed as a flag and
 # run synchronously, like every other secret), leave (`disable --yes`), the
@@ -267,6 +275,11 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi zt netbird lock http --yes *, \
                                /usr/local/bin/cipi zt netbird unlock ssh, \
                                /usr/local/bin/cipi zt netbird unlock http, \
+                               /usr/local/bin/cipi sync pubkey --raw, \
+                               /usr/local/bin/cipi sync check *, \
+                               /usr/local/bin/cipi sync trust *, \
+                               /usr/local/bin/cipi sync untrust *, \
+                               /usr/local/bin/cipi sync push *, \
                                /usr/local/bin/cipi monitor list, \
                                /usr/local/bin/cipi monitor list *, \
                                /usr/local/bin/cipi metrics overview *, \

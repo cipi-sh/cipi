@@ -1151,6 +1151,127 @@ line=$(grep -F 'echo -e "  ${BOLD}Database${NC}    ${CYAN}${db_new}${NC} / ${CYA
     && pass "the summary says name and password on the line the API reads for an app's database" || fail "summary line"
 grep -q -- '--db=NAME (custom and Node apps)' "${ROOT}/cipi" && grep -q -- '--db=NAME' "${ROOT}/CHANGELOG.md" && pass "help and CHANGELOG say it" || fail "help / CHANGELOG: --db"
 
+# ── cipi sync for the panel: check, trust/untrust, push without a terminal ──
+echo "--- sync: check, untrust, push --auto-passphrase"
+bash -n "${LIB}/sync.sh" && pass "sync.sh parses" || fail "sync.sh parse"
+SYD="${TMP}/sy"; mkdir -p "$SYD/bin" "$SYD/remote" "$DCD/home/cipi/.ssh"
+# Three ed25519 public keys, written as OpenSSH writes them (the type, then 32 bytes): no ssh-keygen needed to make them.
+mkpub() { printf 'ssh-ed25519 %s %s\n' "$( { printf '\0\0\0\013ssh-ed25519\0\0\0\040'; head -c 32 /dev/urandom; } | base64 -w 0)" "$1"; }
+: > "$DCD/home/cipi/.ssh/id_ed25519"
+mkpub "cipi@source" > "$DCD/home/cipi/.ssh/id_ed25519.pub"; mkpub "cipi@other" > "$SYD/other.pub"; mkpub "ops@laptop" > "$SYD/ops.pub"
+# Where OpenSSH is not installed (a build machine), an ssh-keygen that reads a public key the same way.
+if ! command -v ssh-keygen >/dev/null 2>&1; then
+    cat > "$SYD/bin/ssh-keygen" <<'EOF'
+#!/bin/bash
+read -r t b _ || exit 255
+[[ "$t" == ssh-ed25519 ]] || exit 255
+[[ "$(printf '%s' "$b" | base64 -d 2>/dev/null | head -c 15 | tail -c 11)" == "ssh-ed25519" && "$(printf '%s' "$b" | base64 -d 2>/dev/null | wc -c)" == 51 ]] || exit 255
+echo "256 SHA256:test (ED25519)"
+EOF
+    chmod +x "$SYD/bin/ssh-keygen"
+fi
+# ssh: the target, as far as push and check ask. REMOTE_STATE: ok | denied | down | nocipi; REMOTE_VER.
+cat > "$SYD/bin/ssh" <<'EOF'
+#!/bin/bash
+echo "ssh $*" >> "$SYD/ssh.log"
+cmd="${@: -1}"
+case "${REMOTE_STATE:-ok}" in
+    denied) echo "cipi@203.0.113.9: Permission denied (publickey,password)." >&2; exit 255 ;;
+    down)   echo "ssh: connect to host 203.0.113.9 port 22: Connection timed out" >&2; exit 255 ;;
+esac
+case "$cmd" in
+    "echo ok") echo ok ;;
+    "sudo cipi version"*) [[ "${REMOTE_STATE:-ok}" == nocipi ]] && exit 127; echo "Cipi v${REMOTE_VER:-5.18.0}" ;;
+    "sudo cipi sync import "*)
+        printf '%s\n' "$cmd" > "$SYD/import.cmd"
+        if [[ "$cmd" == *"--passphrase-stdin"* ]]; then IFS= read -r pw; printf '%s' "$pw" > "$SYD/import.stdin"; fi
+        exit "${REMOTE_IMPORT_RC:-0}" ;;
+    "rm -f "*) echo "$cmd" > "$SYD/remote.rm" ;;
+esac
+exit 0
+EOF
+cat > "$SYD/bin/rsync" <<'EOF'
+#!/bin/bash
+src="${@: -2:1}"; cp -- "$src" "$SYD/remote/$(basename "$src")"
+EOF
+chmod +x "$SYD/bin/ssh" "$SYD/bin/rsync"
+SY() {   # a function of sync.sh, with nobody at the terminal
+    PATH="$SYD/bin:$MG/bin:$PATH" SYD="$SYD" CIPI_LIB="$DCD/lib" CIPI_CONFIG="$DCD/cfg" CIPI_LOG="$DCD/log" REMOTE_STATE="${REMOTE_STATE:-ok}" REMOTE_VER="${REMOTE_VER:-5.18.0}" \
+    REMOTE_IMPORT_RC="${REMOTE_IMPORT_RC:-0}" SUDO_USER="${AS:-}" bash -c 'set -uo pipefail
+        source "$CIPI_LIB/common.sh"; source "$CIPI_LIB/sync.sh"
+        RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
+        cipi_notify() { :; }
+        chown() { :; }
+        # The export: an archive encrypted with the passphrase it was given, as the real one makes it.
+        _sync_export() {
+            local a pw=""; for a in "$@"; do [[ "$a" == --passphrase=* ]] && pw="${a#--passphrase=}"; done
+            printf "%s\n" "$*" | sed "s/--passphrase=.*/--passphrase=<given>/" > "$SYD/export.args"
+            _SYNC_LAST_ARCHIVE="$SYD/cipi-sync-test.tar.gz.enc"
+            echo "apps of the source" | CIPI_SYNC_PASSPHRASE="$pw" openssl enc -aes-256-cbc -salt -pbkdf2 -pass env:CIPI_SYNC_PASSPHRASE -out "$_SYNC_LAST_ARCHIVE"
+        }
+        ( "$@" ) 2>&1 < /dev/null; echo "rc=$?"' _ "$@"
+}
+out=$(SY _sync_valid_target 203.0.113.9 22 cipi; SY _sync_valid_target fra1.example.com 2222 cipi; SY _sync_valid_target 2001:db8::1 22 cipi)
+[[ "$(grep -c '^rc=0$' <<< "$out")" == 3 ]] && pass "a target: an IPv4 or IPv6 address or a hostname, a port, a user" || fail "valid target: ${out}"
+ok=1; for bad in "host;id 22 cipi" "-oProxyCommand=x 22 cipi" "a b 22 cipi" "h.example 0 cipi" "h.example 70000 cipi" "h.example 22 root;id" "h.example 22 -l"; do
+    # shellcheck disable=SC2086
+    out=$(SY _sync_valid_target $bad); grep -qx 'rc=1' <<< "$out" || { ok=0; fail "target accepted: ${bad}"; }
+done; [[ $ok == 1 ]] && pass "…and nothing that would be an option or a second command on ssh's line"
+if true; then
+    KEY_SRC=$(cat "$DCD/home/cipi/.ssh/id_ed25519.pub"); KEY_OTHER=$(cat "$SYD/other.pub"); KEY_OPS=$(cat "$SYD/ops.pub")
+    out=$(SY sync_command pubkey --raw); [[ "$(sed '$d' <<< "$out")" == "$KEY_SRC" ]] && pass "pubkey --raw: the key and nothing else" || fail "pubkey --raw: ${out}"
+    out=$(SY sync_command check --host=203.0.113.9 --json)
+    [[ "$(sed '$d' <<< "$out" | jq -c '[.ok, .cipi, .auto_passphrase, .reason]')" == '[true,"5.18.0",true,null]' ]] && grep -qx 'rc=0' <<< "$out" && pass "check: the key is accepted and Cipi answers — its version, and that it takes a passphrase on standard input" || fail "check ok: ${out}"
+    out=$(REMOTE_VER=5.17.0 SY sync_command check --host=203.0.113.9 --json); [[ "$(sed '$d' <<< "$out" | jq -c '[.ok, .cipi, .auto_passphrase]')" == '[true,"5.17.0",false]' ]] && pass "check: an older target is reachable, without the one-time passphrase" || fail "check old: ${out}"
+    out=$(REMOTE_STATE=denied SY sync_command check --host=203.0.113.9 --json); [[ "$(sed '$d' <<< "$out" | jq -r '.reason')" == "not-trusted" ]] && grep -qx 'rc=1' <<< "$out" && grep -q 'cipi sync trust' <<< "$out" && pass "check: a target that does not trust the key says so, with what to do there" || fail "check denied: ${out}"
+    out=$(REMOTE_STATE=down SY sync_command check --host=203.0.113.9 --json); [[ "$(sed '$d' <<< "$out" | jq -r '.reason')" == "unreachable" ]] && pass "check: a target that does not answer" || fail "check down: ${out}"
+    out=$(REMOTE_STATE=nocipi SY sync_command check --host=203.0.113.9 --json); [[ "$(sed '$d' <<< "$out" | jq -r '.reason')" == "no-cipi" ]] && pass "check: a server without Cipi" || fail "check nocipi: ${out}"
+    grep -q -- '-o BatchMode=yes' "$SYD/ssh.log" && ! grep -q -- ' -t ' "$SYD/ssh.log" && pass "check never asks for a password and never needs a terminal" || fail "check: ssh options"
+    # trust and untrust
+    AK="$DCD/home/cipi/.ssh/authorized_keys"; printf '%s\n' "$KEY_OPS" > "$AK"
+    out=$(SY sync_command trust "--key=${KEY_OTHER}"); grep -qxF -- "$KEY_OTHER" "$AK" && grep -qxF -- "$KEY_OPS" "$AK" && pass "trust --key=: the key is added, without a question" || fail "trust: ${out}"
+    out=$(SY sync_command trust "--key=${KEY_OTHER}"); [[ "$(grep -cF -- "$KEY_OTHER" "$AK")" == 1 ]] && pass "…once" || fail "trust twice: ${out}"
+    out=$(SY sync_command trust "--key=ssh-ed25519 AAAAnotakey x"); grep -qx 'rc=1' <<< "$out" && [[ "$(wc -l < "$AK")" == 2 ]] && pass "…and what ssh-keygen cannot read is not a key" || fail "trust garbage: ${out}"
+    out=$(SY sync_command trust "--key=${KEY_OTHER}"$'\n''command="id" ssh-ed25519 AAAA x'); grep -qx 'rc=1' <<< "$out" && ! grep -q 'command=' "$AK" && pass "…nor is a key with a second line behind it" || fail "trust two lines: ${out}"
+    out=$(SY sync_command untrust "--key=$(awk '{print $1, $2}' <<< "$KEY_OTHER") another-comment")
+    grep -qx 'rc=0' <<< "$out" && ! grep -qF -- "$(awk '{print $2}' <<< "$KEY_OTHER")" "$AK" && grep -qxF -- "$KEY_OPS" "$AK" && [[ "$(wc -l < "$AK")" == 1 ]] \
+        && pass "untrust --key=: that key is gone (whatever its comment), the others stay" || fail "untrust: ${out} / $(cat "$AK")"
+    out=$(SY sync_command untrust "--key=${KEY_OTHER}"); grep -qx 'rc=0' <<< "$out" && grep -q 'nothing to remove' <<< "$out" && pass "…and a key that is not there is nothing to remove" || fail "untrust twice: ${out}"
+    # push, with nobody to ask
+    out=$(AS=www-data SY sync_command push shop --import --auto-passphrase); grep -qx 'rc=1' <<< "$out" && grep -q -- 'Target server required: --host=' <<< "$out" && pass "push without a terminal asks nothing: no --host, said" || fail "push no host: ${out}"
+    out=$(AS=www-data SY sync_command push shop --host=203.0.113.9 --import); grep -qx 'rc=1' <<< "$out" && grep -q -- 'A passphrase is needed' <<< "$out" && pass "…no passphrase, said" || fail "push no passphrase: ${out}"
+    out=$(AS=www-data SY sync_command push shop --host=203.0.113.9 --auto-passphrase); grep -qx 'rc=1' <<< "$out" && grep -q -- '--auto-passphrase goes with --import' <<< "$out" && pass "--auto-passphrase without --import is refused: nobody would know the passphrase" || fail "push auto no import: ${out}"
+    out=$(AS=www-data SY sync_command push nosuchapp --host=203.0.113.9 --import --auto-passphrase); grep -qx 'rc=1' <<< "$out" && grep -q "App 'nosuchapp' not found" <<< "$out" && pass "an app that is not there is refused before anything is sent" || fail "push unknown app: ${out}"
+    out=$(AS=www-data REMOTE_STATE=denied SY sync_command push shop --host=203.0.113.9 --import --auto-passphrase); grep -qx 'rc=1' <<< "$out" && grep -q 'cipi sync trust' <<< "$out" && ! grep -q 'Trying with password' <<< "$out" && pass "a target that does not trust the key: no password is tried, the command ends" || fail "push denied: ${out}"
+    out=$(AS=www-data REMOTE_VER=5.17.0 SY sync_command push shop --host=203.0.113.9 --import --auto-passphrase); grep -qx 'rc=1' <<< "$out" && grep -q -- '--auto-passphrase needs Cipi 5.18.0+ on the target' <<< "$out" && [[ ! -f "$SYD/remote/cipi-sync-test.tar.gz.enc" ]] \
+        && pass "an older target is refused before the export: its import would take the passphrase as a flag" || fail "push old target: ${out}"
+    rm -f "$SYD/import.cmd" "$SYD/import.stdin" "$SYD/ssh.log"
+    out=$(AS=www-data SY sync_command push shop --host=203.0.113.9 --port=2222 --import --auto-passphrase --with-db --with-storage)
+    pw=$(cat "$SYD/import.stdin" 2>/dev/null || true)
+    grep -qx 'rc=0' <<< "$out" && [[ ${#pw} == 48 ]] && grep -qx 'sudo cipi sync import /tmp/cipi-sync-test.tar.gz.enc --yes --update shop --passphrase-stdin' "$SYD/import.cmd" \
+        && pass "push --import --auto-passphrase: exported, sent, imported on the target — the passphrase on the import's standard input" || fail "push: ${out} / $(cat "$SYD/import.cmd" 2>/dev/null)"
+    [[ "$(CIPI_SYNC_PASSPHRASE="$pw" openssl enc -d -aes-256-cbc -pbkdf2 -pass env:CIPI_SYNC_PASSPHRASE -in "$SYD/remote/cipi-sync-test.tar.gz.enc" 2>/dev/null)" == "apps of the source" ]] \
+        && pass "…and it is the one the archive that arrived was encrypted with" || fail "the passphrase does not open the archive"
+    ! grep -qF -- "$pw" <<< "$out" && ! grep -qF -- "$pw" "$SYD/ssh.log" "$SYD/import.cmd" "$SYD/export.args" "$DCD/log/"* 2>/dev/null && pass "it is in no output, no command line and no log" || fail "the passphrase leaked"
+    grep -q -- '--with-db --with-storage' "$SYD/export.args" && grep -q -- '-p 2222' "$SYD/ssh.log" && ! grep -q -- ' -t ' "$SYD/ssh.log" && [[ ! -f "$SYD/cipi-sync-test.tar.gz.enc" ]] \
+        && pass "the options reach the export, the port reaches ssh, no terminal is asked for, and the archive is gone from the source" || fail "push details"
+    out=$(AS=www-data REMOTE_IMPORT_RC=1 SY sync_command push shop --host=203.0.113.9 --import --auto-passphrase)
+    grep -qx 'rc=1' <<< "$out" && grep -q 'Remote import failed' <<< "$out" && grep -q "rm -f '/tmp/cipi-sync-test.tar.gz.enc'" "$SYD/remote.rm" \
+        && pass "an import that fails on the target fails the push, and the archive nobody can open is removed from the target" || fail "push, import failed: ${out}"
+fi
+# import: the passphrase on standard input
+printf 'not an archive' > "$SYD/x.tar.gz.enc"
+out=$(PATH="$MG/bin:$PATH" CIPI_LIB="$DCD/lib" CIPI_CONFIG="$DCD/cfg" CIPI_LOG="$DCD/log" bash -c 'source "$CIPI_LIB/common.sh"; source "$CIPI_LIB/sync.sh"; RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
+    ( sync_command import "$1" --yes --passphrase-stdin ) < /dev/null 2>&1; echo "rc=$?"; ( printf "%s\n" "some-passphrase" | sync_command import "$1" --yes --passphrase-stdin ) 2>&1; echo "rc=$?"' _ "$SYD/x.tar.gz.enc")
+grep -q -- '--passphrase-stdin: no passphrase on standard input' <<< "$out" && grep -q 'Decryption failed or invalid archive' <<< "$out" && [[ "$(grep -c '^rc=1$' <<< "$out")" == 2 ]] \
+    && pass "import --passphrase-stdin: one line of standard input is the passphrase; none is an error, not a prompt" || fail "import stdin: ${out}"
+SUD="${LIB}/cipi-api-sudoers.sh"
+for line in 'cipi sync pubkey --raw,' 'cipi sync check \*,' 'cipi sync trust \*,' 'cipi sync untrust \*,' 'cipi sync push \*,'; do
+    grep -q "/usr/local/bin/${line}" "$SUD" || fail "sudoers: ${line}"
+done
+! grep -qE 'cipi sync (export|import|list)' "$SUD" && pass "the panel may ask for the key, check, trust, untrust and push — not export, import or list an archive at a path it names" || fail "sudoers: sync"
+grep -q 'cipi sync untrust --key=KEY' "${ROOT}/cipi" && grep -q -- '--auto-passphrase' "${ROOT}/cipi" && grep -q -- '--auto-passphrase' "${ROOT}/CHANGELOG.md" && pass "help and CHANGELOG say it" || fail "help / CHANGELOG: sync"
+
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="
 [[ $FAIL -eq 0 ]]

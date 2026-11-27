@@ -17,9 +17,11 @@ sync_command() {
         import) _sync_import "$@" ;;
         list)   _sync_list "$@" ;;
         push)   _sync_push "$@" ;;
+        check)  _sync_check "$@" ;;
         trust)  _sync_trust "$@" ;;
-        pubkey) _sync_pubkey ;;
-        *) error "Use: export import list push trust pubkey"; exit 1 ;;
+        untrust) _sync_untrust "$@" ;;
+        pubkey) _sync_pubkey "$@" ;;
+        *) error "Use: export import list push check trust untrust pubkey"; exit 1 ;;
     esac
 }
 
@@ -357,8 +359,15 @@ _sync_import() {
         fi
     done
 
-    [[ -z "$file" ]] && { error "Usage: cipi sync import <archive.tar.gz[.enc]> [app1 ...] [--update] [--deploy] [--yes] [--passphrase=...]"; exit 1; }
+    [[ -z "$file" ]] && { error "Usage: cipi sync import <archive.tar.gz[.enc]> [app1 ...] [--update] [--deploy] [--yes] [--passphrase=...|--passphrase-stdin]"; exit 1; }
     [[ ! -f "$file" ]] && { error "File not found: $file"; exit 1; }
+    # --passphrase-stdin: one line on standard input. What `cipi sync push`
+    # sends over SSH since 5.18.0 — a passphrase given as --passphrase=… is in
+    # this server's process list and in the line sudo writes to auth.log.
+    if [[ "${ARG_passphrase_stdin:-}" == "true" ]]; then
+        IFS= read -r passphrase || true
+        [[ -n "$passphrase" ]] || { error "--passphrase-stdin: no passphrase on standard input"; exit 1; }
+    fi
 
     # Extract archive (handle encrypted archives transparently)
     local tmp; tmp=$(mktemp -d)
@@ -1049,6 +1058,11 @@ _sync_push() {
     local with_db="${ARG_with_db:-false}"
     local with_storage="${ARG_with_storage:-false}"
     local passphrase="${ARG_passphrase:-}"
+    # Nobody to ask: the panel (sudo by www-data), a cron, a pipe. Nothing is
+    # prompted for then — what is missing is said, and the command ends.
+    local unattended=false
+    [[ -t 0 ]] || unattended=true
+    [[ "${SUDO_USER:-}" == "www-data" ]] && unattended=true
 
     # Collect app names (positional args, excluding --flags)
     local -a app_args=()
@@ -1056,11 +1070,33 @@ _sync_push() {
         [[ "$arg" == --* ]] && continue
         app_args+=("$arg")
     done
+    local a
+    for a in "${app_args[@]}"; do
+        app_exists "$a" || { error "App '${a}' not found"; exit 1; }
+    done
 
     # Interactive prompts for connection details
+    if [[ -z "$remote_host" && "$unattended" == true ]]; then
+        error "Target server required: --host=<IP or hostname>"; exit 1
+    fi
     [[ -z "$remote_host" ]] && read_input "Target server (IP or hostname)" "" remote_host
     [[ -z "$remote_host" ]] && { error "Target server required"; exit 1; }
-    [[ -z "$remote_port" ]] && read_input "SSH port" "22" remote_port
+    if [[ -z "$remote_port" ]]; then
+        if [[ "$unattended" == true ]]; then remote_port=22; else read_input "SSH port" "22" remote_port; fi
+    fi
+    _sync_valid_target "$remote_host" "$remote_port" "$remote_user" || exit 1
+
+    # --auto-passphrase: a passphrase made here for this one transfer — never
+    # shown, never stored, handed to the target's import over SSH on standard
+    # input. Only with --import: an archive left on the target for later needs
+    # a passphrase somebody knows.
+    if [[ "${ARG_auto_passphrase:-}" == "true" ]]; then
+        [[ "$remote_import" == "true" ]] || { error "--auto-passphrase goes with --import: nobody would know the passphrase of an archive left for later"; exit 1; }
+        [[ -z "$passphrase" ]] || { error "--auto-passphrase and --passphrase= are one or the other"; exit 1; }
+        passphrase=$(generate_password 48)
+    elif [[ -z "$passphrase" && "$unattended" == true ]]; then
+        error "A passphrase is needed to encrypt the archive: --auto-passphrase (with --import), or --passphrase=…"; exit 1
+    fi
 
     echo ""
     info "Target: ${remote_user}@${remote_host}:${remote_port}"
@@ -1072,7 +1108,12 @@ _sync_push() {
 
     # Test SSH connectivity
     step "Testing SSH connection..."
-    if ! ssh ${ssh_opts} -o BatchMode=yes "${remote_user}@${remote_host}" "echo ok" &>/dev/null; then
+    if ! ssh ${ssh_opts} -o BatchMode=yes "${remote_user}@${remote_host}" "echo ok" </dev/null &>/dev/null; then
+        if [[ "$unattended" == true ]]; then
+            error "Cannot connect to ${remote_user}@${remote_host}:${remote_port} with this server's sync key"
+            echo "  The target has to trust it: on the target, cipi sync trust — with the key of: cipi sync pubkey"
+            exit 1
+        fi
         echo ""
         warn "SSH key-based auth failed. Trying with password..."
         echo -e "${DIM}  You may be prompted for the password of ${remote_user}@${remote_host}${NC}"
@@ -1101,6 +1142,16 @@ _sync_push() {
         exit 1
     fi
     success "Remote Cipi v${remote_ver}"
+    # The passphrase reaches an import of 5.18.0 on standard input; an older
+    # one only takes it as a flag, which its sudo writes to auth.log. A
+    # passphrase somebody chose still goes that way there, as it always did;
+    # the one made here does not.
+    local remote_stdin=false
+    [[ "$(printf '%s\n' "5.18.0" "$remote_ver" | sort -V | head -n 1)" == "5.18.0" ]] && remote_stdin=true
+    if [[ "${ARG_auto_passphrase:-}" == "true" && "$remote_stdin" != true ]]; then
+        error "--auto-passphrase needs Cipi 5.18.0+ on the target (it has v${remote_ver}): there, cipi self-update"
+        exit 1
+    fi
 
     # Build export flags (--internal-push suppresses manual transfer instructions)
     local -a export_flags=("--internal-push")
@@ -1168,21 +1219,39 @@ _sync_push() {
         info "Phase 3: Remote Import"
         echo "────────────────────────────────────────────────"
         local -a remote_cmd=("sudo" "cipi" "sync" "import" "/tmp/${archive_name}" "--yes" "--update")
-        [[ -n "$passphrase" ]] && remote_cmd+=("--passphrase=${passphrase}")
         [[ ${#app_args[@]} -gt 0 ]] && remote_cmd+=("${app_args[@]}")
-
-        step "Running: ${remote_cmd[*]}"
-        echo ""
-        ssh -t ${ssh_opts} "${remote_user}@${remote_host}" "${remote_cmd[*]}"
-        local rc=$?
+        local rc=0
+        if [[ -n "$passphrase" && "$remote_stdin" == true ]]; then
+            # On the import's standard input: not in the target's process list, nor in its auth.log.
+            remote_cmd+=("--passphrase-stdin")
+            step "Running: ${remote_cmd[*]}"
+            echo ""
+            printf '%s\n' "$passphrase" | ssh ${ssh_opts} "${remote_user}@${remote_host}" "${remote_cmd[*]}" || rc=$?
+        else
+            step "Running: ${remote_cmd[*]}${passphrase:+ --passphrase=…}"
+            [[ -n "$passphrase" ]] && remote_cmd+=("--passphrase=${passphrase}")
+            echo ""
+            if [[ "$unattended" == true ]]; then
+                ssh ${ssh_opts} "${remote_user}@${remote_host}" "${remote_cmd[*]}" </dev/null || rc=$?
+            else
+                ssh -t ${ssh_opts} "${remote_user}@${remote_host}" "${remote_cmd[*]}" || rc=$?
+            fi
+        fi
         echo ""
         if [[ $rc -eq 0 ]]; then
             success "Remote import completed"
+        elif [[ "${ARG_auto_passphrase:-}" == "true" ]]; then
+            # Nobody knows the passphrase of this archive: it is of no use on the target.
+            ssh ${ssh_opts} "${remote_user}@${remote_host}" "rm -f '/tmp/${archive_name}'" </dev/null &>/dev/null || true
+            error "Remote import failed (exit ${rc}) — nothing more was changed on ${remote_host}; the archive was removed from it"
+            log_action "SYNC PUSH FAILED: → ${remote_user}@${remote_host}:${remote_port} import exit=${rc}"
+            exit 1
         else
             warn "Remote import exited with code ${rc}"
             echo -e "  ${DIM}You can retry manually on the remote:${NC}"
             echo -e "  ${CYAN}ssh -p ${remote_port} ${remote_user}@${remote_host}${NC}"
             echo -e "  ${CYAN}cipi sync import /tmp/${archive_name}${NC}"
+            [[ "$unattended" == true ]] && { log_action "SYNC PUSH FAILED: → ${remote_user}@${remote_host}:${remote_port} import exit=${rc}"; exit 1; }
         fi
     else
         echo ""
@@ -1210,8 +1279,78 @@ _sync_push() {
 
 # ── PUBKEY (show this server's sync public key) ──────────────
 
+# A target of `cipi sync push`: what may follow user@ and -p on an ssh command
+# line. Checked before anything is run — the panel sends these.
+_sync_valid_target() {   # <host> <port> <user>
+    [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.:-]{0,252}[A-Za-z0-9])?$ ]] || { error "Invalid target '${1}': an IP address or a hostname"; return 1; }
+    [[ "$2" =~ ^[0-9]{1,5}$ ]] && (( 10#$2 >= 1 && 10#$2 <= 65535 )) || { error "Invalid SSH port '${2}'"; return 1; }
+    [[ "$3" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { error "Invalid SSH user '${3}'"; return 1; }
+}
+
+# cipi sync check --host=H [--port=22] [--user=cipi] [--json]
+# Can this server push to that one? Its sync key is accepted there, and Cipi
+# answers. Nothing is sent and nothing changes on either side — except the
+# target's host key, kept in known_hosts the first time, as push does.
+_sync_check() {
+    parse_args "$@"
+    local host="${ARG_host:-}" port="${ARG_port:-22}" user="${ARG_user:-cipi}" want_json="${ARG_json:-false}"
+    local ok=false reason="" ver="" stdin_ok=false
+    [[ -n "$host" && "$host" != "true" ]] || { error "Usage: cipi sync check --host=<IP or hostname> [--port=22] [--user=cipi] [--json]"; exit 1; }
+    _sync_valid_target "$host" "$port" "$user" || exit 1
+    local ident="/home/cipi/.ssh/id_ed25519"
+    local ssh_opts="-o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${port}"
+    [[ -f "$ident" ]] && ssh_opts="-i ${ident} ${ssh_opts}"
+    local err
+    if [[ ! -f "$ident" ]]; then
+        reason="no-key"
+    elif ! err=$(ssh ${ssh_opts} "${user}@${host}" "echo ok" </dev/null 2>&1 >/dev/null); then
+        case "$err" in
+            *"Permission denied"*)                                   reason="not-trusted" ;;
+            *"REMOTE HOST IDENTIFICATION HAS CHANGED"*|*"Host key verification failed"*) reason="host-key-changed" ;;
+            *)                                                       reason="unreachable" ;;
+        esac
+    else
+        ver=$(ssh ${ssh_opts} "${user}@${host}" "sudo cipi version 2>/dev/null" </dev/null 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n 1 || true)
+        if [[ -z "$ver" ]]; then
+            reason="no-cipi"
+        else
+            ok=true
+            [[ "$(printf '%s\n' "5.18.0" "$ver" | sort -V | head -n 1)" == "5.18.0" ]] && stdin_ok=true
+        fi
+    fi
+    local say=""
+    case "$reason" in
+        no-key)           say="This server has no sync key (/home/cipi/.ssh/id_ed25519)" ;;
+        not-trusted)      say="${host} does not trust this server's sync key yet: there, cipi sync trust — with the key of cipi sync pubkey here" ;;
+        host-key-changed) say="The host key of ${host} is not the one this server knows: if the server was rebuilt, ssh-keygen -R ${host} as root here" ;;
+        unreachable)      say="${host}:${port} does not answer over SSH" ;;
+        no-cipi)          say="Cipi does not answer on ${host} (not installed, or ${user} cannot run it)" ;;
+    esac
+    if [[ "$want_json" == "true" ]]; then
+        jq -n --argjson ok "$ok" --arg host "$host" --argjson port "$port" --arg user "$user" --arg cipi "$ver" \
+            --argjson auto "$stdin_ok" --arg reason "$reason" --arg message "$say" \
+            '{ok: $ok, host: $host, port: $port, user: $user, cipi: (if $cipi == "" then null else $cipi end),
+              auto_passphrase: $auto, reason: (if $reason == "" then null else $reason end),
+              message: (if $message == "" then null else $message end)}'
+    elif [[ "$ok" == true ]]; then
+        success "${user}@${host}:${port} accepts this server's sync key — Cipi v${ver}"
+        [[ "$stdin_ok" == true ]] || warn "Cipi v${ver} there is older than 5.18.0: --auto-passphrase needs it updated"
+    else
+        error "$say"
+    fi
+    [[ "$ok" == true ]]
+}
+
 _sync_pubkey() {
+    parse_args "$@"
     local keyfile="/home/cipi/.ssh/id_ed25519.pub"
+    # --raw: the key and nothing else — what a script, or the panel, hands to
+    # cipi sync trust --key= on the other server.
+    if [[ "${ARG_raw:-}" == "true" ]]; then
+        [[ -f "$keyfile" ]] || { error "Server sync key not found at ${keyfile}"; exit 1; }
+        head -n 1 "$keyfile"
+        return 0
+    fi
     if [[ ! -f "$keyfile" ]]; then
         error "Server sync key not found at ${keyfile}"
         echo -e "  ${DIM}Re-run setup or generate manually:${NC}"
@@ -1265,6 +1404,12 @@ _sync_trust() {
         exit 1
     fi
 
+    # One line, and nothing sshd reads as an option in front of the key.
+    if [[ "$key" == *$'\n'* || "$key" == *$'\r'* ]] || ! ssh-keygen -l -f /dev/stdin <<< "$key" &>/dev/null; then
+        error "Not a public key ssh-keygen can read"
+        exit 1
+    fi
+
     # Check for duplicates
     if grep -qF "$key" "$keyfile" 2>/dev/null; then
         warn "Key already trusted"
@@ -1283,4 +1428,30 @@ _sync_trust() {
     echo ""
 
     log_action "SYNC TRUST: key added"
+}
+
+# ── UNTRUST (take a server's sync key back out of authorized_keys) ─
+
+# cipi sync untrust --key="ssh-ed25519 AAAA… cipi@host"
+# The other half of `cipi sync trust`: the server whose key this is can no
+# longer sign in as cipi here. The line is matched by type and key — the
+# comment at the end may differ. Other keys of the file are not touched.
+_sync_untrust() {
+    parse_args "$@"
+    local keyfile="/home/cipi/.ssh/authorized_keys" key="${ARG_key:-}"
+    [[ -n "$key" && "$key" != "true" ]] || { error "Usage: cipi sync untrust --key=\"<the public key given to cipi sync trust>\""; exit 1; }
+    if ! grep -qE '^(ssh-(rsa|ed25519)|ecdsa-sha2-[^ ]+) [A-Za-z0-9+/=]+( |$)' <<< "$key"; then
+        error "Invalid key format. Must start with ssh-rsa, ssh-ed25519, or ecdsa-sha2-*"
+        exit 1
+    fi
+    local kt kb; read -r kt kb _ <<< "$key"
+    if [[ ! -f "$keyfile" ]] || ! awk -v t="$kt" -v b="$kb" '{ for (i = 1; i < NF; i++) if ($i == t && $(i + 1) == b) found = 1 } END { exit !found }' "$keyfile"; then
+        info "That key is not trusted here: nothing to remove"
+        return 0
+    fi
+    local tmp; tmp=$(mktemp "${keyfile}.XXXXXX") || { error "Could not write next to ${keyfile}"; exit 1; }
+    awk -v t="$kt" -v b="$kb" '{ drop = 0; for (i = 1; i < NF; i++) if ($i == t && $(i + 1) == b) drop = 1; if (!drop) print }' "$keyfile" > "$tmp"
+    chown cipi:cipi "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$keyfile" || { rm -f "$tmp"; error "Could not rewrite ${keyfile}"; exit 1; }
+    success "Key removed from cipi's authorized_keys"
+    log_action "SYNC UNTRUST: key removed"
 }

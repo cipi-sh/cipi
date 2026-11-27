@@ -53,7 +53,7 @@ About 15 minutes from a fresh server to a live app with HTTPS. **[Follow the 15-
 |                                   |                                                                                                    |
 | --------------------------------- | -------------------------------------------------------------------------------------------------- |
 | **Every app in its own box**      | Its own Linux user, PHP-FPM pool, database and Valkey. One hacked site can't read the others.      |
-| **Secure from the first boot**    | Key-only SSH, UFW, Fail2ban, optional CrowdSec and Cloudflare Zero Trust. PHP CVEs patched overnight. |
+| **Secure from the first boot**    | Key-only SSH, UFW, Fail2ban, optional CrowdSec and Zero Trust (Cloudflare Tunnel, Tailscale, NetBird). PHP CVEs patched overnight. |
 | **Deploys that don't break**      | Releases with a symlink swap, health checks, automatic rollback, deploy on `git push`.             |
 | **Settings live in your repo**    | One [`cipi.yml`](https://cipi.sh/cipi-yml) for workers, cron, domains, redirects and backups.      |
 | **The whole Laravel stack**       | PHP 8.3 to 8.6, Octane, Horizon, Reverb, Scout with Meilisearch, MariaDB or PostgreSQL, Node frontends. |

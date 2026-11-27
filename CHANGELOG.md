@@ -4,6 +4,49 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.18.0] — 2026-11-27
+
+Zero Trust gets its private side. Cloudflare Tunnel publishes the sites; **Tailscale** and **NetBird** are how the people who run the server reach it — SSH, the panel, the API and the sites on an address only the devices of the network can route to. `cipi zt tailscale …` and `cipi zt netbird …`, next to the Cloudflare commands, which do not change. The panel (cipi/api 1.48.0, cipi/gui 4.10.0) shows the mesh in the Zero Trust tab; like the rest of Zero Trust it reads, it does not change.
+
+### Added
+
+- **`cipi zt tailscale enable --auth-key=KEY`** and **`cipi zt netbird enable --setup-key=KEY`** — the server joins a mesh network. The client comes from its vendor's apt repository (`pkgs.tailscale.com` for this Ubuntu's codename, `pkgs.netbird.io`), the mesh interface (`tailscale0`, `wt0`) is let through UFW, and nothing is closed: 22, 80 and 443 stay as they were.
+  - The join key is handed to the client in a file only root reads (`--auth-key=file:…`, `--setup-key-file`), never on the client's command line. `--key-file=` reads it from a file of yours; with no key at a terminal, `enable` asks for it.
+  - `--hostname=`, `--direct` (the WireGuard port open in UFW — 41641/udp, 51820/udp — for direct connections; without it peers come through hole punching or a relay), `--accept-dns` and `--accept-routes`: **off unless asked**, so the network's DNS and routes do not change how a production server resolves and routes.
+  - Tailscale: `--tags=tag:cipi` (a tagged machine's node key does not expire), `--login-server=URL` (**Headscale**, or any other coordination server), `--ssh` (Tailscale SSH). NetBird: `--management-url=URL` (a **self-hosted NetBird**).
+  - **One mesh per server.** Both hand out addresses in 100.64.0.0/10 and Tailscale drops what comes from that range outside its own interface: a second one is refused, with the reason. Cloudflare Zero Trust and a mesh work side by side.
+  - **A client that was on the server before Cipi is adopted**: `enable` without a key, its settings untouched, and `disable` leaves it installed and connected. What is only given when joining (`--tags`, `--accept-dns`…) is said, not silently dropped. Tailscale's `--reauth` signs a machine in again (an expired node key, a tagged key in place of a personal one).
+- **`cipi zt tailscale|netbird lock ssh`** — port 22 closed to the world, open on the mesh. It refuses:
+  - unless **the command itself arrives over the mesh** (the way back to the session's address is the mesh interface): that it does is the proof that SSH works there. From the public address, or from a console, it says how to come in;
+  - while the mesh is not connected, sshd does not listen on its address, or UFW is not active (a lock that closes nothing is not recorded);
+  - (Tailscale) **while the node key can expire**: on that day the server leaves the tailnet, and with port 22 closed the provider's console is the only way in. Disable key expiry for the machine, or join with a tagged key. `--force` skips the session and the key checks.
+- **`cipi zt tailscale|netbird lock http`** — 80 and 443 closed to the world: every site, the panel and the API answer on the mesh address only (point their DNS records at it). For a staging or internal server. Refused while an app still renews its certificate over HTTP-01 (`--force` to accept that); the hostnames on a Cloudflare tunnel keep working.
+- **`unlock ssh|http`**, and **the locks of the two sides know each other**: `cipi zt ssh unlock`, `cipi zt unlock http` and `cipi zt disable` (Cloudflare's) leave closed what the mesh's lock holds, and the other way round — each says who still holds the port. `cipi firewall allow 22|80|443` is refused under a mesh lock as it is under Cloudflare's, with the command that reopens it; `cipi firewall status --json` gains `zero_trust.by` (`http`, `ssh`: who holds each).
+- **`cipi zt tailscale ssh enable|disable`** — Tailscale SSH: tailscaled answers port 22 of the tailnet address and signs people in by the tailnet's SSH policy, no keys on the server. Refused from a session that came over the tailnet (it may end with it) unless `--force`. **NetBird's own SSH server is never turned on**: it takes port 22 of the mesh address away from OpenSSH and signs people in its own way; SSH over NetBird is OpenSSH with the keys of `cipi ssh`, and `cipi zt netbird status` says when someone turned that server on elsewhere.
+- **`cipi zt tailscale|netbird status [--json]`** — connected or not and why, the address and name of the server on the network, the network, peers online, the node key's expiry in days, tags, locks, the command to come in, and warnings. **`cipi zt status`** shows the mesh under Cloudflare's lines, and **`cipi zt status --json` gains `mesh`** — what the panel reads.
+- **`cipi zt tailscale|netbird disable`** — what its locks closed is reopened first, then its firewall rules go, and last the server leaves the network and the client, its apt source and its key are removed. A session that came over the mesh ends at that last step: the removal ignores the hangup and runs to its end.
+- **The mesh in the monitor** — a `mesh` check (`monitor_mesh`, urgent): critical when the client is stopped or off the network (a node key that expired, a machine removed from the admin console) or the node key has expired; a warning when the key expires within `days` (14, `cipi monitor set mesh --days=`) or the coordination server cannot be reached. Off while no mesh is on. With port 22 closed it says what that means.
+- `cipi help zt` (also `tailscale`, `netbird`, `mesh`), completion.
+
+### Fixed
+
+- **UFW rules numbered below ten were never removed by `cipi zt unlock http`, `cipi zt disable` and the nightly refresh of Cloudflare's ranges.** `ufw status numbered` pads the number (`[ 1]`), so it was not the first field the code read: the Cloudflare-only rules UFW had numbered 1 to 9 stayed after the lock was gone. The number is now read from the line itself.
+
+### Changed
+
+- The notifications `zt_enable`, `zt_disable`, `zt_lock_http` and `zt_lock_ssh` are sent for the mesh too; their names in `cipi notification` say so. A channel that takes them takes both sides'.
+
+### Notes
+
+- No migration: nothing is installed or changed until `enable`. `setup.sh` and `cipi self-update` never call it.
+- **Who reaches what is the network's own policy**, not UFW's: the mesh interface is allowed as a whole, as Tailscale's own guide does (its client accepts its interface before UFW is asked). Write the tailnet's access rules, or NetBird's policies, so that the people who run the server reach tcp 22, 80 and 443 of it, and nobody else does.
+- A database or Valkey from a laptop over the mesh: an SSH tunnel (TablePlus and DBeaver call it "over SSH") — the ports stay on localhost. There is no `tcp add` for the mesh.
+- The API's sudoers are unchanged: `cipi zt status` only. Joining a network and closing ports stay at the server's shell.
+- **Tailscale and NetBird themselves are not on the machine the release was prepared on.** `tests/verify-5.18.0.sh` runs every command against stubs of `tailscale`, `netbird`, `ufw`, `ip`, `systemctl` and `apt-get` that keep a state and answer as the vendors' documentation says (`tailscale status --json`, NetBird's text `netbird status`); the flags of `tailscale up` and `netbird up` are the documented ones. On a first real server: `cipi zt tailscale enable --auth-key=…`, then `cipi zt tailscale status`, before any lock.
+- The panel's side: cipi/api 1.48.0 and cipi/gui 4.10.0.
+
+---
+
 ## [5.17.0] — 2026-11-26
 
 Four reports, fixed: a deploy that ran its migrations and `optimize` twice, a logrotate warning in `cipi pending` that its own hint could not clear, deploy notifications with "Branch: ?", and an Octane app told to `upgrade` towards a PHP it could not reach. And what was asked for next to them: a page cache in nginx per app (`cipi cache`), an Octane app's PHP chosen by its number, the time zone and the server's name in notifications, and — in the panel (cipi/api 1.47.0, cipi/gui 4.9.0) — Octane, the page cache and Valkey per app.

@@ -900,8 +900,8 @@ show_help_topic() {
             echo ""
             ;;
 
-        zt|zerotrust|zero-trust|cloudflare|tunnel)
-            _help_topic_header "Cloudflare Zero Trust"
+        tailscale|netbird|mesh|zt|zerotrust|zero-trust|cloudflare|tunnel)
+            _help_topic_header "Zero Trust — Cloudflare, Tailscale, NetBird"
             echo ""
             _help_cmd "cipi zt token set --token= --account=" "Cloudflare API token (not DNS-01)"
             _help_cmd "cipi zt token show"            "Whether a token is saved (not the secret)"
@@ -939,6 +939,19 @@ show_help_topic() {
             _help_cmd "cipi zt replica leave|list"    "Stop it here / the servers running it"
             _help_cmd "cipi zt purge <app> [--everything]" "Purge Cloudflare's cache"
             _help_cmd "cipi zt purge <app> --on-deploy=on" "Purge after every successful deploy"
+            _help_cmd "cipi zt tailscale enable --auth-key=" "Join a tailnet (--login-server=: Headscale)"
+            _help_cmd "cipi zt tailscale status [--json]" "Address, peers, node key, locks"
+            _help_cmd "cipi zt tailscale ssh enable|disable" "Tailscale SSH: sign-in by the tailnet policy"
+            _help_cmd "cipi zt tailscale lock ssh [--yes]" "SSH from the tailnet only (run it over it)"
+            _help_cmd "cipi zt tailscale lock http [--yes]" "80/443 from the tailnet only"
+            _help_cmd "cipi zt tailscale unlock ssh|http" "Reopen to the world"
+            _help_cmd "cipi zt tailscale disable" "Leave the tailnet, reopen what it closed"
+            _help_cmd "cipi zt netbird enable --setup-key=" "Join NetBird (--management-url=: self-hosted)"
+            _help_cmd "cipi zt netbird status [--json]" "Address, peers, locks"
+            _help_cmd "cipi zt netbird lock ssh [--yes]" "SSH from NetBird only (run it over it)"
+            _help_cmd "cipi zt netbird lock http [--yes]" "80/443 from NetBird only"
+            _help_cmd "cipi zt netbird unlock ssh|http" "Reopen to the world"
+            _help_cmd "cipi zt netbird disable"  "Leave NetBird, reopen what it closed"
             echo ""
             _help_note "Off by default. enable does not run on self-update."
             _help_note "Does not close 22/80/443 until lock. lock ssh refuses unless cloudflared is up"
@@ -948,6 +961,14 @@ show_help_topic() {
             _help_note "not the Cloudflare edge. DNS-01 stays cipi ssl dns; this token is separate."
             _help_note "Let's Encrypt HTTP-01 cannot renew after lock http — DNS-01 or origin-cert."
             _help_note "Reverb/WebSockets go through the tunnel HTTP upgrade. Deployer is localhost SSH."
+            echo ""
+            _help_note "Cloudflare publishes the sites; a mesh (Tailscale or NetBird) is how the people who run"
+            _help_note "the server reach it: SSH, the panel, the API and the sites on a private address."
+            _help_note "One mesh per server (both use 100.64.0.0/10); either one next to Cloudflare."
+            _help_note "enable closes nothing. lock ssh refuses unless the command itself came over the mesh,"
+            _help_note "and (Tailscale) while the node key can expire — join with a tagged key. Who reaches"
+            _help_note "what is the network's own policy (tailnet ACL, NetBird policies): allow tcp 22, 80, 443."
+            _help_note "A database from a laptop: an SSH tunnel over the mesh (TablePlus/DBeaver: over SSH)."
             echo ""
             ;;
 

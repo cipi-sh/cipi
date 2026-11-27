@@ -35,10 +35,15 @@ Zero Trust gets its private side. Cloudflare Tunnel publishes the sites; **Tails
   - **`zt-manage` is as strong as `ssh-manage`**: whoever holds it can put the server on a network of their own. A token made with a list of abilities has it only once it is named there; a `--full-access` token has it, as it has every ability.
 - **The mesh in the monitor** — a `mesh` check (`monitor_mesh`, urgent): critical when the client is stopped or off the network (a node key that expired, a machine removed from the admin console) or the node key has expired; a warning when the key expires within `days` (14, `cipi monitor set mesh --days=`) or the coordination server cannot be reached. Off while no mesh is on. With port 22 closed it says what that means.
 - `cipi help zt` (also `tailscale`, `netbird`, `mesh`), completion.
+- **A Coming soon page for an app with no repository.** `cipi app create --custom` without Git — the files come later, over SFTP — now answers at its domain with a page of its own until they do: *Coming soon*, the domain, a line of text and a small drawing that blinks. One file with **nothing fetched from anywhere**: no web font (the visitor's system font), no image (inline SVG, the favicon included), no script or stylesheet of another site. In English. Light and dark by the visitor's theme, still for who asked for less motion, not indexed, and with no name on it but the site's — it is what the visitors of whoever runs the server see.
+  - It is `coming-soon.html`, **the last choice of the vhost's `index`** (`index index.html index.php coming-soon.html`): nginx serves it only while the folder has neither an `index.html` nor an `index.php`. The site that is uploaded takes its place by being there — WordPress's `index.php` included, which an `index.html` placeholder kept hidden until someone deleted it. Nothing to remove; the file can be deleted, or kept and edited.
+  - The summary of `cipi app create` says it is there and how it leaves.
 
 ### Fixed
 
 - **UFW rules numbered below ten were never removed by `cipi zt unlock http`, `cipi zt disable` and the nightly refresh of Cloudflare's ranges.** `ufw status numbered` pads the number (`[ 1]`), so it was not the first field the code read: the Cloudflare-only rules UFW had numbered 1 to 9 stayed after the lock was gone. The number is now read from the line itself.
+- **A custom app with a document root other than `htdocs` answered 404 until its first upload.** The placeholder was written to `~/htdocs/index.html` whatever `--docroot` said, and the folder nginx serves (`~/htdocs/www`, `~/htdocs/public`) was not even created. The page is now written in the document root, which is created with it.
+- **`cipi app create --docroot=` takes a folder name and nothing else.** The value became nginx's `root` as it was typed: `--docroot=/www/` gave `htdocs//www/`, and `..` was not refused. It is now cleaned (`/www/` is `www`; `/` and `.` are `htdocs` itself) and checked — letters, digits, dots, dashes and underscores, folders separated by `/`, no `..` and no hidden folder — before anything is created. What the panel's API already accepted is accepted.
 
 ### Changed
 
@@ -54,6 +59,7 @@ Zero Trust gets its private side. Cloudflare Tunnel publishes the sites; **Tails
 - The panel's side: cipi/api 1.48.0 and cipi/gui 4.10.0.
 
 ---
+- **Apps created before**: nothing changes. An SFTP-only app keeps the `index.html` it was given; its vhost gets the new `index` line the next time it is written, which changes nothing where there is no `coming-soon.html`.
 
 ## [5.17.0] — 2026-11-26
 

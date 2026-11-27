@@ -649,6 +649,70 @@ grep -q '_help_cmd "cipi zt tailscale enable --auth-key="' "${ROOT}/cipi" && gre
 grep -q 'origin-cert tailscale netbird"' "${LIB}/completion.sh" && grep -q 'tailscale|netbird) sub="enable disable status ssh lock unlock"' "${LIB}/completion.sh" && pass "completion: the two providers and their commands" || fail "completion"
 grep -q 'zt_lock_ssh|Security|SSH port closed (Cloudflare Tunnel or the mesh)' "${LIB}/notifications.sh" && pass "the zt_* notifications are both sides'" || fail "labels"
 
+# ── a custom app with no repository: the Coming soon page ─────
+# In the folder nginx serves (it was written to htdocs/ whatever --docroot, so
+# an app on htdocs/www answered 404), one file with nothing fetched from
+# anywhere, under a name that gives way to the site once it is uploaded.
+A="${LIB}/app.sh"
+bash -n "$A" && pass "app.sh parses" || fail "app.sh parse"
+CS() { CIPI_LIB="$LIB" bash -c 'source "$1" 2>/dev/null; shift; "$@"' _ "$A" "$@"; }
+page=$(CS _app_coming_soon_page shop.example.com)
+[[ "$(head -1 <<< "$page")" == '<!doctype html>' && "$(tail -1 <<< "$page")" == '</html>' ]] && pass "coming soon: a whole HTML document" || fail "coming soon: not a document"
+grep -q '<title>shop.example.com — Coming soon</title>' <<< "$page" && grep -q '<strong id="host">shop.example.com</strong>' <<< "$page" && ! grep -q '__DOMAIN__' <<< "$page" \
+    && pass "coming soon: the domain in the title and in the page, no token left" || fail "coming soon: domain"
+grep -q '<h1 id="title">Coming soon</h1>' <<< "$page" && grep -q 'name="robots" content="noindex, nofollow"' <<< "$page" && grep -q 'name="viewport"' <<< "$page" \
+    && pass "coming soon: says so, is not indexed, fits a phone" || fail "coming soon: basics"
+# Nothing leaves the page: no stylesheet, script, image, font or frame of another origin.
+ext=$(grep -oE '(https?:)?//[A-Za-z0-9.-]+' <<< "$page" | sort -u | tr '\n' ' ')
+[[ "$ext" == "http://www.w3.org " ]] && pass "coming soon: the only URL in it is the SVG namespace of its inline favicon (a name, never fetched)" || fail "coming soon: URLs in the page: ${ext}"
+! grep -qiE '<link[^>]+rel="?stylesheet|@import|@font-face|url\(|<img|<iframe|<script[^>]+src=|<source|<video|<audio|<object|<embed|fetch\(|XMLHttpRequest|import\(' <<< "$page" \
+    && pass "coming soon: no stylesheet, font, image, frame or script from outside" || fail "coming soon: an external resource"
+[[ "$(grep -c '<link ' <<< "$page")" == 1 ]] && grep -q '<link rel="icon" href="data:image/svg+xml,' <<< "$page" && pass "coming soon: its one <link> is the favicon, inline" || fail "coming soon: link"
+grep -q 'font: 400 1rem/1.5 ui-sans-serif, system-ui' <<< "$page" && pass "coming soon: the visitor's system font" || fail "coming soon: font"
+grep -q 'prefers-color-scheme: dark' <<< "$page" && grep -q 'prefers-reduced-motion: reduce' <<< "$page" && pass "coming soon: light and dark, still for who asks for less motion" || fail "coming soon: media"
+! grep -qi 'cipi' <<< "$page" && pass "coming soon: it carries no name but the site's" || fail "coming soon: names Cipi"
+grep -q '<html lang="en">' <<< "$page" && ! grep -qE 'navigator\.language|In arrivo|documentElement\.lang' <<< "$page" && pass "coming soon: in English, whatever the visitor's language" || fail "coming soon: it changes language"
+[[ $(printf '%s' "$page" | wc -c) -lt 8192 ]] && pass "coming soon: under 8 KB" || fail "coming soon: $(printf '%s' "$page" | wc -c) bytes"
+if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$page" | python3 -c '
+import sys
+from html.parser import HTMLParser
+VOID = {"meta", "link", "br", "hr", "img", "input", "circle", "ellipse", "path", "rect"}
+class P(HTMLParser):
+    def __init__(self): super().__init__(); self.stack = []; self.bad = []
+    def handle_starttag(self, tag, attrs):
+        if tag not in VOID: self.stack.append(tag)
+    def handle_startendtag(self, tag, attrs): pass
+    def handle_endtag(self, tag):
+        if not self.stack or self.stack.pop() != tag: self.bad.append(tag)
+p = P(); p.feed(sys.stdin.read())
+sys.exit(1 if p.bad or p.stack else 0)' && pass "coming soon: every tag is closed" || fail "coming soon: unbalanced tags"
+fi
+[[ "$(CS _app_coming_soon_page '*.tenants.example.com' | grep -c 'id="host">\*.tenants.example.com<')" == 1 ]] && pass "coming soon: a wildcard domain is written as it is (the page then shows the host it was asked for)" || fail "coming soon: wildcard"
+# The docroot: a folder inside htdocs, nothing else.
+for pair in '/|' '.|' '|' 'www|www' '/www/|www' 'web//public/|web/public' 'public_html|public_html' 'a.b/c-d|a.b/c-d'; do
+    in="${pair%%|*}"; want="${pair#*|}"
+    got=$(CS _app_docroot_clean "$in") && [[ "$got" == "$want" ]] && pass "docroot '${in}' → '${want}'" || fail "docroot '${in}': '${got}'"
+done
+for bad in '..' '../x' 'www/../..' '.git' 'a b' 'a;b' 'x/.ssh' '$(id)'; do
+    CS _app_docroot_clean "$bad" >/dev/null && fail "docroot '${bad}' accepted" || pass "docroot '${bad}' refused"
+done
+grep -q 'docroot=$(_app_docroot_clean "$docroot") || {' "$A" && pass "app create checks the docroot before anything is created" || fail "create: docroot not checked"
+H="${TMP}/home/testwp"; mkdir -p "$H"
+CS _app_coming_soon_install "$H" "www" "testwp.example.dev" && [[ -f "${H}/htdocs/www/coming-soon.html" && ! -e "${H}/htdocs/index.html" && ! -e "${H}/htdocs/coming-soon.html" ]] \
+    && [[ "$(stat -c %a "${H}/htdocs/www/coming-soon.html")" == 644 ]] && grep -q 'testwp.example.dev' "${H}/htdocs/www/coming-soon.html" \
+    && pass "docroot www: the page is in htdocs/www, where nginx serves from — and nowhere else" || fail "install, docroot www: $(find "$H" -type f | tr '\n' ' ')"
+H2="${TMP}/home/plain"; mkdir -p "$H2"
+CS _app_coming_soon_install "$H2" "" "plain.example.dev" && [[ -f "${H2}/htdocs/coming-soon.html" ]] && [[ "$(find "$H2" -type f | wc -l)" == 1 ]] && pass "docroot /: the page is in htdocs" || fail "install, docroot /"
+CS _app_coming_soon_install "$H2" "web/public" "plain.example.dev" && [[ -f "${H2}/htdocs/web/public/coming-soon.html" ]] && pass "a docroot two folders deep is created whole" || fail "install, nested docroot"
+grep -q '_app_coming_soon_install "$home" "$docroot" "$domain"' "$A" && ! grep -q 'htdocs/index.html' "$A" && ! grep -q 'is currently being deployed' "$A" \
+    && pass "app create installs it for an app with no repository; the page that was written to htdocs/ is gone" || fail "create: where the page goes"
+grep -q 'index index.html index.php ${APP_COMING_SOON_FILE};' "$A" && [[ "$(CIPI_LIB="$LIB" bash -c 'source "$1" 2>/dev/null; echo "$APP_COMING_SOON_FILE"' _ "$A")" == "coming-soon.html" ]] \
+    && pass "nginx: the page is the last choice of the index — an index.html or index.php uploaded takes its place" || fail "nginx: index"
+[[ "$(grep -c 'index index.html index.php' "$A")" == 1 ]] && pass "only the custom vhost changed" || fail "another vhost has that index line"
+CIPI_LIB="$LIB" bash -c 'source "$1" 2>/dev/null; source "$1" 2>/dev/null; echo ok' _ "$A" | grep -q ok && pass "app.sh loaded twice: the page's name is not declared twice" || fail "app.sh loaded twice"
+grep -q 'Coming soon page' "${ROOT}/CHANGELOG.md" && pass "CHANGELOG says it" || fail "CHANGELOG: coming soon"
+
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="
 [[ $FAIL -eq 0 ]]

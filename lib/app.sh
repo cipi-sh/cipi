@@ -7,6 +7,146 @@
 # timezone`); loaded on its own, this file still has a clock.
 declare -f notify_now >/dev/null 2>&1 || notify_now() { date "$@" '+%Y-%m-%d %H:%M:%S %Z'; }
 
+# ── COMING SOON ───────────────────────────────────────────
+
+# The page a custom app with no repository answers with until its own files
+# are there. One file, nothing fetched from anywhere: no web font, no image,
+# no script or stylesheet of another site — the drawing is inline SVG, the
+# type is the visitor's system font. In English. It follows the visitor's
+# light or dark theme, and stays still for who asked for less motion. Not
+# indexed.
+#
+# It carries no name but the site's own: it is what the visitors of whoever
+# runs the server see.
+_app_coming_soon_page() {   # <domain>
+    local page
+    page=$(cat <<'HTML'
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="light dark">
+<title>__DOMAIN__ — Coming soon</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='5' width='26' height='22' rx='5' fill='%23fff' stroke='%231c1b1a' stroke-width='2.5'/%3E%3Ccircle cx='12' cy='15' r='2' fill='%231c1b1a'/%3E%3Ccircle cx='20' cy='15' r='2' fill='%231c1b1a'/%3E%3Cpath d='M12 20q4 3.5 8 0' fill='none' stroke='%231c1b1a' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #faf9f7; --ink: #1c1b1a; --soft: #6b6762; --line: #e3dfd9;
+    --face: #ffffff; --accent: #5b5bd6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121214; --ink: #f1f0ed; --soft: #9c988f; --line: #2a2a30;
+      --face: #1a1a1e; --accent: #9b9bf5;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    padding: 2rem 1.5rem;
+    background: var(--bg); color: var(--ink);
+    font: 400 1rem/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  }
+  main { width: 100%; max-width: 34rem; text-align: center; }
+  .pal { display: block; width: 9.5rem; height: auto; margin: 0 auto 1.75rem; overflow: visible; }
+  .pal * { transform-box: fill-box; transform-origin: center; }
+  .bob { animation: bob 4.5s ease-in-out infinite; }
+  .shade { fill: var(--ink); opacity: .14; animation: shade 4.5s ease-in-out infinite; }
+  .frame { fill: var(--face); stroke: var(--ink); stroke-width: 3; }
+  .bar { fill: none; stroke: var(--ink); stroke-width: 3; }
+  .dot { fill: var(--line); }
+  .dot.on { fill: var(--accent); }
+  .eye { fill: var(--ink); animation: blink 5.5s infinite; }
+  .smile { fill: none; stroke: var(--ink); stroke-width: 3; stroke-linecap: round; }
+  .cheek { fill: var(--accent); opacity: .22; }
+  .spark { fill: var(--accent); animation: twinkle 2.8s ease-in-out infinite; }
+  .spark.b { animation-delay: 1.4s; }
+  h1 { font-size: clamp(2.1rem, 7vw, 3.25rem); line-height: 1.08; font-weight: 700; letter-spacing: -.035em; }
+  .lead { margin-top: .9rem; font-size: 1.0625rem; color: var(--soft); }
+  .lead strong { color: var(--ink); font-weight: 600; overflow-wrap: anywhere; }
+  .note { margin-top: 1.6rem; padding-top: 1.1rem; border-top: 1px solid var(--line); font-size: .875rem; color: var(--soft); }
+  @keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+  @keyframes shade { 0%, 100% { transform: scaleX(1); opacity: .14; } 50% { transform: scaleX(.84); opacity: .08; } }
+  @keyframes blink { 0%, 93%, 100% { transform: scaleY(1); } 96% { transform: scaleY(.08); } }
+  @keyframes twinkle { 0%, 100% { opacity: .2; transform: scale(.7) rotate(0deg); } 50% { opacity: 1; transform: scale(1.05) rotate(20deg); } }
+  @media (prefers-reduced-motion: reduce) { .bob, .shade, .eye, .spark { animation: none; } }
+</style>
+</head>
+<body>
+<main>
+  <svg class="pal" viewBox="0 0 160 150" role="img" aria-hidden="true" focusable="false">
+    <ellipse class="shade" cx="80" cy="139" rx="38" ry="5"/>
+    <g class="bob">
+      <path class="spark" d="M139 8l2.4 6.6L148 17l-6.6 2.4L139 26l-2.4-6.6L130 17l6.6-2.4z"/>
+      <path class="spark b" d="M17 36l1.6 4.4L23 42l-4.4 1.6L17 48l-1.6-4.4L11 42l4.4-1.6z"/>
+      <rect class="frame" x="24" y="22" width="112" height="92" rx="16"/>
+      <path class="bar" d="M24 46h112"/>
+      <circle class="dot on" cx="40" cy="34" r="3.5"/>
+      <circle class="dot" cx="52" cy="34" r="3.5"/>
+      <circle class="dot" cx="64" cy="34" r="3.5"/>
+      <circle class="cheek" cx="52" cy="88" r="6.5"/>
+      <circle class="cheek" cx="108" cy="88" r="6.5"/>
+      <ellipse class="eye" cx="64" cy="74" rx="4.5" ry="5.5"/>
+      <ellipse class="eye" cx="96" cy="74" rx="4.5" ry="5.5"/>
+      <path class="smile" d="M68 90q12 11 24 0"/>
+    </g>
+  </svg>
+  <h1 id="title">Coming soon</h1>
+  <p class="lead"><strong id="host">__DOMAIN__</strong> <span id="lead">is getting ready.</span></p>
+  <p class="note" id="note">Good things take a little setup. Check back in a while.</p>
+</main>
+<script>
+(function () {
+  // The name it was asked for: an alias shows its own, a wildcard its host.
+  var host = location.hostname;
+  if (host) {
+    document.getElementById('host').textContent = host;
+    document.title = host + ' \u2014 Coming soon';
+  }
+})();
+</script>
+</body>
+</html>
+HTML
+)
+    printf '%s\n' "${page//__DOMAIN__/${1:-}}"
+}
+
+# The name the page is saved under, in the document root. It is the last
+# entry of the vhost's `index`: nginx serves it only while the folder has
+# neither an index.html nor an index.php, so the site that is uploaded takes
+# its place by being there — WordPress's index.php included, which an
+# index.html placeholder would have kept hidden until someone deleted it.
+[[ -z "${APP_COMING_SOON_FILE:-}" ]] && readonly APP_COMING_SOON_FILE="coming-soon.html"
+
+# Puts the page where nginx serves the app from: htdocs, or the folder in it
+# that is the document root.
+_app_coming_soon_install() {   # <home> <docroot> <domain>
+    local webroot="${1}/htdocs${2:+/${2}}"
+    mkdir -p "$webroot" || return 1
+    _app_coming_soon_page "$3" > "${webroot}/${APP_COMING_SOON_FILE}" || return 1
+    chmod 644 "${webroot}/${APP_COMING_SOON_FILE}"
+}
+
+# A custom app's document root, inside ~/htdocs: empty for htdocs itself, or
+# a folder in it ("www", "public", "web/public"). Printed without the slashes
+# around it; 1 when it is not a folder name — it becomes a directory and an
+# nginx root, so "..", a hidden folder or anything but letters, digits, dots,
+# dashes and underscores is refused.
+_app_docroot_clean() {   # <docroot as given>
+    local d="${1:-}"
+    while [[ "$d" == *//* ]]; do d="${d//\/\//\/}"; done
+    d="${d#/}"; d="${d%/}"
+    [[ "$d" == "." ]] && d=""
+    if [[ -n "$d" && ! "$d" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$ ]]; then
+        return 1
+    fi
+    printf '%s' "$d"
+}
+
 # ── CREATE ────────────────────────────────────────────────────
 
 app_create() {
@@ -173,7 +313,10 @@ app_create() {
             echo -e "  Document root, inside ${CYAN}~/htdocs${NC} — ${CYAN}/${NC} is htdocs itself (default); or a folder in it: ${CYAN}www${NC}, ${CYAN}dist${NC}, ${CYAN}public${NC}"
             read_input "Docroot" "/" docroot
         fi
-        [[ "$docroot" == "/" || "$docroot" == "." ]] && docroot=""
+        # It becomes a directory and nginx's root: a folder name, nothing else.
+        docroot=$(_app_docroot_clean "$docroot") || {
+            error "Invalid docroot. A folder inside htdocs: www, public, dist, web/public — or / for htdocs itself"; exit 1
+        }
     fi
 
     # Validate
@@ -253,75 +396,12 @@ app_create() {
     if [[ "$app_type" == "custom" ]]; then
         mkdir -p "${home}"/{shared,logs,.ssh,.deployer}
         if [[ -z "$repository" ]]; then
-            mkdir -p "${home}/htdocs"
-            cat > "${home}/htdocs/index.html" <<HTML
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="robots" content="noindex, nofollow">
-<title>${domain}</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-    background: #ffffff;
-    min-height: 100vh;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    color: #1a1a1a;
-  }
-  .container { text-align: center; animation: fadeIn 1s ease-in; }
-  .emoji-wrap {
-    font-size: 2.5rem;
-    line-height: 1;
-    margin-bottom: 1rem;
-  }
-  .host-text {
-    font-size: 1rem;
-    font-weight: 300;
-    letter-spacing: 4px;
-    color: #666;
-    margin-top: -0.25rem;
-  }
-  .sub-text {
-    font-size: 0.8125rem;
-    font-weight: 400;
-    color: #888;
-    margin-top: 0.65rem;
-    letter-spacing: 0.02em;
-  }
-  .status-text {
-    font-size: 0.75rem;
-    font-weight: 400;
-    color: #999;
-    margin-top: 0.45rem;
-    word-break: break-all;
-  }
-  @media (max-width: 600px) {
-    .emoji-wrap { font-size: 2rem; }
-    .host-text { font-size: 0.75rem; letter-spacing: 3px; }
-  }
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="emoji-wrap" aria-hidden="true">🚀</div>
-  <div class="host-text" id="host-label">${domain}</div>
-  <div class="sub-text">is currently being deployed.</div>
-  <div class="status-text">Please check back soon.</div>
-</div>
-<script>
-  var h = window.location.hostname;
-  document.getElementById('host-label').textContent = h;
-  document.title = h + ' · is currently being deployed.';
-</script>
-</body>
-</html>
-HTML
-            chown "${app_user}:${app_user}" "${home}/htdocs/index.html"
+            # No repository: the files come over SFTP, later. Until then the
+            # domain answers with a Coming soon page — in the folder nginx
+            # serves (it used to be written to htdocs/ whatever the docroot,
+            # so an app with --docroot=www answered 404), and under a name of
+            # its own, so the site that is uploaded replaces it by being there.
+            _app_coming_soon_install "$home" "$docroot" "$domain"
         fi
     elif [[ "$app_type" == "laravel" ]]; then
         mkdir -p "${home}"/{shared/storage/{app/public,framework/{cache/data,sessions,views},logs},logs,.ssh,.deployer}
@@ -736,6 +816,8 @@ SUDO
             echo -e "        cipi ssl install ${app_user}"
         else
             echo -e "  ${BOLD}Deploy${NC}     ${DIM}No Git repository — upload via SFTP to ${home}/htdocs${NC}"
+            echo -e "  ${BOLD}Page${NC}       ${DIM}Until then ${domain} shows a Coming soon page (${APP_COMING_SOON_FILE} in the docroot):${NC}"
+            echo -e "             ${DIM}your own index.php or index.html takes its place as soon as it is there${NC}"
             echo ""
             echo -e "  ${BOLD}Next:${NC} Upload files to ${CYAN}~/htdocs${NC} (SFTP as ${app_user})"
             echo -e "        cipi ssl install ${app_user}"
@@ -3192,7 +3274,7 @@ ${www_redirect_block}server {
     listen [::]:80;
     server_name ${names};
     root ${root_path};
-    index index.html index.php;
+    index index.html index.php ${APP_COMING_SOON_FILE};
     access_log /var/log/cipi-apps/${app}/nginx-access.log;
     error_log /var/log/cipi-apps/${app}/nginx-error.log;
     add_header X-Frame-Options "SAMEORIGIN" always;

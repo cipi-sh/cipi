@@ -11,6 +11,9 @@ set('git_ssh_command', 'ssh -i __CIPI_DEPLOY_PATH__/.ssh/id_ed25519 -o StrictHos
 set('bin/php', '/usr/bin/php__CIPI_PHP_VERSION__');
 set('bin/composer', '/usr/bin/php__CIPI_PHP_VERSION__ /usr/local/bin/composer');
 set('writable_mode', 'chmod');
+// Seconds a command of the deploy may run (cipi app deploy-config --step-timeout);
+// the frontend build has its own, cipi_build_timeout, below.
+set('default_timeout', __CIPI_STEP_TIMEOUT__);
 
 add('shared_files', __CIPI_SHARED_FILES__);
 add('shared_dirs', ['storage']);
@@ -48,10 +51,11 @@ task('cipi:chmod_storage_logs_dir', function () {
 });
 
 // cipi:build-timeout — Deployer stops a command after default_timeout (300
-// seconds), and the frontend build is the one step of a deploy that can take
-// longer than that: what runs through cipi_build_run() gets cipi_build_timeout
-// seconds. Every other step keeps the default.
-set('cipi_build_timeout', 1800);
+// seconds unless the app says otherwise, above), and the frontend build is the
+// one step of a deploy that can take longer than that: what runs through
+// cipi_build_run() gets cipi_build_timeout seconds — 1800, or what cipi app
+// deploy-config --build-timeout says. Every other step keeps the default.
+set('cipi_build_timeout', __CIPI_BUILD_TIMEOUT__);
 if (!function_exists(__NAMESPACE__ . '\\cipi_build_run')) {
     function cipi_build_run(string $command): string
     {

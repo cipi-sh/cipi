@@ -724,7 +724,9 @@ DPL="${LIB}/deployer"
 for f in "${LIB}/common.sh" "${LIB}/sync.sh" "${LIB}/migrations/5.18.0.sh"; do
     bash -n "$f" && pass "$(basename "$f") parses" || fail "$(basename "$f") parse"
 done
-bt_block() { sed -n '/^\/\/ cipi:build-timeout /,/^\/\/ cipi:build-timeout end$/p' "$1"; }
+bt_block() {   # <recipe> [seconds]: the block, with the number an app is given (1800 unless it says otherwise)
+    sed -n '/^\/\/ cipi:build-timeout /,/^\/\/ cipi:build-timeout end$/p' "$1" | sed "s|__CIPI_BUILD_TIMEOUT__|${2:-1800}|g"
+}
 bt_helper() { sed -n "/^set('cipi_build_timeout'/,/^}\$/p" "$1"; }
 ok=1
 for t in laravel laravel-octane node; do
@@ -733,7 +735,9 @@ for t in laravel laravel-octane node; do
 done
 [[ $ok == 1 ]] && pass "the three release recipes have the block, with one and the same cipi_build_run" || true
 [[ "$(bt_block "${DPL}/laravel.php")" == "$(bt_block "${DPL}/laravel-octane.php")" ]] && pass "Laravel and Octane: the same block" || fail "the Octane block differs"
-grep -q "^set('cipi_build_timeout', 1800);" "${DPL}/laravel.php" && pass "the build gets 30 minutes" || fail "cipi_build_timeout"
+grep -q "^set('cipi_build_timeout', __CIPI_BUILD_TIMEOUT__);" "${DPL}/laravel.php" && grep -q "^set('default_timeout', __CIPI_STEP_TIMEOUT__);" "${DPL}/laravel.php" \
+    && [[ "$(CIPI_LIB="$LIB" bash -c 'source "$CIPI_LIB/common.sh" 2>/dev/null; deploy_timeout_bounds build; deploy_timeout_bounds step')" == $'1800 60 3600\n300 60 1800' ]] \
+    && pass "the build gets 30 minutes and every other command 5, unless the app says otherwise (60-3600, 60-1800 seconds)" || fail "the two clocks and their bounds"
 ! grep -hE "^[[:space:]]+run\(.*(node-build\.sh|npm (ci|install)|pnpm install|yarn install|bun install)" "${DPL}/laravel.php" "${DPL}/laravel-octane.php" "${DPL}/node.php" | grep -q . \
     && [[ "$(grep -c '^[[:space:]]*cipi_build_run(' "${DPL}/node.php")" == 6 && "$(grep -c '^[[:space:]]*cipi_build_run(' "${DPL}/laravel.php")" == 1 ]] \
     && pass "no install and no build is left on Deployer's 300 seconds (Laravel: node_build; Node: the five installs and the build)" || fail "a build command still runs through run()"
@@ -750,10 +754,12 @@ bt_recipe() {   # <app> <template>: deploy.php as Cipi writes it today
         -e "s|__CIPI_HOOK_HORIZON_TERMINATE__|before('deploy:symlink', 'horizon:terminate');|g" \
         -e "s|__CIPI_HOOK_QUEUE_RESTART__|after('deploy:symlink', 'artisan:queue:restart');|g" \
         -e "s|__CIPI_HOOK_EXTRA_ARTISAN__|// no extra artisan (deploy-config)|g" -e "/__CIPI_EXTRA_ARTISAN_TASK__/d" \
-        -e "s|__CIPI_NODE_VERSION__|22|g" -e "s|__CIPI_NODE_MODE__|spa|g" -e "s|__CIPI_NODE_OUTPUT__|dist|g" "${DPL}/$2.php"
+        -e "s|__CIPI_NODE_VERSION__|22|g" -e "s|__CIPI_NODE_MODE__|spa|g" -e "s|__CIPI_NODE_OUTPUT__|dist|g" \
+        -e "s|__CIPI_BUILD_TIMEOUT__|1800|g" -e "s|__CIPI_STEP_TIMEOUT__|300|g" "${DPL}/$2.php"
 }
 bt_before() {   # <app> <template>: the same recipe as it was written before 5.18.0
-    bt_recipe "$1" "$2" | sed -e '/^\/\/ cipi:build-timeout end$/d' -e '/^\/\/ cipi:build-timeout /,/^}$/d' -e 's/cipi_build_run(/run(/' | cat -s
+    bt_recipe "$1" "$2" | sed -e '/^\/\/ cipi:build-timeout end$/d' -e '/^\/\/ cipi:build-timeout /,/^}$/d' -e 's/cipi_build_run(/run(/' \
+        -e '/^\/\/ Seconds a command of the deploy may run/,/^set(.default_timeout., /d' | cat -s
 }
 BT="${TMP}/bt"; mkdir -p "$BT/cfg"
 for a in shop blog front static hand twice early closed fresh handnode; do mkdir -p "$BT/home/$a/.deployer"; done
@@ -907,7 +913,7 @@ DEP=""; for c in /usr/local/bin/dep "${CIPI_TEST_DEP:-}"; do [[ -n "$c" && -f "$
 if [[ -n "$DEP" ]] && command -v php >/dev/null 2>&1 && php "$DEP" --version >/dev/null 2>&1; then
     {
         printf '<?php\nnamespace Deployer;\nlocalhost();\nset("default_timeout", 2);\n'
-        bt_helper "${DPL}/laravel.php" | sed "s/^set('cipi_build_timeout', 1800);/set('cipi_build_timeout', 30);/"
+        bt_helper "${DPL}/laravel.php" | sed "s/__CIPI_BUILD_TIMEOUT__/30/"
         printf '%s\n' "task('probe:build', function () { cipi_build_run('sleep 4'); writeln('after=' . get('default_timeout')); });" \
                       "task('probe:plain', function () { run('sleep 4'); writeln('not stopped'); });"
     } > "$BT/probe.php"
@@ -1005,6 +1011,87 @@ grep -q 'handnode: deploy.php was edited by hand' <<< "$out" && grep -q 'cipi ap
 out2=$(mig518); grep -q 'deploy.php: nothing to change' <<< "$out2" && ! grep -q 'app(s) give' <<< "$out2" && grep -q 'hand: deploy.php was edited by hand' <<< "$out2" \
     && pass "a second run changes nothing (and names the ones edited by hand again)" || fail "migration twice: ${out2}"
 grep -q 'exceeded the timeout' "${ROOT}/CHANGELOG.md" && grep -q 'cipi_build_timeout\|30 minutes' "${ROOT}/CHANGELOG.md" && pass "CHANGELOG says it" || fail "CHANGELOG: build timeout"
+
+# ── the two clocks, per app: cipi app deploy-config, cipi.yml ──
+echo "--- deploy-config: --build-timeout, --step-timeout"
+DCD="${TMP}/dc"; mkdir -p "$DCD/cfg" "$DCD/lib" "$DCD/log"
+for a in shop front static early; do mkdir -p "$DCD/home/$a/.deployer"; done
+printf '%s\n' '{"shop":{"php":"8.5","repository":"git@github.com:acme/shop.git","branch":"main"},
+  "front":{"php":"8.5","custom":true,"runtime":"node","node_build":"npm run build","node_mode":"spa","node_version":"22","node_output":"dist","repository":"git@github.com:acme/front.git","branch":"main"},
+  "static":{"php":"8.5","custom":true},"early":{"php":"8.5","deploy_build_timeout":"2400"}}' > "$DCD/cfg/apps.json"
+for f in "${LIB}"/*.sh; do sed -e "s#/home/#${DCD}/home/#g" "$f" > "$DCD/lib/$(basename "$f")"; done
+cp -r "${LIB}/deployer" "$DCD/lib/"
+head -c 32 /dev/urandom | base64 > "$DCD/cfg/.vault_key"
+DC() {   # a function of app.sh / common.sh / yml.sh, as cipi would call it
+    PATH="$MG/bin:$PATH" CIPI_LIB="$DCD/lib" CIPI_CONFIG="$DCD/cfg" CIPI_LOG="$DCD/log" bash -c 'set -uo pipefail
+        source "$CIPI_LIB/common.sh"; source "$CIPI_LIB/app.sh"; source "$CIPI_LIB/yml.sh"
+        RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
+        cipi_notify() { :; }
+        yml_act() { _YML_APP="$1"; _yml_apply_action "$2"; }
+        ( "$@" ); echo "rc=$?"' _ "$@" 2>&1
+}
+dcjson() { sed -n '/^{/,/^}/p' <<< "$1"; }
+recipe() { cat "$DCD/home/$1/.deployer/deploy.php" 2>/dev/null; }
+stored() { DC vault_read apps.json | sed '$d' | jq -c --arg a "$1" '.[$a] | {deploy_build_timeout, deploy_step_timeout}'; }
+out=$(DC app_deploy_config shop --json)
+[[ "$(dcjson "$out" | jq -c '[.build_timeout, .step_timeout]')" == "[1800,300]" ]] && pass "an app that says nothing: 1800 seconds for the build, 300 for every other command" || fail "defaults: ${out}"
+out=$(DC app_deploy_config shop --build-timeout=2700 --step-timeout=600 --json)
+[[ "$(dcjson "$out" | jq -c '[.build_timeout, .step_timeout]')" == "[2700,600]" ]] && grep -qx "rc=0" <<< "$out" \
+    && recipe shop | grep -qx "set('cipi_build_timeout', 2700);" && recipe shop | grep -qx "set('default_timeout', 600);" \
+    && pass "--build-timeout=2700 --step-timeout=600: kept, shown, and in the recipe that is written again" || fail "set: ${out}"
+[[ "$(stored shop)" == '{"deploy_build_timeout":"2700","deploy_step_timeout":"600"}' ]] && pass "…stored with the app" || fail "stored: $(stored shop)"
+if command -v php >/dev/null 2>&1; then
+    grep -v "^require 'recipe/" "$DCD/home/shop/.deployer/deploy.php" | sed '/^task(.deploy., array_values/,$d' > "$BT/shop-dc.php"
+    php "$BT/dep-stub.php" "$BT/shop-dc.php" cipi:node_build 2>&1 | grep -qx 'default build=2700 runs=1 threw=no next=600' \
+        && pass "…and a deploy runs the build with 2700 seconds and the step after it with 600" || fail "the recipe with its own clocks: $(php "$BT/dep-stub.php" "$BT/shop-dc.php" cipi:node_build 2>&1 | head -n 2)"
+fi
+for bad in 30 3601 abc "" 12.5 -5 "1800; id"; do
+    out=$(DC app_deploy_config shop "--build-timeout=${bad}")
+    grep -q '\[ERROR\] --build-timeout is a number of seconds from 60 to 3600 (1800 unless set)' <<< "$out" && grep -qx "rc=1" <<< "$out" || fail "--build-timeout='${bad}' not refused: ${out}"
+done
+pass "--build-timeout: 30, 3601, a word, nothing, a fraction, a negative, a command — each refused with the bounds"
+out=$(DC app_deploy_config shop --keep-releases=9 --step-timeout=5000)
+grep -q -- '--step-timeout is a number of seconds from 60 to 1800 (300 unless set)' <<< "$out" && [[ "$(stored shop)" == '{"deploy_build_timeout":"2700","deploy_step_timeout":"600"}' ]] \
+    && [[ "$(DC app_get shop keep_releases | sed '$d')" == "" ]] \
+    && pass "a number out of bounds is refused before anything is written (the --keep-releases next to it too)" || fail "refused value: ${out} / $(stored shop)"
+out=$(DC app_deploy_config shop --build-timeout=1800 --step-timeout=300 --json)
+[[ "$(stored shop)" == '{"deploy_build_timeout":null,"deploy_step_timeout":null}' ]] && recipe shop | grep -qx "set('cipi_build_timeout', 1800);" && recipe shop | grep -qx "set('default_timeout', 300);" \
+    && pass "the default, asked for by its number, is stored as nothing" || fail "back to the default: $(stored shop)"
+out=$(DC app_deploy_config front --build-timeout=900 --json)
+[[ "$(dcjson "$out" | jq -c '.')" == '{"app":"front","runtime":"node","keep_releases":5,"predeploy_snapshot":false,"build_timeout":900,"step_timeout":300}' ]] \
+    && recipe front | grep -qx "set('cipi_build_timeout', 900);" && [[ "$(recipe front | grep -c '^[[:space:]]*cipi_build_run(')" == 6 ]] \
+    && pass "a Node app takes them too: its install and its build get the 900 seconds" || fail "node: ${out}"
+out=$(DC app_deploy_config front --no-migrate)
+grep -q "is a Node app: its recipe has no artisan hooks" <<< "$out" && grep -qx "rc=1" <<< "$out" && pass "…and is told what it does not take (the artisan hooks)" || fail "node, artisan flag: ${out}"
+out=$(DC app_deploy_config static --build-timeout=900)
+grep -q "Custom apps have no zero-downtime deploy.php recipe" <<< "$out" && pass "a classic app has no recipe to give a clock to" || fail "static: ${out}"
+# An app with a number of its own whose deploy.php is from before: the hook writes that number.
+bt_before early laravel > "$DCD/home/early/.deployer/deploy.php"
+out=$(DC deployer_build_timeout_ensure_hook early)
+grep -qx "rc=0" <<< "$out" && recipe early | grep -qx "set('cipi_build_timeout', 2400);" && ! recipe early | grep -q '__CIPI_' \
+    && [[ "$(recipe early | sed -n '/^\/\/ cipi:build-timeout /,$p')" == "$(bt_block "${DPL}/laravel.php" 2400)" ]] \
+    && pass "the hook gives a deploy.php from before the number of its app" || fail "hook, own number: ${out}"
+
+echo "--- cipi.yml: deploy.build_timeout, deploy.step_timeout"
+sed -n "/<<'CIPIYAMLPY'$/,/^CIPIYAMLPY$/p" "${LIB}/yml.sh" | sed '1d;$d' > "${TMP}/yamlval.py"
+yv() { printf 'version: 1\ndeploy:\n%s\n' "$1" > "${TMP}/t.yml"; python3 "${TMP}/yamlval.py" "${TMP}/t.yml" shop; }
+r=$(yv $'  build_timeout: 2400\n  step_timeout: 900')
+[[ "$(jq -c '[.ok, .data.deploy.build_timeout, .data.deploy.step_timeout]' <<< "$r")" == "[true,2400,900]" ]] && pass "the validator takes both, as whole seconds" || fail "yml valid: ${r}"
+r=$(yv $'  keep_releases: 5'); [[ "$(jq -c '.data.deploy | has("build_timeout") or has("step_timeout")' <<< "$r")" == "false" ]] && pass "…and a file that does not name them does not carry them (nothing to reconcile)" || fail "yml absent: ${r}"
+for case in "build_timeout: 59|deploy.build_timeout" "build_timeout: 3601|deploy.build_timeout" 'build_timeout: "1800"|deploy.build_timeout' "step_timeout: 1801|deploy.step_timeout" "step_timeout: 2.5|deploy.step_timeout" "step_timeout: true|deploy.step_timeout"; do
+    r=$(yv "  ${case%%|*}"); [[ "$(jq -r .ok <<< "$r")" == "false" ]] && jq -r '.errors[]' <<< "$r" | grep -qF "${case##*|}" || fail "yml accepts '${case%%|*}': ${r}"
+done
+pass "out of bounds, a string, a fraction, a boolean: refused by name (60-3600 and 60-1800)"
+out=$(DC yml_act shop "deploy-cfg|build_timeout=2400;step_timeout=900|deploy config")
+grep -qx "rc=0" <<< "$out" && [[ "$(stored shop)" == '{"deploy_build_timeout":"2400","deploy_step_timeout":"900"}' ]] && recipe shop | grep -qx "set('cipi_build_timeout', 2400);" && recipe shop | grep -qx "set('default_timeout', 900);" \
+    && pass "apply: the app takes the numbers of the file and its recipe is written again" || fail "yml apply: ${out} $(stored shop)"
+out=$(DC yml_act front "deploy-cfg|keep_releases=3;build_timeout=1200|deploy config")
+grep -qx "rc=0" <<< "$out" && recipe front | grep -qx "set('cipi_build_timeout', 1200);" && recipe front | grep -qx "set('keep_releases', 3);" && pass "apply, a Node app: the same" || fail "yml apply node: ${out}"
+grep -q 'for dc_f in build step; do' "${LIB}/yml.sh" && grep -q 'dc_cur=$(deploy_timeout_get "$app" "$dc_f")' "${LIB}/yml.sh" \
+    && grep -q 'only deploy.keep_releases, deploy.build_timeout, deploy.step_timeout and deploy.predeploy_snapshot apply' "${LIB}/yml.sh" \
+    && pass "plan: each is a change only when the file's number is not the app's; a Node app may declare them" || fail "yml plan"
+grep -q 'echo "  build_timeout: $(deploy_timeout_get "$app" build)"' "${LIB}/yml.sh" && grep -q '# build_timeout: 1800' "${LIB}/yml.sh" && pass "cipi yml init writes them; the commented example names them" || fail "yml export"
+grep -q -- '--build-timeout=S' "${ROOT}/cipi" && pass "cipi help app names the flags" || fail "help"
 
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="

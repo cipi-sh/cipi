@@ -18,6 +18,9 @@ set('bin/php', '/usr/bin/php__CIPI_PHP_VERSION__');
 set('shared_files', ['.env']);
 set('shared_dirs', []);
 set('writable_dirs', []);
+// Seconds a command of the deploy may run (cipi app deploy-config --step-timeout);
+// the frontend build has its own, cipi_build_timeout, below.
+set('default_timeout', __CIPI_STEP_TIMEOUT__);
 
 // Values as of when this recipe was written; node:config replaces them with
 // ~/.deployer/node.json, which a cipi.yml `node:` section in the release being
@@ -68,10 +71,11 @@ task('node:finalize', function () {
 });
 
 // cipi:build-timeout — Deployer stops a command after default_timeout (300
-// seconds), and installing the packages and building are the steps of a deploy
-// that can take longer than that: what runs through cipi_build_run() gets
-// cipi_build_timeout seconds. Every other step keeps the default.
-set('cipi_build_timeout', 1800);
+// seconds unless the app says otherwise, above), and installing the packages
+// and building are the steps of a deploy that can take longer than that: what
+// runs through cipi_build_run() gets cipi_build_timeout seconds — 1800, or what
+// cipi app deploy-config --build-timeout says. Every other step keeps the default.
+set('cipi_build_timeout', __CIPI_BUILD_TIMEOUT__);
 if (!function_exists(__NAMESPACE__ . '\\cipi_build_run')) {
     function cipi_build_run(string $command): string
     {

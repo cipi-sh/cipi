@@ -884,6 +884,41 @@ deployer_flow_ensure_hook() {
     return 0
 }
 
+# The two clocks of a deploy, in seconds, per app (cipi app deploy-config
+# --build-timeout / --step-timeout, deploy.build_timeout / deploy.step_timeout
+# in cipi.yml):
+#   build — the frontend build: the node_build of a Laravel app, the install
+#           and the build of a Node app. 1800 unless the app says otherwise.
+#   step  — every other command of the deploy (Deployer's default_timeout):
+#           the clone, Composer, the migrations. 300 unless the app says so.
+# apps.json keeps a value only when it is not the default (deploy_build_timeout,
+# deploy_step_timeout).
+deploy_timeout_bounds() {   # build|step → "<default> <min> <max>"
+    case "${1:-}" in
+        build) echo "1800 60 3600" ;;
+        step)  echo "300 60 1800" ;;
+        *)     return 1 ;;
+    esac
+}
+deploy_timeout_valid() {   # build|step <seconds>
+    local def min max
+    read -r def min max <<< "$(deploy_timeout_bounds "${1:-}")" || return 1
+    [[ "${2:-}" =~ ^[0-9]{1,5}$ ]] && (( 10#$2 >= min && 10#$2 <= max ))
+}
+deploy_timeout_get() {   # <app> build|step → seconds (the default when unset or not valid)
+    local def min max v
+    read -r def min max <<< "$(deploy_timeout_bounds "${2:-}")" || return 1
+    v=$(app_get "$1" "deploy_${2}_timeout" 2>/dev/null || true)
+    deploy_timeout_valid "$2" "$v" && echo "$((10#$v))" || echo "$def"
+}
+deploy_timeout_set() {   # <app> build|step <seconds> — the default is stored as nothing
+    local def min max
+    read -r def min max <<< "$(deploy_timeout_bounds "${2:-}")" || return 1
+    deploy_timeout_valid "$2" "${3:-}" || return 1
+    if (( 10#$3 == def )); then app_unset "$1" "deploy_${2}_timeout"
+    else app_set "$1" "deploy_${2}_timeout" "$((10#$3))"; fi
+}
+
 # The command that makes Cipi write an app's deploy.php again from today's
 # recipe (edits made to the file by hand are lost): what a message says when
 # it leaves a hand-edited deploy.php as it is. deploy-config is not for Node
@@ -935,7 +970,8 @@ deployer_build_timeout_ensure_hook() {
     fi
     [[ -f "$tpl" ]] || return 1
     grep -qE '^[[:space:]]*\?>[[:space:]]*$' <<< "$cur" && return 1
-    block=$(sed -n '/^\/\/ cipi:build-timeout /,/^\/\/ cipi:build-timeout end$/p' "$tpl")
+    block=$(sed -n '/^\/\/ cipi:build-timeout /,/^\/\/ cipi:build-timeout end$/p' "$tpl" \
+        | sed "s|__CIPI_BUILD_TIMEOUT__|$(deploy_timeout_get "$app" build)|g")
     [[ "$(tail -n 1 <<< "$block")" == "// cipi:build-timeout end" ]] || return 1
     # Each task of the block is in the file once…
     while IFS= read -r name; do

@@ -3438,6 +3438,8 @@ _create_deployer_config_from_template() {
             -e "s|__CIPI_REPOSITORY__|$repo_safe|g" \
             -e "s|__CIPI_BRANCH__|$branch_safe|g" \
             -e "s|__CIPI_KEEP_RELEASES__|$(_deploy_cfg_keep_releases "$an")|g" \
+            -e "s|__CIPI_BUILD_TIMEOUT__|$(deploy_timeout_get "$an" build)|g" \
+            -e "s|__CIPI_STEP_TIMEOUT__|$(deploy_timeout_get "$an" step)|g" \
             -e "s|__CIPI_NODE_VERSION__|$(app_get "$an" node_version)|g" \
             -e "s|__CIPI_NODE_MODE__|$(app_get "$an" node_mode)|g" \
             -e "s|__CIPI_NODE_OUTPUT__|$(app_get "$an" node_output)|g" \
@@ -3505,6 +3507,8 @@ _create_deployer_config_from_template() {
         -e "s|__CIPI_REPOSITORY__|$repo_safe|g" \
         -e "s|__CIPI_BRANCH__|$branch_safe|g" \
         -e "s|__CIPI_KEEP_RELEASES__|$kr|g" \
+        -e "s|__CIPI_BUILD_TIMEOUT__|$(deploy_timeout_get "$an" build)|g" \
+        -e "s|__CIPI_STEP_TIMEOUT__|$(deploy_timeout_get "$an" step)|g" \
         -e "s|__CIPI_SHARED_FILES__|$shared_files|g" \
         -e "s|__CIPI_HOOK_STORAGE_LINK__|$h_storage|g" \
         -e "s|__CIPI_HOOK_MIGRATE__|$h_migrate|g" \
@@ -3551,6 +3555,10 @@ _create_deployer_config_for_app() {
 # Usage:
 #   cipi app deploy-config <app> [--json]
 #   cipi app deploy-config <app> --keep-releases=5 --no-migrate --extra-artisan=view:clear,db:seed
+#   cipi app deploy-config <app> --build-timeout=2700 --step-timeout=600
+#
+# A Node app (a custom app with a release recipe) takes what is not an artisan
+# hook: --keep-releases, --build-timeout, --step-timeout, --predeploy-snapshot.
 app_deploy_config() {
     local app="${1:-}"; shift || true
     [[ -z "$app" ]] && {
@@ -3558,10 +3566,11 @@ app_deploy_config() {
         exit 1
     }
     app_exists "$app" || { error "Not found"; exit 1; }
-    local is_custom; is_custom=$(app_get "$app" custom)
-    [[ "$is_custom" == "true" ]] && { error "Custom apps have no zero-downtime deploy.php recipe"; exit 1; }
+    local is_custom is_node=false; is_custom=$(app_get "$app" custom)
+    [[ "$(app_get "$app" runtime)" == "node" ]] && is_node=true
+    [[ "$is_custom" == "true" && "$is_node" != true ]] && { error "Custom apps have no zero-downtime deploy.php recipe"; exit 1; }
 
-    unset ARG_json ARG_keep_releases ARG_migrate ARG_no_migrate ARG_optimize ARG_no_optimize \
+    unset ARG_json ARG_keep_releases ARG_build_timeout ARG_step_timeout ARG_migrate ARG_no_migrate ARG_optimize ARG_no_optimize \
         ARG_storage_link ARG_no_storage_link ARG_queue_restart ARG_no_queue_restart \
         ARG_horizon_terminate ARG_no_horizon_terminate ARG_extra_artisan ARG_clear_extra_artisan \
         ARG_node_build ARG_no_node_build ARG_predeploy_snapshot ARG_no_predeploy_snapshot 2>/dev/null || true
@@ -3571,7 +3580,8 @@ app_deploy_config() {
     [[ "${ARG_json:-}" == "true" ]] && want_json=true
 
     local editing=false
-    [[ -n "${ARG_keep_releases+x}" || -n "${ARG_migrate+x}" || -n "${ARG_no_migrate+x}" \
+    [[ -n "${ARG_keep_releases+x}" || -n "${ARG_build_timeout+x}" || -n "${ARG_step_timeout+x}" \
+        || -n "${ARG_migrate+x}" || -n "${ARG_no_migrate+x}" \
         || -n "${ARG_optimize+x}" || -n "${ARG_no_optimize+x}" \
         || -n "${ARG_storage_link+x}" || -n "${ARG_no_storage_link+x}" \
         || -n "${ARG_queue_restart+x}" || -n "${ARG_no_queue_restart+x}" \
@@ -3581,11 +3591,27 @@ app_deploy_config() {
         || -n "${ARG_predeploy_snapshot+x}" || -n "${ARG_no_predeploy_snapshot+x}" ]] && editing=true
 
     if [[ "$editing" == "true" ]]; then
+        # Checked before anything is written: a number that is refused leaves the app as it was.
+        if [[ "$is_node" == true && -n "${ARG_migrate+x}${ARG_no_migrate+x}${ARG_optimize+x}${ARG_no_optimize+x}${ARG_storage_link+x}${ARG_no_storage_link+x}${ARG_queue_restart+x}${ARG_no_queue_restart+x}${ARG_horizon_terminate+x}${ARG_no_horizon_terminate+x}${ARG_extra_artisan+x}${ARG_clear_extra_artisan+x}${ARG_node_build+x}${ARG_no_node_build+x}" ]]; then
+            error "'${app}' is a Node app: its recipe has no artisan hooks. It takes --keep-releases, --build-timeout, --step-timeout and --predeploy-snapshot."
+            echo "  Its build command: cipi app edit ${app} --build=\"…\""
+            exit 1
+        fi
         if [[ -n "${ARG_keep_releases+x}" ]]; then
             [[ "${ARG_keep_releases}" =~ ^[0-9]+$ ]] && (( ARG_keep_releases >= 1 && ARG_keep_releases <= 20 )) \
                 || { error "keep-releases must be an integer 1–20"; exit 1; }
-            app_set "$app" keep_releases "${ARG_keep_releases}"
         fi
+        local tk tv tdef tmin tmax
+        for tk in build step; do
+            tv="ARG_${tk}_timeout"
+            [[ -n "${!tv+x}" ]] || continue
+            read -r tdef tmin tmax <<< "$(deploy_timeout_bounds "$tk")"
+            deploy_timeout_valid "$tk" "${!tv}" \
+                || { error "--${tk}-timeout is a number of seconds from ${tmin} to ${tmax} (${tdef} unless set)"; exit 1; }
+        done
+        [[ -n "${ARG_keep_releases+x}" ]] && app_set "$app" keep_releases "${ARG_keep_releases}"
+        [[ -n "${ARG_build_timeout+x}" ]] && deploy_timeout_set "$app" build "${ARG_build_timeout}"
+        [[ -n "${ARG_step_timeout+x}" ]] && deploy_timeout_set "$app" step "${ARG_step_timeout}"
         [[ "${ARG_migrate:-}" == "true" ]] && app_unset "$app" deploy_migrate
         [[ "${ARG_no_migrate:-}" == "true" ]] && app_set "$app" deploy_migrate "false"
         [[ "${ARG_optimize:-}" == "true" ]] && app_unset "$app" deploy_optimize
@@ -3640,8 +3666,29 @@ app_deploy_config() {
     fi
 
     # Show (always, or after edit)
-    local kr nb snap extra b_mig b_opt b_sl b_qr b_ht
+    local kr nb snap extra b_mig b_opt b_sl b_qr b_ht t_build t_step
     kr=$(_deploy_cfg_keep_releases "$app")
+    t_build=$(deploy_timeout_get "$app" build)
+    t_step=$(deploy_timeout_get "$app" step)
+    if [[ "$is_node" == true ]]; then
+        snap=$(_deploy_cfg_bool "$app" predeploy_snapshot false)
+        if [[ "$want_json" == "true" ]]; then
+            jq -n --arg app "$app" --argjson keep_releases "$kr" --argjson predeploy_snapshot "$snap" \
+                --argjson build_timeout "$t_build" --argjson step_timeout "$t_step" \
+                '{app: $app, runtime: "node", keep_releases: $keep_releases, predeploy_snapshot: $predeploy_snapshot,
+                  build_timeout: $build_timeout, step_timeout: $step_timeout}'
+            return 0
+        fi
+        echo -e "\n${BOLD}Deploy config — ${app}${NC} ${DIM}(Node app)${NC}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        printf "  %-20s %s\n" "keep_releases" "$kr"
+        printf "  %-20s %s\n" "predeploy_snapshot" "$snap"
+        printf "  %-20s %s\n" "build_timeout" "${t_build}s  (install and build, each)"
+        printf "  %-20s %s\n" "step_timeout" "${t_step}s  (every other command)"
+        echo -e "  ${DIM}Build command, start command, output: cipi app edit ${app} --build=… --start=… --output=…${NC}"
+        echo ""
+        return 0
+    fi
     nb=$(app_get "$app" node_build)
     snap=$(_deploy_cfg_bool "$app" predeploy_snapshot false)
     b_mig=$(_deploy_cfg_bool "$app" deploy_migrate true)
@@ -3663,6 +3710,8 @@ app_deploy_config() {
             --argjson predeploy_snapshot "$snap" \
             --arg node_build "${nb:-}" \
             --argjson extra_artisan "$extra" \
+            --argjson build_timeout "$t_build" \
+            --argjson step_timeout "$t_step" \
             '{
                 app: $app,
                 keep_releases: $keep_releases,
@@ -3673,7 +3722,9 @@ app_deploy_config() {
                 horizon_terminate: $horizon_terminate,
                 predeploy_snapshot: $predeploy_snapshot,
                 node_build: (if $node_build == "" then null else $node_build end),
-                extra_artisan: $extra_artisan
+                extra_artisan: $extra_artisan,
+                build_timeout: $build_timeout,
+                step_timeout: $step_timeout
             }'
         return 0
     fi
@@ -3689,6 +3740,8 @@ app_deploy_config() {
     printf "  %-20s %s\n" "predeploy_snapshot" "$snap"
     printf "  %-20s %s\n" "node_build" "${nb:-(none)}"
     printf "  %-20s %s\n" "extra_artisan" "$extra"
+    printf "  %-20s %s\n" "build_timeout" "${t_build}s  (the frontend build)"
+    printf "  %-20s %s\n" "step_timeout" "${t_step}s  (every other command)"
     echo ""
 }
 

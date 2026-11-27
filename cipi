@@ -359,7 +359,7 @@ show_help_topic() {
             _help_cmd "cipi app artisan <app> <cmd>"   "Artisan command"
             _help_cmd "cipi app run <app> <cmd> …"     "Whitelisted non-interactive cmd  ${DIM}(composer, npm, ls, …)${NC}"
             _help_cmd "cipi app run --commands"        "List allowed app run binaries  ${DIM}[--json]${NC}"
-            _help_cmd "cipi app deploy-config <app>"   "Show/edit deploy.php options  ${DIM}[--json] [--keep-releases=N] …${NC}"
+            _help_cmd "cipi app deploy-config <app>"   "Show/edit deploy.php options  ${DIM}[--json] [--keep-releases=N] [--build-timeout=S] [--step-timeout=S] …${NC}"
             _help_h "Credentials"
             _help_cmd "cipi app reset-password <app>"    "Reset app SSH password"
             _help_cmd "cipi app reset-db-password <app>" "Reset app DB password"

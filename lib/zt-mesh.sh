@@ -832,6 +832,12 @@ _mesh_enable() {
         fi
         [[ "$(jq -r '.provider_ssh' <<< "$live")" == "true" ]] && ssh=true
     else
+        # --adopt: take a client that is already connected, and never ask for
+        # a key (what the panel sends when its form has none).
+        if [[ -z "$key" && "${ARG_adopt:-}" == "true" ]]; then
+            error "Nothing to adopt: ${label} is not connected on this server. Join with a key: cipi zt ${p} enable --${flag}=KEY"
+            exit 1
+        fi
         if [[ -z "$key" && -t 0 ]]; then
             read_input "${label} ${flag//-/ }" "" key
         fi

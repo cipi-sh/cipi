@@ -593,8 +593,12 @@ out=$(P 'zt_command tailscale disable --yes --via=100.99.1.2' 2>&1); rc=$?
 [[ $rc -ne 0 ]] && grep -q 'leaving the network would cut it off' <<< "$out" && [[ -x "${BIN}/tailscale" ]] && pass "panel: disable over the mesh — refused, the panel would lose the server" || fail "panel disable via mesh: ${out}"
 out=$(P 'zt_command tailscale disable --yes --via=198.51.100.7' 2>&1); rc=$?
 [[ $rc -eq 0 && ! -x "${BIN}/tailscale" ]] && [[ "$(mst | jq -r .enabled)" == false ]] && pass "panel: disable from the public address" || fail "panel disable: ${out}"
+out=$(P 'zt_command netbird enable --adopt' 2>&1); rc=$?
+[[ $rc -ne 0 ]] && grep -q 'Nothing to adopt: NetBird is not connected' <<< "$out" && [[ ! -x "${BIN}/netbird" ]] && pass "panel: enable --adopt with no client connected — refused, nothing installed" || fail "panel adopt, nothing there: ${out}"
 out=$(P 'zt_command netbird enable --setup-key=NBP1' 2>&1); rc=$?
 [[ $rc -eq 0 ]] && has_rule "Anywhere on wt0" && pass "panel: netbird enable" || fail "panel nb enable: ${out}"
+out=$(P 'zt_command netbird enable --adopt' 2>&1); rc=$?
+[[ $rc -eq 0 ]] && grep -q 'connected already' <<< "$out" && [[ "$(mst | jq -r .provider)" == netbird ]] && pass "panel: enable --adopt on a connected client — taken as it is" || fail "panel adopt: ${out}"
 out=$(P 'zt_command netbird disable --yes' 2>&1); rc=$?
 [[ $rc -eq 0 && ! -x "${BIN}/netbird" ]] && pass "panel: netbird disable with no address given (the panel is not over the mesh)" || fail "panel nb disable: ${out}"
 rm -f "${TMP}/auth.log"

@@ -1093,6 +1093,64 @@ grep -q 'for dc_f in build step; do' "${LIB}/yml.sh" && grep -q 'dc_cur=$(deploy
 grep -q 'echo "  build_timeout: $(deploy_timeout_get "$app" build)"' "${LIB}/yml.sh" && grep -q '# build_timeout: 1800' "${LIB}/yml.sh" && pass "cipi yml init writes them; the commented example names them" || fail "yml export"
 grep -q -- '--build-timeout=S' "${ROOT}/cipi" && pass "cipi help app names the flags" || fail "help"
 
+# ── cipi app create --db=NAME: a database made with a custom or a Node app ──
+echo "--- app create: --db"
+DBC() {   # INSTALLED="mariadb pgsql" EXISTING="names on the server" ARG_engine=… DBC <function> <args…>
+    PATH="$MG/bin:$PATH" CIPI_LIB="$DCD/lib" CIPI_CONFIG="$DCD/cfg" CIPI_LOG="$DCD/log" INSTALLED="${INSTALLED:-mariadb}" EXISTING="${EXISTING:-}" WANT_ENGINE="${WANT_ENGINE-}" \
+    bash -c 'set -uo pipefail
+        source "$CIPI_LIB/common.sh"; source "$CIPI_LIB/db.sh"; source "$CIPI_LIB/app.sh"
+        RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
+        cipi_notify() { :; }
+        db_ensure_engine_state() { :; }
+        db_engine_is_installed() { [[ " $INSTALLED " == *" $1 "* ]]; }
+        db_get_default_engine() { echo mariadb; }
+        db_require_engine() { db_engine_is_installed "$1" && { echo "$1"; return 0; }; error "$(db_engine_label "$1") is not installed"; return 1; }
+        db_database_exists() { [[ " $EXISTING " == *" $2 "* ]]; }
+        db_create_database() { echo "CREATE engine=$1 name=$2 user=$3 pass_chars=${#4}"; }
+        [[ -n "$WANT_ENGINE" ]] && ARG_engine="$WANT_ENGINE"
+        ( "$@"; rc=$?; pw="${APP_CREATE_DB_PASS:-}"; echo "engine=${APP_CREATE_DB_ENGINE:-} pass_chars=${#pw}"; exit $rc ) 2>&1; echo "rc=$?"' _ "$@"
+}
+vjson() { DBC vault_read "$1" | sed '/^engine=/,$d'; }   # a vault file, as JSON
+out=$(DBC _app_create_db_check custom blog wpblog)
+grep -qx 'engine=mariadb pass_chars=0' <<< "$out" && grep -qx 'rc=0' <<< "$out" && pass "a custom app and a name: the server's default engine" || fail "--db: ${out}"
+out=$(DBC _app_create_db_check node front frontdb); grep -qx 'rc=0' <<< "$out" && pass "a Node app takes one too" || fail "--db node: ${out}"
+out=$(INSTALLED="mariadb pgsql" WANT_ENGINE=pgsql DBC _app_create_db_check custom blog wpblog); grep -qx 'engine=pgsql pass_chars=0' <<< "$out" && pass "--engine=pgsql: there" || fail "--db --engine: ${out}"
+out=$(WANT_ENGINE=pgsql DBC _app_create_db_check custom blog wpblog); grep -qx 'rc=1' <<< "$out" && grep -q 'not installed' <<< "$out" && pass "…refused where that engine is not installed" || fail "--db, engine missing: ${out}"
+out=$(WANT_ENGINE=oracle DBC _app_create_db_check custom blog wpblog); grep -qx 'rc=1' <<< "$out" && grep -q 'Invalid engine' <<< "$out" && pass "…and for an engine Cipi does not know" || fail "--db, engine unknown: ${out}"
+out=$(DBC _app_create_db_check laravel shop extra)
+grep -qx 'rc=1' <<< "$out" && grep -q "a Laravel app is created with its own database, named 'shop'" <<< "$out" && grep -q 'cipi db create --name=extra --app=shop' <<< "$out" \
+    && pass "a Laravel app has its own database: --db is refused, with the command for one more" || fail "--db laravel: ${out}"
+ok=1; for bad in WP 1abc a bad-name 'x; id' "$(printf 'a%.0s' $(seq 65))"; do
+    out=$(DBC _app_create_db_check custom blog "$bad"); grep -qx 'rc=1' <<< "$out" && grep -q 'Invalid database name' <<< "$out" || { ok=0; fail "--db='${bad}' accepted: ${out}"; }
+done; [[ $ok == 1 ]] && pass "a name that is not a database name is refused (upper case, a digit first, one letter, a dash, a command, 65 letters)"
+out=$(EXISTING="wpblog" DBC _app_create_db_check custom blog wpblog)
+grep -qx 'rc=1' <<< "$out" && grep -q "Database 'wpblog' already exists" <<< "$out" && grep -q 'cipi db link wpblog blog' <<< "$out" \
+    && pass "a database that is on the server already is not taken over: refused, with how to link it" || fail "--db existing: ${out}"
+out=$(DBC _app_create_db_make wpblog mariadb)
+grep -qx 'CREATE engine=mariadb name=wpblog user=wpblog pass_chars=40' <<< "$out" && grep -qx 'engine= pass_chars=40' <<< "$out" && grep -qx 'rc=0' <<< "$out" \
+    && [[ "$(vjson databases.json | jq -c '.mariadb.wpblog.user')" == '"wpblog"' ]] \
+    && pass "the database is made with a user of its name and a 40-character password, and recorded like one of cipi db create" || fail "make: ${out}"
+out=$(DBC _app_create_db_check custom blog wpblog); grep -qx 'rc=1' <<< "$out" && grep -q 'already exists' <<< "$out" && pass "…so a second app cannot ask for the same name" || fail "--db recorded: ${out}"
+DBC _db_link_set static mariadb wpblog >/dev/null
+[[ "$(vjson apps.json | jq -c '.static.databases')" == '[{"name":"wpblog","engine":"mariadb"}]' ]] \
+    && pass "linked: one line in the app's entry (cipi db list, cipi app show and the panel read it)" || fail "link"
+A="${LIB}/app.sh"
+# The whole function: its heredocs hold a "}" in the first column, so it ends at the next function.
+body=$(awk '/^app_create\(\) \{/ { on = 1; print; next } on && /^[a-z_]+\(\) \{/ { exit } on { print }' "$A")
+chk=$(grep -n '_app_create_db_check "$app_type" "$app_user" "$db_new" || exit 1' <<< "$body" | cut -d: -f1)
+mk=$(grep -n '_app_create_db_make "$db_new" "$db_new_engine"' <<< "$body" | cut -d: -f1)
+usr=$(grep -n 'useradd' <<< "$body" | head -n 1 | cut -d: -f1)
+lnk=$(grep -n '_db_link_set "$app_user" "$db_new_engine" "$db_new"' <<< "$body" | cut -d: -f1)
+sav=$(grep -n 'app_save "$app_user"' <<< "$body" | tail -n 1 | cut -d: -f1)
+[[ -n "$chk" && -n "$mk" && -n "$usr" && -n "$lnk" && -n "$sav" ]] && (( chk < usr && usr < mk && sav < lnk )) \
+    && pass "app create: checked before the user is created, made with the app, linked once the app is saved" || fail "app create order: check=${chk} user=${usr} make=${mk} save=${sav} link=${lnk}"
+grep -q '\[\[ "$db_new" == "true" \]\] && db_new="$app_user"' <<< "$body" && grep -q 'elif \[\[ "$app_type" != "laravel" && -t 0 \]\]; then' <<< "$body" && grep -q '"${ARG_no_db:-}" != "true"' <<< "$body" \
+    && pass "--db alone: the app's name; no flag: asked at a terminal only, and never of a Laravel app; --no-db: not asked" || fail "app create: flag and question"
+line=$(grep -F 'echo -e "  ${BOLD}Database${NC}    ${CYAN}${db_new}${NC} / ${CYAN}${db_new_pass}${NC}' <<< "$body")
+[[ -n "$line" ]] && [[ "$(printf '  Database    wpblog / s3cr3tPASS  (MariaDB)\n' | grep -cE 'Database[[:space:]]+[^[:space:]]+[[:space:]]*/[[:space:]]*[^[:space:]]+')" == 1 ]] \
+    && pass "the summary says name and password on the line the API reads for an app's database" || fail "summary line"
+grep -q -- '--db=NAME (custom and Node apps)' "${ROOT}/cipi" && grep -q -- '--db=NAME' "${ROOT}/CHANGELOG.md" && pass "help and CHANGELOG say it" || fail "help / CHANGELOG: --db"
+
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="
 [[ $FAIL -eq 0 ]]

@@ -147,6 +147,54 @@ _app_docroot_clean() {   # <docroot as given>
     printf '%s' "$d"
 }
 
+# ── a database made with a custom or a Node app (cipi app create --db=NAME) ──
+#
+# Checked before anything of the app is created: the kind of app, the name,
+# the engine (--engine=, a menu at a terminal with two engines installed, the
+# server's default) and that no database of that name is there — --db makes
+# one, it does not take one over. Sets APP_CREATE_DB_ENGINE; 1 with the reason.
+_app_create_db_check() {   # <laravel|custom|node> <app> <database>
+    local app_type="$1" app="$2" name="$3" engine="${ARG_engine:-}"
+    APP_CREATE_DB_ENGINE=""
+    if [[ "$app_type" == "laravel" ]]; then
+        error "--db is for custom and Node apps: a Laravel app is created with its own database, named '${app}' and written to its .env."
+        echo "  One more database for it, afterwards: cipi db create --name=${name} --app=${app}"
+        return 1
+    fi
+    validate_db_name "$name" || {
+        error "Invalid database name '${name}': lowercase letters, digits and _, starting with a letter (2-64 characters)"
+        return 1
+    }
+    db_ensure_engine_state
+    if [[ -z "$engine" || "$engine" == "true" ]]; then
+        engine=""
+        if [[ -t 0 ]] && db_engine_is_installed mariadb && db_engine_is_installed pgsql; then
+            read_choice "Database engine" "$(db_get_default_engine)" engine "mariadb|$(db_mysql_label)" "pgsql|PostgreSQL"
+        fi
+        [[ -n "$engine" ]] || engine=$(db_get_default_engine)
+    fi
+    engine=$(db_normalize_engine "$engine") || { error "Invalid engine. Use: mariadb pgsql"; return 1; }
+    db_require_engine "$engine" >/dev/null || return 1
+    if vault_read databases.json 2>/dev/null | jq -e --arg e "$engine" --arg n "$name" '.[$e][$n]' &>/dev/null \
+        || db_database_exists "$engine" "$name"; then
+        error "Database '${name}' already exists on $(_db_engine_shown "$engine")"
+        echo "  --db makes a new one. To show this one as the app's, once the app is there: cipi db link ${name} ${app}"
+        return 1
+    fi
+    APP_CREATE_DB_ENGINE="$engine"
+}
+
+# The database itself: its user has its name, the password is made here and
+# left in APP_CREATE_DB_PASS for the summary — shown once, like the app's own.
+_app_create_db_make() {   # <database> <engine>
+    local name="$1" engine="$2"
+    APP_CREATE_DB_PASS=$(generate_password 40)
+    step "Database ${name} ($(db_engine_label "$engine"))..."
+    db_create_database "$engine" "$name" "$name" "$APP_CREATE_DB_PASS" || return 1
+    _db_meta_set "$engine" "$name" "$name"
+    success "Database ${name} ($(db_engine_label "$engine"))"
+}
+
 # ── CREATE ────────────────────────────────────────────────────
 
 app_create() {
@@ -319,6 +367,21 @@ app_create() {
         }
     fi
 
+    # A new database for a custom or a Node app: --db=NAME (--db alone: the
+    # app's name), or asked at a terminal — the WordPress of a custom app needs
+    # one, and until now it took a second command (cipi db create --name=NAME
+    # --app=<app>). Made with the app and linked to it. A Laravel app has its
+    # own, with the app's name, in its .env: it takes no other here.
+    local db_new="" db_new_engine="" db_new_pass=""
+    if [[ "${ARG_no_db:-}" != "true" ]]; then
+        if [[ -n "${ARG_db+x}" ]]; then
+            db_new="${ARG_db}"
+            [[ "$db_new" == "true" ]] && db_new="$app_user"
+        elif [[ "$app_type" != "laravel" && -t 0 ]]; then
+            read_input "New database for this app — its name, or empty for none" "" db_new
+        fi
+    fi
+
     # Validate
     validate_username "$app_user"  || { error "Invalid username '${app_user}'"; exit 1; }
     validate_domain_or_wildcard "$domain" || { error "Invalid domain '${domain}'"; exit 1; }
@@ -338,6 +401,11 @@ app_create() {
     id "$app_user" &>/dev/null     && { error "User '${app_user}' already exists"; exit 1; }
     domain_is_used_by_other_app "$domain" && { error "Domain '${domain}' is already used by app '${DOMAIN_USED_BY_APP}'"; exit 1; }
     domain_is_used_by_panel "$domain" && { error "Domain '${domain}' is used by ${DOMAIN_USED_BY_PANEL}: the panel has a domain of its own"; exit 1; }
+
+    if [[ -n "$db_new" ]]; then
+        _app_create_db_check "$app_type" "$app_user" "$db_new" || exit 1
+        db_new_engine="$APP_CREATE_DB_ENGINE"
+    fi
 
     if [[ -n "$octane_server" ]]; then
         octane_port=$(_octane_allocate_port) || {
@@ -492,6 +560,9 @@ BASH
         db_create_database "$db_engine" "$app_user" "$app_user" "$db_pass" \
             || { error "Database create failed"; exit 1; }
         success "Database ($(db_engine_label "$db_engine"))"
+    elif [[ -n "$db_new" ]]; then
+        _app_create_db_make "$db_new" "$db_new_engine" || { error "Database create failed"; exit 1; }
+        db_new_pass="$APP_CREATE_DB_PASS"
     fi
 
     # 5. Config: .env (Laravel only)
@@ -646,10 +717,13 @@ JSON
         git_save_app_data "$app_user" "$GIT_PROVIDER" "${GIT_DEPLOY_KEY_ID:-}" "${GIT_WEBHOOK_ID:-}"
     fi
     [[ -n "$node_build" ]] && app_set "$app_user" node_build "$node_build"
+    # The database made above is shown as this app's (cipi db list, cipi app
+    # show, the panel) and travels with it: one line in its entry.
+    [[ -n "$db_new" ]] && _db_link_set "$app_user" "$db_new_engine" "$db_new"
     if [[ -n "$valkey_port" ]]; then
         app_set_json "$app_user" valkey_port "$valkey_port"
     fi
-    log_action "APP CREATED: $app_user domain=$domain env=${env_label} php=$php_ver engine=${db_engine:-none} octane=${octane_server:-none}${NODE_OPT_MODE:+ node=${NODE_OPT_MODE}/${NODE_OPT_VERSION}}${node_build:+ build=${node_build}}"
+    log_action "APP CREATED: $app_user domain=$domain env=${env_label} php=$php_ver engine=${db_engine:-none}${db_new:+ db=${db_new}/${db_new_engine}} octane=${octane_server:-none}${NODE_OPT_MODE:+ node=${NODE_OPT_MODE}/${NODE_OPT_VERSION}}${node_build:+ build=${node_build}}"
 
     # Email notification
     local _notify_repo _notify_branch
@@ -798,6 +872,11 @@ SUDO
         echo ""
         echo -e "  ${BOLD}$(db_engine_label "$db_engine") URL${NC}"
         echo -e "  ${CYAN}$(db_connection_url "$db_engine" "$app_user" "$user_pass" "$server_ip" "$app_user" "$db_pass" "$app_user")${NC}"
+        echo ""
+    fi
+    if [[ -n "$db_new" ]]; then
+        echo -e "  ${BOLD}Database${NC}    ${CYAN}${db_new}${NC} / ${CYAN}${db_new_pass}${NC}  ${DIM}($(db_engine_label "$db_new_engine"))${NC}"
+        echo -e "              ${DIM}name and user: ${db_new} · host: 127.0.0.1 · port: $(db_engine_port "$db_new_engine") — the password is not shown again (cipi db password ${db_new} sets a new one)${NC}"
         echo ""
     fi
     if [[ "$app_type" == "custom" ]]; then

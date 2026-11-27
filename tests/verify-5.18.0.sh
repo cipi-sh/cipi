@@ -550,6 +550,30 @@ for via in 100.99.1.2 127.0.0.1 203.0.113.5; do
     [[ $rc -eq 0 ]] && ! has_rule "443/tcp" && pass "panel: lock http from ${via} (over the mesh, or on this server)" || fail "panel lock http via ${via}: ${out}"
     P 'zt_command tailscale unlock http' >/dev/null 2>&1; has_rule "443/tcp" || fail "panel unlock http"
 done
+# The panel on this very server: its API is safe, the page of whoever looks at it on the public address is not.
+out=$(P 'zt_command tailscale lock http --yes --via=127.0.0.1 --client=198.51.100.7' 2>&1); rc=$?
+[[ $rc -ne 0 ]] && grep -q "using this panel on the server's public address (from 198.51.100.7)" <<< "$out" && grep -q '100.101.102.103' <<< "$out" && has_rule "443/tcp" \
+    && pass "panel on this server: lock http from a browser on the public address — refused, the page would close itself" || fail "panel local, browser public: ${out}"
+out=$(P 'zt_command tailscale lock http --yes --force --via=203.0.113.5 --client=nonsense' 2>&1); rc=$?
+[[ $rc -ne 0 ]] && grep -q "using this panel on the server's public address" <<< "$out" && has_rule "443/tcp" && pass "panel on this server: an address that is not one is no proof either, --force or not" || fail "panel local, browser nonsense: ${out}"
+j=$(P 'zt_command status --json --via=127.0.0.1 --client=198.51.100.7' | jq -c .mesh.panel)
+jq -e '.via == "local" and .client == {"via":"public","from":"198.51.100.7"} and (.blocked.lock_http | test("public address")) and .blocked.disable == null' <<< "$j" >/dev/null \
+    && pass "panel on this server: the status says where the browser comes from, and why 80/443 stay open" || fail "panel client status: ${j}"
+[[ "$(P 'zt_command status --json --via=127.0.0.1' | jq -c '.mesh.panel | [.client, .blocked.lock_http]')" == '[null,null]' ]] && pass "panel on this server: no browser address given (a script on the server) — nothing more is asked" || fail "panel client none"
+for client in 100.99.1.2 127.0.0.1; do
+    out=$(P "zt_command tailscale lock http --yes --via=127.0.0.1 --client=${client}" 2>&1); rc=$?
+    [[ $rc -eq 0 ]] && ! has_rule "443/tcp" && pass "panel on this server: lock http from a browser at ${client} (over the mesh, or on the server)" || fail "panel local, browser ${client}: ${out}"
+    P 'zt_command tailscale unlock http' >/dev/null 2>&1; has_rule "443/tcp" || fail "panel unlock http (client)"
+done
+out=$(P 'zt_command tailscale lock http --yes --via=100.99.1.2 --client=198.51.100.7' 2>&1); rc=$?
+[[ $rc -eq 0 ]] && ! has_rule "443/tcp" && pass "a panel on another server, over the mesh: where its user sits does not matter" || fail "panel remote, browser public: ${out}"
+P 'zt_command tailscale unlock http' >/dev/null 2>&1
+Z 'echo "{\"enabled\":true,\"gui\":{\"domain\":\"panel.example.com\"}}" | vault_write zt.json' >/dev/null
+out=$(P 'zt_command tailscale lock http --yes --via=127.0.0.1 --client=198.51.100.7' 2>&1); rc=$?
+[[ $rc -eq 0 ]] && ! has_rule "443/tcp" && [[ "$(P 'zt_command status --json --via=127.0.0.1 --client=198.51.100.7' | jq -r .mesh.panel.client.via)" == tunnel ]] \
+    && pass "panel on this server, its hostname on the Cloudflare tunnel: the page comes through the tunnel, lock http goes" || fail "panel local, gui on tunnel: ${out}"
+P 'zt_command tailscale unlock http' >/dev/null 2>&1
+Z 'echo "{}" | vault_write zt.json' >/dev/null
 Z 'echo "{\"enabled\":true,\"api\":{\"domain\":\"api.example.com\"}}" | vault_write zt.json' >/dev/null
 out=$(P 'zt_command tailscale lock http --yes --via=198.51.100.7' 2>&1); rc=$?
 [[ $rc -eq 0 ]] && ! has_rule "443/tcp" && pass "panel: lock http when the API's hostname is on the Cloudflare tunnel" || fail "panel lock http tunnel: ${out}"

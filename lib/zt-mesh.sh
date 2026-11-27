@@ -409,14 +409,38 @@ _mesh_route_of() {   # <address> <interface>
     return 0
 }
 
+# How the person at the panel reaches the panel itself, when the panel runs
+# on this server (--client=<the browser's address, as the panel saw it>):
+# mesh, local, tunnel (the panel's hostname is on the Cloudflare tunnel),
+# public (the server's public address — what a lock of 80/443 closes), or
+# nothing when no address was given. Only asked when the panel is local: a
+# panel on another server answers its own pages, whatever is closed here.
+_mesh_client_route() {   # <address> <interface>
+    local ip="${1:-}" iface="${2:-}" route
+    [[ -n "$ip" ]] || return 0
+    [[ "$ip" =~ ^[0-9a-fA-F:.]+$ ]] || { echo "unknown"; return 0; }
+    route=$(ip route get "$ip" 2>/dev/null) || route=""
+    if [[ -n "$iface" ]] && grep -qE "(^| )dev ${iface}( |\$)" <<< "$route"; then
+        echo "mesh"
+    elif grep -qE '^local |(^| )dev lo( |$)' <<< "$route"; then
+        echo "local"
+    elif vault_read zt.json 2>/dev/null | jq -e '(.enabled // false) == true and ((.gui.domain // "") != "")' >/dev/null 2>&1; then
+        echo "tunnel"
+    else
+        echo "public"
+    fi
+    return 0
+}
+
 # Why the panel may not do it now, in one line — nothing when it may.
 # What the shell checks on its own session, the panel checks here: the same
 # function answers the command and the status the panel reads before asking.
 _mesh_panel_blocker() {   # <provider> <lock_ssh|lock_http|disable> <live json>
-    local p="$1" what="$2" live="$3" label iface ip via exp days seen bad
+    local p="$1" what="$2" live="$3" label iface ip via client exp days seen bad
     label=$(_mesh_label "$p"); iface=$(_mesh_iface "$p")
     ip=$(jq -r '.ip // empty' <<< "$live")
     via=$(_mesh_route_of "${ARG_via:-}" "$iface")
+    client=$(_mesh_client_route "${ARG_client:-}" "$iface")
     case "$what" in
         lock_ssh|lock_http)
             if [[ "$(jq -r '.connected' <<< "$live")" != "true" || -z "$ip" ]]; then
@@ -456,6 +480,13 @@ _mesh_panel_blocker() {   # <provider> <lock_ssh|lock_http|disable> <live json>
                 *) echo "The panel reaches this server's API on its public address${ARG_via:+ (from ${ARG_via})}: with 80/443 closed it could not reach it any more, not even to unlock. Have the panel call the API over ${label} (the API's DNS record on ${ip}) or through the Cloudflare tunnel, or lock at the server's shell (cipi zt ${p} lock http)."
                    return 0 ;;
             esac
+            # The panel is on this server, so its API is safe — but its pages
+            # are on 80/443 like every site: the person looking at them on the
+            # public address would close the page they are clicking on.
+            if [[ "$via" == "local" && ( "$client" == "public" || "$client" == "unknown" ) ]]; then
+                echo "You are using this panel on the server's public address${ARG_client:+ (from ${ARG_client})}: with 80/443 closed the page itself would stop answering you. Open the panel over ${label} first (its address there is ${ip}) or through the Cloudflare tunnel and close them from there, or do it at the server's shell (cipi zt ${p} lock http)."
+                return 0
+            fi
             ;;
         disable)
             if [[ "$via" == "mesh" ]]; then
@@ -995,10 +1026,13 @@ _mesh_status_json() {
     # What the panel may do now, and why not: asked by the panel (or with --via=).
     if _mesh_from_panel || [[ -n "${ARG_via:-}" ]]; then
         panel=$(jq -n -c --arg via "$(_mesh_route_of "${ARG_via:-}" "$(jq -r '.interface' <<< "$live")")" --arg from "${ARG_via:-}" \
+            --arg cvia "$(_mesh_client_route "${ARG_client:-}" "$(jq -r '.interface' <<< "$live")")" --arg cfrom "${ARG_client:-}" \
             --arg ssh "$(_mesh_panel_blocker "$p" lock_ssh "$live")" --arg http "$(_mesh_panel_blocker "$p" lock_http "$live")" \
             --arg dis "$(_mesh_panel_blocker "$p" disable "$live")" '
             def n: if . == "" then null else . end;
-            {via: $via, from: ($from | n), blocked: {lock_ssh: ($ssh | n), lock_http: ($http | n), disable: ($dis | n)}}') || panel='null'
+            {via: $via, from: ($from | n),
+             client: (if $cfrom == "" then null else {via: $cvia, from: $cfrom} end),
+             blocked: {lock_ssh: ($ssh | n), lock_http: ($http | n), disable: ($dis | n)}}') || panel='null'
     fi
     jq -n -c --argjson st "$st" --argjson live "$live" --arg p "$p" --arg label "$(_mesh_label "$p")" \
         --arg days "$days" --argjson ports "$ports" --arg user "$(_mesh_ssh_user)" \

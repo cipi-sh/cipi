@@ -12,8 +12,10 @@
 # themselves hold the line when sudo comes from www-data (lib/zt-mesh.sh):
 # --force is ignored; `lock ssh` wants a login sshd accepted over the mesh
 # and a node key that cannot expire; `lock http` and `disable` are refused
-# when they would cut the panel's own way to this server (--via=<address>,
-# the last argument). Nothing of Cloudflare's side is here: `zt status` only,
+# when they would cut the panel's own way to this server (--via=<the address
+# the API was called from>), and `lock http` when it would close the page of
+# the person at a panel that runs here (--client=<the browser's address>):
+# the last arguments. Nothing of Cloudflare's side is here: `zt status` only,
 # as before.
 #
 # 5.17.0 adds, for the panel's new pages: the nginx page cache of an app

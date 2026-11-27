@@ -970,7 +970,8 @@ show_help_topic() {
             _help_note "what is the network's own policy (tailnet ACL, NetBird policies): allow tcp 22, 80, 443."
             _help_note "A database from a laptop: an SSH tunnel over the mesh (TablePlus/DBeaver: over SSH)."
             _help_note "The panel does the same (API ability zt-manage): there --force is ignored, lock ssh wants a"
-            _help_note "login sshd accepted over the mesh, and lock http / disable never cut the panel's own way in."
+            _help_note "login sshd accepted over the mesh, and lock http / disable never cut the panel's own way in"
+            _help_note "— nor, for a panel on this server, the page of whoever is clicking on its public address."
             echo ""
             ;;
 

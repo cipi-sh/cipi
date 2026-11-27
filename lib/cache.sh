@@ -406,7 +406,11 @@ _cache_purge_target() {   # <app> <target>
         host="${BASH_REMATCH[1],,}"; path="${BASH_REMATCH[2]:-/}"
         host="${host%%:*}"
         ok=0
-        for h in $(_cache_app_hosts "$app"); do [[ "$h" == "$host" ]] && ok=1; done
+        for h in $(_cache_app_hosts "$app"); do
+            [[ "$h" == "$host" ]] && ok=1
+            # A wildcard alias (*.example.com) answers for its subdomains.
+            [[ "$h" == '*.'* && "$host" == *".${h#\*.}" ]] && ok=1
+        done
         (( ok )) || return 1
     else
         path="$t"
@@ -433,7 +437,7 @@ cache_purge() {   # <app> <target>…
     (( $# > 0 && $# <= CACHE_PURGE_MAX )) || return 1
     local dir t parsed host path prefix hosts_re re patterns=() list
     dir=$(_cache_dir "$app")
-    local all_hosts; all_hosts=$(_cache_app_hosts "$app" | while read -r h; do _cache_regex_escape "$h"; done | paste -sd'|' -)
+    local all_hosts; all_hosts=$(_cache_app_hosts "$app" | while read -r h; do _cache_regex_escape "$h"; done | sed 's/\\\*/[a-z0-9-]+(\\.[a-z0-9-]+)*/g' | paste -sd'|' -)
     for t in "$@"; do
         parsed=$(_cache_purge_target "$app" "$t") || return 2
         IFS='|' read -r host path prefix <<< "$parsed"

@@ -1318,7 +1318,7 @@ grep -q 'local snapshot_db="${CIPI_PREDEPLOY_SNAPSHOT_DB:-$app}"' "${LIB}/deploy
 echo "--- page cache: purge some pages, not all"
 PC="${TMP}/purge"; mkdir -p "$PC/root" "$PC/cfg" "$PC/log" "$PC/sudoers"
 cat > "$PC/apps.json" <<'JSON'
-{"blog": {"domain": "blog.test", "aliases": ["www.blog.test", "Blog.Example.COM"], "cache": {"enabled": true}},
+{"blog": {"domain": "blog.test", "aliases": ["www.blog.test", "Blog.Example.COM", "*.tenants.test"], "cache": {"enabled": true}},
  "shop": {"domain": "shop.test", "aliases": [], "cache": {"enabled": false}}}
 JSON
 echo "user $(id -un);" > "$PC/nginx.conf"   # the files are nginx's: here, the user running the suite
@@ -1357,6 +1357,10 @@ seed; out=$(PURGE blog purge /category/news/* /)
 seed; out=$(PURGE blog purge https://www.blog.test/hello-world/ --json)
 [[ "$(jq -r '[.app, .enabled, .purged, (.targets | length)] | @tsv' <<< "$out")" == $'blog\ttrue\t1\t1' ]] && ! grep -q 'www.blog.test/hello-world/' <<< "$(left)" && grep -q 'httpsGETblog.test/hello-world/ ' <<< "$(left) " \
     && pass "a URL purges that page on that host only, and --json says how many files went" || fail "purge url: ${out} / $(left)"
+seed; page 'httpsGETacme.tenants.test/hello-world/'; page 'httpsGETacme.tenants.test/other/'
+out=$(PURGE blog purge /hello-world/); ! grep -q 'tenants.test/hello-world/' <<< "$(left)" && grep -q 'acme.tenants.test/other/' <<< "$(left)" \
+    && out=$(PURGE blog purge https://acme.tenants.test/other/) && ! grep -q 'tenants.test' <<< "$(left)" \
+    && pass "a wildcard alias (*.tenants.test): its subdomains are the app's — by path, and by URL" || fail "wildcard alias: ${out} / $(left)"
 seed
 for bad in 'https://evil.test/x' 'hello' '/a b' "/x'" '/a*b' '/$(id)' '/a?b=1' '--force'; do
     out=$(PURGE blog purge "$bad"); [[ "$out" == *"Not a page of 'blog'"* || "$out" == *"Unknown option"* ]] || fail "purge took ${bad}: ${out}"

@@ -277,6 +277,7 @@ show_help_topic() {
             _help_cmd "cipi cache <app> ttl <time>"          "How long a page is kept  ${DIM}30s · 10m · 1h · 7d${NC}"
             _help_cmd "cipi cache <app> size <size>"         "How much of the disk it may take  ${DIM}256m · 2g${NC}"
             _help_cmd "cipi cache <app> clear"               "Delete the cached pages now"
+            _help_cmd "cipi cache <app> purge <path|url>…"   "Delete some pages: /blog/post/, /blog/* (every page under it), https://host/page/  ${DIM}[--json]${NC}"
             _help_cmd "cipi cache <app> exclude"             "Paths of its own never cached  ${DIM}add '/cart*' · remove <path> · remove --all · set a,b${NC}"
             _help_cmd "cipi cache <app> [status] [--json]"   "On or off, time kept, pages and bytes now"
             _help_note "Not OPcache, which is on already and keeps PHP's compiled code: with this one nginx"
@@ -287,7 +288,7 @@ show_help_topic() {
             _help_note "A path of your own to keep out — a page per visitor that says so with no cookie, a feed:"
             _help_note "cipi cache <app> exclude add '/cart*' '/feed'   (* is anything; without it, the path itself)"
             _help_note "Emptied after every successful deploy and rollback. In a recipe or a script of your own,"
-            _help_note "as the app's user: sudo /usr/local/bin/cipi-cache-clear <app>"
+            _help_note "as the app's user: sudo /usr/local/bin/cipi-cache-clear <app> [<path|url>…]  — the WordPress plugin: github.com/cipi-sh/cache-wp"
             _help_note "X-Cache-Status in the response says HIT, MISS, BYPASS, EXPIRED or STALE."
             echo ""
             ;;

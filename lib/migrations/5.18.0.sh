@@ -81,4 +81,19 @@ if (( n_build > 0 )); then
 else
     echo "  deploy.php: nothing to change"
 fi
+# The page cache: a plugin or a script may purge some pages of its app
+# (cipi-cache-clear <app> <path>…), not only all of them.
+if [[ -f "${CIPI_LIB}/cache.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${CIPI_LIB}/cache.sh" 2>/dev/null || true
+    if declare -f _cache_sudoers_ensure >/dev/null 2>&1; then
+        n_sud=0
+        while IFS= read -r u; do
+            [[ "$u" =~ ^[a-z][a-z0-9]{2,31}$ && -f "/etc/sudoers.d/cipi-${u}" ]] || continue
+            _cache_sudoers_ensure "$u" && n_sud=$((n_sud + 1)) || echo "  WARNING: /etc/sudoers.d/cipi-${u} left as it is (visudo refused the new rule)"
+        done < <(vault_read apps.json 2>/dev/null | jq -r 'keys[]' 2>/dev/null)
+        echo "  page cache: ${n_sud} app(s) may purge some of their pages (sudo cipi-cache-clear <app> <path>…)"
+    fi
+fi
+
 echo "Migration 5.18.0 complete"

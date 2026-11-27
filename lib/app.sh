@@ -823,6 +823,7 @@ ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi health postdeploy ${app_use
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-scan-manifest ${app_user}
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-deploy-audit ${app_user} *
 ${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-cache-clear ${app_user}
+${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-cache-clear ${app_user} *
 SUDO
     if [[ "$app_type" == "node" ]]; then
         echo "${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-node-switch ${app_user} *" >> "/etc/sudoers.d/cipi-${app_user}"

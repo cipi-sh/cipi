@@ -1315,6 +1315,67 @@ grep -qx 'rc=0 path=none db=' <<< "$out" && [[ ! -e "$PS/log/dumped" ]] && pass 
 grep -q 'local snapshot_db="${CIPI_PREDEPLOY_SNAPSHOT_DB:-$app}"' "${LIB}/deploy.sh" && grep -q 'warn "Restore: cipi db restore ${snapshot_db} ${snapshot_path}"' "${LIB}/deploy.sh" \
     && pass "a failed deploy names the database the snapshot is of in its restore command" || fail "restore command"
 
+echo "--- page cache: purge some pages, not all"
+PC="${TMP}/purge"; mkdir -p "$PC/root" "$PC/cfg" "$PC/log" "$PC/sudoers"
+cat > "$PC/apps.json" <<'JSON'
+{"blog": {"domain": "blog.test", "aliases": ["www.blog.test", "Blog.Example.COM"], "cache": {"enabled": true}},
+ "shop": {"domain": "shop.test", "aliases": [], "cache": {"enabled": false}}}
+JSON
+echo "user $(id -un);" > "$PC/nginx.conf"   # the files are nginx's: here, the user running the suite
+PCH="export CIPI_LIB='${LIB}' CIPI_CONFIG='$PC/cfg' CIPI_LOG='$PC/log' CACHE_ROOT='$PC/root' CACHE_SUDOERS_DIR='$PC/sudoers' CACHE_NGINX_CONF='$PC/nginx.conf'
+RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
+source '${LIB}/common.sh' 2>/dev/null
+vault_read() { cat '$PC/apps.json'; }
+app_get() { jq -r --arg a \"\$1\" --arg k \"\$2\" '.[\$a][\$k] // empty' '$PC/apps.json'; }
+app_exists() { jq -e --arg a \"\$1\" 'has(\$a)' '$PC/apps.json' >/dev/null; }
+log_action() { echo \"\$*\" >> '$PC/actions.log'; }
+source '${LIB}/cache.sh'
+_cache_setting() { jq -r --arg a \"\$1\" --arg k \"\$2\" '.[\$a].cache[\$k] // empty' '$PC/apps.json'; }
+"
+page() {   # <key> : a file as nginx writes one — a binary header, the KEY line, the response
+    local md5; md5=$(printf '%s' "$1" | md5sum | awk '{ print $1 }')
+    local d="$PC/root/blog/${md5: -1}/${md5: -3:2}"; mkdir -p "$d"
+    { printf '\x05\x00\x00\x00\x00\x00\x00\x00\x9a\x02\x00\x00'; printf '\nKEY: %s\n' "$1"; printf 'HTTP/1.1 200 OK\r\n\r\n<html>KEY: httpsGETblog.test/decoy/</html>\n'; } > "$d/$md5"
+}
+seed() {
+    rm -rf "$PC/root/blog"; mkdir -p "$PC/root/blog"
+    for k in 'httpsGETblog.test/' 'httpsHEADblog.test/' 'httpsGETblog.test/?utm_source=nl' 'httpGETblog.test/' \
+             'httpsGETblog.test/hello-world/' 'httpsGETwww.blog.test/hello-world/' 'httpsGETblog.test/hello-world/?utm_campaign=x' \
+             'httpsGETblog.test/hello-world-2/' 'httpsGETblog.test/category/news/' 'httpsGETblog.test/category/news/page/2/' \
+             'httpsGETblog.test/feed/' 'httpsGETblog.example.com/hello-world/' 'httpsGETblog.test/decoy/'; do page "$k"; done
+}
+left() { grep -rahE -m1 '^KEY: ' "$PC/root/blog" | sed 's/^KEY: //' | sort | paste -sd' ' -; }
+PURGE() { bash -c "$PCH"' cache_command "$@"' _ "$@" 2>&1; }
+seed
+out=$(PURGE blog purge /hello-world/)
+[[ "$(left)" == "httpGETblog.test/ httpsGETblog.test/ httpsGETblog.test/?utm_source=nl httpsGETblog.test/category/news/ httpsGETblog.test/category/news/page/2/ httpsGETblog.test/decoy/ httpsGETblog.test/feed/ httpsGETblog.test/hello-world-2/ httpsHEADblog.test/" ]] \
+    && grep -q 'Purged 4 cached file' <<< "$out" \
+    && pass "purge /hello-world/: that page on every domain and alias of the app (case aside), with its ?utm variants — not /hello-world-2/, not a page whose body names it" || fail "purge one: ${out} / $(left)"
+seed; out=$(PURGE blog purge /category/news/* /)
+[[ "$(left)" == "httpsGETblog.example.com/hello-world/ httpsGETblog.test/decoy/ httpsGETblog.test/feed/ httpsGETblog.test/hello-world-2/ httpsGETblog.test/hello-world/ httpsGETblog.test/hello-world/?utm_campaign=x httpsGETwww.blog.test/hello-world/" ]] \
+    && pass "purge /category/news/* /: a prefix and the home page — http and https, GET and HEAD" || fail "purge prefix: ${out} / $(left)"
+seed; out=$(PURGE blog purge https://www.blog.test/hello-world/ --json)
+[[ "$(jq -r '[.app, .enabled, .purged, (.targets | length)] | @tsv' <<< "$out")" == $'blog\ttrue\t1\t1' ]] && ! grep -q 'www.blog.test/hello-world/' <<< "$(left)" && grep -q 'httpsGETblog.test/hello-world/ ' <<< "$(left) " \
+    && pass "a URL purges that page on that host only, and --json says how many files went" || fail "purge url: ${out} / $(left)"
+seed
+for bad in 'https://evil.test/x' 'hello' '/a b' "/x'" '/a*b' '/$(id)' '/a?b=1' '--force'; do
+    out=$(PURGE blog purge "$bad"); [[ "$out" == *"Not a page of 'blog'"* || "$out" == *"Unknown option"* ]] || fail "purge took ${bad}: ${out}"
+done
+[[ "$(left | wc -w)" == 13 ]] && pass "a host that is not the app's, a path without /, a space, a quote, a * inside, a query, an option: refused, nothing deleted" || fail "refusals deleted something: $(left)"
+out=$(PURGE shop purge /x); grep -q "page cache of 'shop' is off" <<< "$out" && pass "an app with the cache off: nothing to purge, said" || fail "purge off: ${out}"
+out=$(PURGE blog purge); [[ -z "$(left)" ]] && grep -q "emptied — 13 page" <<< "$out" && pass "purge with no page: every page, as clear" || fail "purge all: ${out}"
+seed; mapfile -t many < <(seq 1 501 | sed 's|^|/p|'); out=$(PURGE blog purge "${many[@]}"); grep -q 'At most 500 pages' <<< "$out" && [[ "$(left | wc -w)" == 13 ]] && pass "at most 500 pages at once" || fail "purge max: ${out}"
+# the helper the app's own user runs through sudo
+H="${LIB}/cipi-cache-clear.sh"; bash -n "$H" && pass "cipi-cache-clear parses" || fail "cipi-cache-clear parse"
+grep -q 'TARGETS=("$@")' "$H" && grep -q 'n=$(cache_purge "$APP" "${TARGETS\[@\]}")' "$H" && grep -q '_cache_purge_target "$APP" "$t" >/dev/null ||' "$H" \
+    && pass "cipi-cache-clear <app> <path>…: each target checked before anything is deleted" || fail "helper purge"
+printf 'blog ALL=(root) NOPASSWD: /usr/local/bin/cipi-worker restart blog\nblog ALL=(root) NOPASSWD: /usr/local/bin/cipi-cache-clear blog\n' > "$PC/sudoers/cipi-blog"
+bash -c "$PCH visudo() { return 0; }; _cache_sudoers_ensure blog; _cache_sudoers_ensure blog"
+[[ "$(grep -c 'cipi-cache-clear blog$' "$PC/sudoers/cipi-blog")" == 1 && "$(grep -cxF 'blog ALL=(root) NOPASSWD: /usr/local/bin/cipi-cache-clear blog *' "$PC/sudoers/cipi-blog")" == 1 ]] \
+    && pass "sudoers: the rule for some pages is added once, next to the one for all" || fail "sudoers: $(cat "$PC/sudoers/cipi-blog")"
+grep -qF '${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-cache-clear ${app_user} *' "${LIB}/app.sh" && pass "a new app has both rules" || fail "app.sh sudoers"
+grep -q '_cache_sudoers_ensure' "${LIB}/migrations/5.18.0.sh" && pass "the migration gives existing apps the rule" || fail "migration sudoers"
+
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="
 [[ $FAIL -eq 0 ]]

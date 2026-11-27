@@ -246,6 +246,13 @@ _deploy_predeploy_snapshot() {
     local required="${ARG_snapshot_required:-}"
     [[ "$(app_get "$app" predeploy_snapshot)" == "true" ]] && want="true"
     [[ "$want" != "true" && "$required" != "true" ]] && return 0
+    # A Node app has no database named after it: its snapshot is of the
+    # databases linked to it (cipi app create --db=, cipi db create --app=,
+    # cipi db link). The option was accepted for Node apps and did nothing.
+    if [[ "$(app_get "$app" runtime)" == "node" ]]; then
+        _deploy_predeploy_snapshot_linked "$app" "$required"
+        return $?
+    fi
     [[ "$(app_get "$app" custom)" == "true" ]] && return 0
 
     # shellcheck source=/dev/null
@@ -281,6 +288,56 @@ _deploy_predeploy_snapshot() {
         return 1
     fi
     warn "Pre-deploy snapshot failed — continuing deploy"
+    return 0
+}
+
+# The pre-deploy snapshot of an app with no database of its own (a Node app):
+# one dump per database linked to it. The first path is the one a failed
+# deploy names; the others are in the same folder, named the same way.
+_deploy_predeploy_snapshot_linked() {   # <app> <required>
+    local app="$1" required="${2:-}"
+    # shellcheck source=/dev/null
+    source "${CIPI_LIB}/db.sh"
+    local links
+    links=$(_db_links | awk -F'\t' -v a="$app" '$1 == a { print $2 "\t" $3 }')
+    if [[ -z "$links" ]]; then
+        warn "Pre-deploy snapshot skipped — no database is linked to '${app}' (cipi db create --name=<name> --app=${app}, or cipi db link <database> ${app})"
+        [[ "$required" == "true" ]] && { error "Snapshot required but the app has no database"; return 1; }
+        return 0
+    fi
+
+    mkdir -p "${CIPI_LOG}/backups"
+    local eng name dump stamp failed="" first="" first_name=""
+    stamp=$(date +%Y%m%d_%H%M%S)
+    while IFS=$'\t' read -r eng name; do
+        [[ -n "$name" ]] || continue
+        if ! db_engine_is_installed "$eng"; then
+            warn "Pre-deploy snapshot of ${name} skipped — engine ${eng} not installed"
+            failed+=" ${name}"
+            continue
+        fi
+        dump="${CIPI_LOG}/backups/${eng}_${name}_predeploy_${stamp}.sql.gz"
+        step "Pre-deploy DB snapshot of ${name} → ${dump}..."
+        if db_dump_database "$eng" "$name" "$dump"; then
+            success "Snapshot saved: ${dump}"
+            [[ -n "$first" ]] || { first="$dump"; first_name="$name"; }
+        else
+            failed+=" ${name}"
+        fi
+    done <<< "$links"
+    CIPI_PREDEPLOY_SNAPSHOT="$first"
+    CIPI_PREDEPLOY_SNAPSHOT_DB="$first_name"
+    [[ -z "$failed" ]] && return 0
+
+    cipi_notify \
+        "Cipi pre-deploy snapshot failed: ${app} on $(hostname)" \
+        "Database dump before deploy failed.\n\nServer: $(hostname)\nApp: ${app}\nDatabases:${failed}\nTime: $(notify_now)" \
+        deploy_snapshot_fail
+    if [[ "$required" == "true" ]]; then
+        error "Pre-deploy snapshot failed (required):${failed}"
+        return 1
+    fi
+    warn "Pre-deploy snapshot failed for:${failed} — continuing deploy"
     return 0
 }
 
@@ -327,8 +384,11 @@ _deploy_run() {
     ensure_app_logs_permissions "$app" || true
 
     CIPI_PREDEPLOY_SNAPSHOT=""
+    CIPI_PREDEPLOY_SNAPSHOT_DB=""
     _deploy_predeploy_snapshot "$app" || exit 1
     local snapshot_path="${CIPI_PREDEPLOY_SNAPSHOT:-}"
+    # The database the snapshot is of: the app's own, or the first one linked to a Node app.
+    local snapshot_db="${CIPI_PREDEPLOY_SNAPSHOT_DB:-$app}"
 
     local lf; lf=$(deploy_log_file "$app")
     local branch_disp; branch_disp=$(app_get "$app" branch)
@@ -432,7 +492,7 @@ _deploy_run() {
         warn "Rollback code: cipi deploy ${app} --rollback"
         if [[ -n "$snapshot_path" && -f "$snapshot_path" ]]; then
             warn "DB snapshot (not restored automatically): ${snapshot_path}"
-            warn "Restore: cipi db restore ${app} ${snapshot_path}"
+            warn "Restore: cipi db restore ${snapshot_db} ${snapshot_path}"
         fi
         log_action "DEPLOY FAIL: $app exit=$rc release=${rel_after:-?}"
         cipi_notify \

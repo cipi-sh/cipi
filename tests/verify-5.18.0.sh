@@ -1272,6 +1272,49 @@ done
 ! grep -qE 'cipi sync (export|import|list)' "$SUD" && pass "the panel may ask for the key, check, trust, untrust and push — not export, import or list an archive at a path it names" || fail "sudoers: sync"
 grep -q 'cipi sync untrust --key=KEY' "${ROOT}/cipi" && grep -q -- '--auto-passphrase' "${ROOT}/cipi" && grep -q -- '--auto-passphrase' "${ROOT}/CHANGELOG.md" && pass "help and CHANGELOG say it" || fail "help / CHANGELOG: sync"
 
+echo "--- pre-deploy snapshot of a Node app: the databases linked to it"
+PS="${TMP}/snap"; mkdir -p "$PS/lib" "$PS/log"
+cat > "$PS/lib/db.sh" <<'STUB'
+_db_links() { printf '%b' "${LINKS:-}"; }
+db_engine_is_installed() { [[ "$1" != "${MISSING_ENGINE:-}" ]]; }
+db_normalize_engine() { echo "$1"; }
+db_dump_database() { [[ "$2" == "${FAIL_DB:-}" ]] && return 1; echo "dump of $2" | gzip > "$3"; echo "$1 $2" >> "$CIPI_LOG/dumped"; }
+STUB
+SNAP() {   # <app>: env RUNTIME CUSTOM WANT REQ LINKS FAIL_DB MISSING_ENGINE
+    rm -rf "$PS/log"; mkdir -p "$PS/log"
+    CIPI_LIB="$PS/lib" CIPI_LOG="$PS/log" REAL_LIB="$LIB" bash -c 'set -uo pipefail
+        error() { echo "[ERROR] $*"; }; warn() { echo "[WARN] $*"; }; step() { :; }; success() { echo "[OK] $*"; }
+        cipi_notify() { echo "[NOTIFY] $1 :: $2 :: $3"; }; notify_now() { echo now; }
+        app_get() { case "$2" in runtime) echo "${RUNTIME:-}" ;; custom) echo "${CUSTOM:-}" ;; predeploy_snapshot) echo "${WANT:-}" ;; engine) echo mariadb ;; esac; }
+        eval "$(sed -n "/^_deploy_predeploy_snapshot() {/,/^}/p; /^_deploy_predeploy_snapshot_linked() {/,/^}/p" "$REAL_LIB/deploy.sh")"
+        ARG_snapshot=""; ARG_snapshot_required="${REQ:-}"; CIPI_PREDEPLOY_SNAPSHOT=""; CIPI_PREDEPLOY_SNAPSHOT_DB=""
+        _deploy_predeploy_snapshot "$1"; echo "rc=$? path=$(basename "${CIPI_PREDEPLOY_SNAPSHOT:-none}") db=${CIPI_PREDEPLOY_SNAPSHOT_DB:-}"' _ "$1" 2>&1
+}
+TWO='shop\tmariadb\tshop\nshop\tpgsql\tshop_reports\nother\tmariadb\tother_db\n'
+out=$(RUNTIME=node CUSTOM=true WANT=true LINKS="$TWO" SNAP shop)
+[[ "$(sort "$PS/log/dumped" | tr '\n' ',')" == "mariadb shop,pgsql shop_reports," ]] && grep -Eq '^rc=0 path=mariadb_shop_predeploy_[0-9]{8}_[0-9]{6}\.sql\.gz db=shop$' <<< "$out" \
+    && [[ "$(ls "$PS/log/backups" | wc -l)" == 2 ]] && [[ "$(zcat "$PS/log/backups"/pgsql_shop_reports_predeploy_*.sql.gz)" == "dump of shop_reports" ]] \
+    && pass "a Node app with the snapshot on: each database linked to it is dumped — not another app's — and the first is the one a failed deploy names" || fail "node snapshot: ${out} / $(cat "$PS/log/dumped" 2>/dev/null)"
+out=$(RUNTIME=node CUSTOM=true WANT=true LINKS='other\tmariadb\tother_db\n' SNAP shop)
+grep -q "Pre-deploy snapshot skipped — no database is linked to 'shop'" <<< "$out" && grep -q 'cipi db link <database> shop' <<< "$out" && grep -qx 'rc=0 path=none db=' <<< "$out" && [[ ! -e "$PS/log/dumped" ]] \
+    && pass "…with no database linked: said, with how to link one, and the deploy goes on" || fail "node snapshot, no links: ${out}"
+out=$(RUNTIME=node CUSTOM=true REQ=true LINKS='' SNAP shop)
+grep -q 'Snapshot required but the app has no database' <<< "$out" && grep -q '^rc=1 ' <<< "$out" && pass "…a snapshot that is required (--snapshot-required) stops the deploy then" || fail "node snapshot, required, none: ${out}"
+out=$(RUNTIME=node CUSTOM=true WANT=true LINKS="$TWO" FAIL_DB=shop_reports SNAP shop)
+grep -q '^\[NOTIFY\] Cipi pre-deploy snapshot failed: shop on .*Databases: shop_reports.* :: deploy_snapshot_fail$' <<< "$out" && grep -q 'Pre-deploy snapshot failed for: shop_reports — continuing deploy' <<< "$out" \
+    && grep -q '^rc=0 path=mariadb_shop_predeploy_.* db=shop$' <<< "$out" && pass "a dump that fails is reported, by name, and the deploy goes on with the ones that were made" || fail "node snapshot, one fails: ${out}"
+out=$(RUNTIME=node CUSTOM=true WANT=true REQ=true LINKS="$TWO" MISSING_ENGINE=pgsql SNAP shop)
+grep -q 'Pre-deploy snapshot of shop_reports skipped — engine pgsql not installed' <<< "$out" && grep -q 'Pre-deploy snapshot failed (required): shop_reports' <<< "$out" && grep -q '^rc=1 ' <<< "$out" \
+    && pass "…and stops it when the snapshot is required" || fail "node snapshot, required, engine missing: ${out}"
+out=$(RUNTIME=node CUSTOM=true LINKS="$TWO" SNAP shop)
+grep -qx 'rc=0 path=none db=' <<< "$out" && [[ ! -e "$PS/log/dumped" ]] && pass "a Node app without the option: nothing is dumped" || fail "node snapshot, off: ${out}"
+out=$(WANT=true LINKS="$TWO" SNAP blog)
+[[ "$(cat "$PS/log/dumped")" == "mariadb blog" ]] && grep -Eq '^rc=0 path=mariadb_blog_predeploy_[0-9_]+\.sql\.gz db=$' <<< "$out" && pass "a Laravel app is as before: its own database, named like the app" || fail "laravel snapshot: ${out}"
+out=$(CUSTOM=true WANT=true LINKS='wp\tmariadb\twp\n' SNAP wp)
+grep -qx 'rc=0 path=none db=' <<< "$out" && [[ ! -e "$PS/log/dumped" ]] && pass "a custom app (no release recipe) is as before: no snapshot" || fail "custom snapshot: ${out}"
+grep -q 'local snapshot_db="${CIPI_PREDEPLOY_SNAPSHOT_DB:-$app}"' "${LIB}/deploy.sh" && grep -q 'warn "Restore: cipi db restore ${snapshot_db} ${snapshot_path}"' "${LIB}/deploy.sh" \
+    && pass "a failed deploy names the database the snapshot is of in its restore command" || fail "restore command"
+
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="
 [[ $FAIL -eq 0 ]]

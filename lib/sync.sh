@@ -816,6 +816,7 @@ CRON
         deployer_unlock_ensure_hook "$app" || true
         deployer_release_name_ensure_hook "$app" || true
         deployer_flow_ensure_hook "$app" || true
+        deployer_build_timeout_ensure_hook "$app" || true
         chown -R "${app}:${app}" "${home}/.deployer"
         success "Deployer (restored)"
     else

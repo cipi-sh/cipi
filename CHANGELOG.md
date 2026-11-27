@@ -41,6 +41,14 @@ Zero Trust gets its private side. Cloudflare Tunnel publishes the sites; **Tails
 
 ### Fixed
 
+- **A deploy stopped while building the frontend — "exceeded the timeout of 300 seconds" — some days and not others.** Deployer stops any command after `default_timeout`, 300 seconds, and the asset build of a Laravel app (`node_build`, usually `npm ci && npm run build` as one command) is the step of a deploy that comes close to it: on a small server, or on a day when a backup or another deploy is running next to it, it went over, and the deploy failed at `task cipi:node_build` with `The command "… /.deployer/node-build.sh /home/<app>/releases/N" exceeded the timeout of 300 seconds`. **The build now has a limit of its own: 30 minutes.**
+  - Laravel and Octane apps: `cipi:node_build`. Node apps: `node:install` (`npm ci`, `pnpm install`, `yarn install`, `bun install`) and `node:build`, which were on the same 300 seconds each.
+  - **Every other step keeps Deployer's 300 seconds** — the clone, Composer, the migrations, the switch: a step that hangs is still stopped soon, and the limit is back in place as soon as the build ends, also when it fails.
+  - In `deploy.php` it is one number, `set('cipi_build_timeout', 1800)`, and the build commands run through `cipi_build_run()`, which raises `default_timeout` for that command only. No named argument (`timeout:`), so the file still parses under PHP 7.4 on a server that kept Deployer 7. A `default_timeout` someone turned off or made longer in a recipe of their own is never shortened.
+  - **The apps that exist get it with the update**: migration 5.18.0 appends the block to each `deploy.php` (`deployer_build_timeout_ensure_hook`) — the build task defined again, with the limit; nothing that was in the file is rewritten. The next deploy is the first one with 30 minutes. A `deploy.php` whose build task is not the one Cipi wrote is left as it is and named, with the command that writes the recipe again; `cipi sync` gives the block to the apps it restores.
+  - **`cipi deploy` says it in plain words** when a step is stopped on that clock, right under `Deploy failed`: which step it was and for how long it ran — and, for a build in a `deploy.php` that does not have the 30 minutes, the command that gives them to it. Until now the reason was one line inside a PHP exception.
+  - A deploy started from the panel had a second ceiling — ten minutes for the whole job, in the API. cipi/api 1.48.0 gives a deploy an hour.
+
 - **UFW rules numbered below ten were never removed by `cipi zt unlock http`, `cipi zt disable` and the nightly refresh of Cloudflare's ranges.** `ufw status numbered` pads the number (`[ 1]`), so it was not the first field the code read: the Cloudflare-only rules UFW had numbered 1 to 9 stayed after the lock was gone. The number is now read from the line itself.
 - **A custom app with a document root other than `htdocs` answered 404 until its first upload.** The placeholder was written to `~/htdocs/index.html` whatever `--docroot` said, and the folder nginx serves (`~/htdocs/www`, `~/htdocs/public`) was not even created. The page is now written in the document root, which is created with it.
 - **`cipi app create --docroot=` takes a folder name and nothing else.** The value became nginx's `root` as it was typed: `--docroot=/www/` gave `htdocs//www/`, and `..` was not refused. It is now cleaned (`/www/` is `www`; `/` and `.` are `htdocs` itself) and checked — letters, digits, dots, dashes and underscores, folders separated by `/`, no `..` and no hidden folder — before anything is created. What the panel's API already accepted is accepted.
@@ -51,15 +59,15 @@ Zero Trust gets its private side. Cloudflare Tunnel publishes the sites; **Tails
 
 ### Notes
 
-- No migration: nothing is installed or changed until `enable`. `setup.sh` and `cipi self-update` never call it.
+- Migration 5.18.0 touches `deploy.php` and nothing else (the build's time limit, above): nothing restarts, nothing is deployed. Of the mesh, nothing is installed or changed until `enable`: `setup.sh` and `cipi self-update` never call it.
 - **Who reaches what is the network's own policy**, not UFW's: the mesh interface is allowed as a whole, as Tailscale's own guide does (its client accepts its interface before UFW is asked). Write the tailnet's access rules, or NetBird's policies, so that the people who run the server reach tcp 22, 80 and 443 of it, and nobody else does.
 - A database or Valkey from a laptop over the mesh: an SSH tunnel (TablePlus and DBeaver call it "over SSH") — the ports stay on localhost. There is no `tcp add` for the mesh.
 - Cloudflare's side stays read-only in the panel: `cipi zt status` only, as before. Tunnels, hostnames, Access and their locks are still the server's shell.
-- **Tailscale and NetBird themselves are not on the machine the release was prepared on.** `tests/verify-5.18.0.sh` (133 checks) runs every command, from the shell and as the panel, against stubs of `tailscale`, `netbird`, `ufw`, `ip`, `systemctl` and `apt-get` that keep a state and answer as the vendors' documentation says (`tailscale status --json`, NetBird's text `netbird status`); the flags of `tailscale up` and `netbird up` are the documented ones. On a first real server: `cipi zt tailscale enable --auth-key=…`, then `cipi zt tailscale status`, before any lock.
+- **Tailscale and NetBird themselves are not on the machine the release was prepared on.** `tests/verify-5.18.0.sh` runs every command, from the shell and as the panel, against stubs of `tailscale`, `netbird`, `ufw`, `ip`, `systemctl` and `apt-get` that keep a state and answer as the vendors' documentation says (`tailscale status --json`, NetBird's text `netbird status`); the flags of `tailscale up` and `netbird up` are the documented ones. On a first real server: `cipi zt tailscale enable --auth-key=…`, then `cipi zt tailscale status`, before any lock.
 - The panel's side: cipi/api 1.48.0 and cipi/gui 4.10.0.
+- **Custom apps created before**: nothing changes. An SFTP-only app keeps the `index.html` it was given; its vhost gets the new `index` line the next time it is written, which changes nothing where there is no `coming-soon.html`.
 
 ---
-- **Apps created before**: nothing changes. An SFTP-only app keeps the `index.html` it was given; its vhost gets the new `index` line the next time it is written, which changes nothing where there is no `coming-soon.html`.
 
 ## [5.17.0] — 2026-11-26
 

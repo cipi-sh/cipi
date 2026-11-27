@@ -67,20 +67,43 @@ task('node:finalize', function () {
     }
 });
 
+// cipi:build-timeout — Deployer stops a command after default_timeout (300
+// seconds), and installing the packages and building are the steps of a deploy
+// that can take longer than that: what runs through cipi_build_run() gets
+// cipi_build_timeout seconds. Every other step keeps the default.
+set('cipi_build_timeout', 1800);
+if (!function_exists(__NAMESPACE__ . '\\cipi_build_run')) {
+    function cipi_build_run(string $command): string
+    {
+        $default = get('default_timeout', 300);
+        $build = (int) get('cipi_build_timeout', 1800);
+        // No limit at all (0, null), or one that is longer already: left as it is.
+        if (!$default || (int) $default >= $build) {
+            return run($command);
+        }
+        set('default_timeout', $build);
+        try {
+            return run($command);
+        } finally {
+            set('default_timeout', $default);
+        }
+    }
+}
+
 // Dependencies exactly as locked. devDependencies are installed: the build needs them.
 task('node:install', function () {
     $cd = '{{cipi_node_env}} && cd {{release_path}} && ';
     if (test('[ -f {{release_path}}/pnpm-lock.yaml ]')) {
-        run($cd . 'pnpm install --frozen-lockfile');
+        cipi_build_run($cd . 'pnpm install --frozen-lockfile');
     } elseif (test('[ -f {{release_path}}/yarn.lock ]')) {
-        run($cd . 'if [ -f .yarnrc.yml ]; then yarn install --immutable; else yarn install --frozen-lockfile; fi');
+        cipi_build_run($cd . 'if [ -f .yarnrc.yml ]; then yarn install --immutable; else yarn install --frozen-lockfile; fi');
     } elseif (test('[ -f {{release_path}}/bun.lock ] || [ -f {{release_path}}/bun.lockb ]')) {
-        run($cd . 'command -v bun >/dev/null || { echo "bun lockfile found but bun is not installed" >&2; exit 1; }; bun install --frozen-lockfile');
+        cipi_build_run($cd . 'command -v bun >/dev/null || { echo "bun lockfile found but bun is not installed" >&2; exit 1; }; bun install --frozen-lockfile');
     } elseif (test('[ -f {{release_path}}/package-lock.json ]')) {
-        run($cd . 'npm ci --no-audit --no-fund');
+        cipi_build_run($cd . 'npm ci --no-audit --no-fund');
     } elseif (test('[ -f {{release_path}}/package.json ]')) {
         writeln('<comment>No lockfile — npm install (commit a lockfile for reproducible builds)</comment>');
-        run($cd . 'npm install --no-audit --no-fund');
+        cipi_build_run($cd . 'npm install --no-audit --no-fund');
     } else {
         throw new \RuntimeException('package.json not found in the repository root');
     }
@@ -88,8 +111,9 @@ task('node:install', function () {
 
 // Build command from apps.json (cipi app edit <app> --build=…), written by Cipi.
 task('node:build', function () {
-    run('{{cipi_node_env}} NODE_ENV=production && {{deploy_path}}/.deployer/node-build.sh {{release_path}}');
+    cipi_build_run('{{cipi_node_env}} NODE_ENV=production && {{deploy_path}}/.deployer/node-build.sh {{release_path}}');
 });
+// cipi:build-timeout end
 
 task('node:verify', function () {
     if (get('cipi_node_mode') === 'ssr') {

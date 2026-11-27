@@ -99,6 +99,38 @@ deploy_log_close() {
     chmod 664 "$lf" 2>/dev/null || true
 }
 
+# A deploy that Deployer stopped on its clock says so inside a PHP exception:
+# "The command "…" exceeded the timeout of 300 seconds". In plain words, under
+# "Deploy failed": which step it was — and, when it is the build of a recipe
+# without the build's own limit (written before 5.18.0 and edited by hand, so
+# the migration left it alone), the command that gives it one.
+_deploy_timeout_note() {   # <app> <deploy log>
+    local app="${1:-}" lf="${2:-}" run secs step
+    [[ -n "$app" && -f "$lf" ]] || return 0
+    # This run: from its start banner to the end of the log.
+    run=$(tail -n 600 -- "$lf" 2>/dev/null | awk '/===== deploy start /{ buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }')
+    secs=$(awk 'match($0, /exceeded the timeout of [0-9]+ seconds/) { s = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", s); print s; exit }' <<< "$run")
+    [[ "$secs" =~ ^[0-9]+$ ]] || return 0
+    step=$(awk '/\] task [A-Za-z0-9:_-]+$/ { t = $NF } /exceeded the timeout of [0-9]+ seconds/ { print t; exit }' <<< "$run")
+    case "$step" in
+        cipi:node_build|node:install|node:build)
+            if app_read "$app" "/home/${app}/.deployer/deploy.php" 2>/dev/null | grep -q 'cipi:build-timeout'; then
+                warn "The build (${step}) was stopped after $((secs / 60)) minutes, the most it is given (cipi_build_timeout in deploy.php)."
+                warn "What it was doing when it stopped: cipi deploy ${app} --log"
+            else
+                warn "The build (${step}) was stopped at the ${secs} seconds Deployer gives any command: this deploy.php"
+                warn "does not have the 30 minutes Cipi gives a build. To have them, let Cipi write the recipe again"
+                warn "(edits made to deploy.php by hand are lost): $(deployer_recipe_again_cmd "$app")"
+            fi
+            ;;
+        *)
+            warn "The step ${step:-of the deploy} was stopped after ${secs} seconds, the most Deployer gives a command."
+            warn "What it was doing when it stopped: cipi deploy ${app} --log"
+            ;;
+    esac
+    return 0
+}
+
 deploy_command() {
     local app="${1:-}"; shift||true
     [[ -z "$app" ]] && { error "Usage: cipi deploy <app> [--rollback|--releases|--history|--last|--log|--status|--key|--webhook|--snapshot|--snapshot-required|--rollback-on-unhealthy]  ·  cipi deploy --last"; exit 1; }
@@ -395,6 +427,7 @@ _deploy_run() {
     else
         deploy_log_close "$app" "FAILED" "$rel_after" "$secs" "$rc"
         error "Deploy failed (exit $rc)"
+        _deploy_timeout_note "$app" "$lf"
         warn "Log: ${lf}"
         warn "Rollback code: cipi deploy ${app} --rollback"
         if [[ -n "$snapshot_path" && -f "$snapshot_path" ]]; then

@@ -14,8 +14,13 @@
 #    sshd accepted over the mesh, lock http and disable never on the panel's
 #    own way in, and the sudoers that allow exactly these commands;
 #  - UFW rules numbered below ten are removed too ("[ 1]" is not awk's $1).
+#  - a custom app with no repository gets a Coming soon page in its docroot;
+#  - the build step of a deploy has a time limit of its own, not Deployer's
+#    300 seconds: the recipes, the deploy.php written before (hook, migration).
 # tailscale, netbird, ufw, ip, systemctl, apt-get, curl and sshd are stubs
 # that keep a state; the vault is real.
+# Deployer is a stub of a few lines (its config and its tasks); where the real
+# one is installed (/usr/local/bin/dep, or CIPI_TEST_DEP) it is asked too.
 # Run from repo root: bash tests/verify-5.18.0.sh
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -712,6 +717,294 @@ grep -q 'index index.html index.php ${APP_COMING_SOON_FILE};' "$A" && [[ "$(CIPI
 [[ "$(grep -c 'index index.html index.php' "$A")" == 1 ]] && pass "only the custom vhost changed" || fail "another vhost has that index line"
 CIPI_LIB="$LIB" bash -c 'source "$1" 2>/dev/null; source "$1" 2>/dev/null; echo ok' _ "$A" | grep -q ok && pass "app.sh loaded twice: the page's name is not declared twice" || fail "app.sh loaded twice"
 grep -q 'Coming soon page' "${ROOT}/CHANGELOG.md" && pass "CHANGELOG says it" || fail "CHANGELOG: coming soon"
+
+# ── the build step of a deploy: a time limit of its own ───────
+echo "--- deploy: build timeout"
+DPL="${LIB}/deployer"
+for f in "${LIB}/common.sh" "${LIB}/sync.sh" "${LIB}/migrations/5.18.0.sh"; do
+    bash -n "$f" && pass "$(basename "$f") parses" || fail "$(basename "$f") parse"
+done
+bt_block() { sed -n '/^\/\/ cipi:build-timeout /,/^\/\/ cipi:build-timeout end$/p' "$1"; }
+bt_helper() { sed -n "/^set('cipi_build_timeout'/,/^}\$/p" "$1"; }
+ok=1
+for t in laravel laravel-octane node; do
+    [[ "$(grep -c '^// cipi:build-timeout ' "${DPL}/${t}.php")" == 2 && "$(bt_block "${DPL}/${t}.php" | tail -n 1)" == "// cipi:build-timeout end" ]] || { ok=0; fail "${t}.php: no build-timeout block"; }
+    [[ "$(bt_helper "${DPL}/${t}.php")" == "$(bt_helper "${DPL}/laravel.php")" && -n "$(bt_helper "${DPL}/${t}.php")" ]] || { ok=0; fail "${t}.php: its cipi_build_run is not the one of laravel.php"; }
+done
+[[ $ok == 1 ]] && pass "the three release recipes have the block, with one and the same cipi_build_run" || true
+[[ "$(bt_block "${DPL}/laravel.php")" == "$(bt_block "${DPL}/laravel-octane.php")" ]] && pass "Laravel and Octane: the same block" || fail "the Octane block differs"
+grep -q "^set('cipi_build_timeout', 1800);" "${DPL}/laravel.php" && pass "the build gets 30 minutes" || fail "cipi_build_timeout"
+! grep -hE "^[[:space:]]+run\(.*(node-build\.sh|npm (ci|install)|pnpm install|yarn install|bun install)" "${DPL}/laravel.php" "${DPL}/laravel-octane.php" "${DPL}/node.php" | grep -q . \
+    && [[ "$(grep -c '^[[:space:]]*cipi_build_run(' "${DPL}/node.php")" == 6 && "$(grep -c '^[[:space:]]*cipi_build_run(' "${DPL}/laravel.php")" == 1 ]] \
+    && pass "no install and no build is left on Deployer's 300 seconds (Laravel: node_build; Node: the five installs and the build)" || fail "a build command still runs through run()"
+# PHP 7.4 parses deploy.php on a server that kept Deployer 7: no named argument.
+! { bt_block "${DPL}/laravel.php"; bt_block "${DPL}/laravel-octane.php"; bt_block "${DPL}/node.php"; } | grep -qE '\b(timeout|idleTimeout|idle_timeout): ' \
+    && pass "no named argument (timeout: …): a deploy.php read by PHP 7.4 under Deployer 7 still parses" || fail "named argument in the block"
+! grep -q 'cipi_build_run\|cipi:build-timeout' "${DPL}/custom.php" && pass "the classic recipe builds nothing: untouched" || fail "custom.php"
+
+bt_recipe() {   # <app> <template>: deploy.php as Cipi writes it today
+    sed -e "s|__CIPI_APP_USER__|$1|g" -e "s|__CIPI_DEPLOY_PATH__|/home/$1|g" -e "s|__CIPI_PHP_VERSION__|8.5|g" \
+        -e "s|__CIPI_REPOSITORY__|git@github.com:acme/$1.git|g" -e "s|__CIPI_BRANCH__|main|g" -e "s|__CIPI_KEEP_RELEASES__|5|g" \
+        -e "s|__CIPI_SHARED_FILES__|['.env']|g" -e "s|__CIPI_HOOK_STORAGE_LINK__|after('deploy:vendors', 'artisan:storage:link');|g" \
+        -e "s|__CIPI_HOOK_MIGRATE__|after('deploy:vendors', 'artisan:migrate');|g" -e "s|__CIPI_HOOK_OPTIMIZE__|after('deploy:vendors', 'artisan:optimize');|g" \
+        -e "s|__CIPI_HOOK_HORIZON_TERMINATE__|before('deploy:symlink', 'horizon:terminate');|g" \
+        -e "s|__CIPI_HOOK_QUEUE_RESTART__|after('deploy:symlink', 'artisan:queue:restart');|g" \
+        -e "s|__CIPI_HOOK_EXTRA_ARTISAN__|// no extra artisan (deploy-config)|g" -e "/__CIPI_EXTRA_ARTISAN_TASK__/d" \
+        -e "s|__CIPI_NODE_VERSION__|22|g" -e "s|__CIPI_NODE_MODE__|spa|g" -e "s|__CIPI_NODE_OUTPUT__|dist|g" "${DPL}/$2.php"
+}
+bt_before() {   # <app> <template>: the same recipe as it was written before 5.18.0
+    bt_recipe "$1" "$2" | sed -e '/^\/\/ cipi:build-timeout end$/d' -e '/^\/\/ cipi:build-timeout /,/^}$/d' -e 's/cipi_build_run(/run(/' | cat -s
+}
+BT="${TMP}/bt"; mkdir -p "$BT/cfg"
+for a in shop blog front static hand twice early closed fresh handnode; do mkdir -p "$BT/home/$a/.deployer"; done
+printf '%s\n' '{"shop":{"php":"8.5"},"blog":{"php":"8.5","octane":"frankenphp"},"front":{"php":"8.5","custom":true,"runtime":"node","node_build":"npm run build"},
+  "static":{"php":"8.5","custom":true},"hand":{"php":"8.5"},"twice":{"php":"8.5"},"early":{"php":"8.5"},"closed":{"php":"8.5"},"fresh":{"php":"8.5"},
+  "handnode":{"php":"8.5","custom":true,"runtime":"node","node_build":"npm run build"}}' > "$BT/cfg/apps.json"
+OLD_BUILD="    run('test ! -x {{deploy_path}}/.deployer/node-build.sh || {{deploy_path}}/.deployer/node-build.sh {{release_path}}');"
+bt_before shop laravel > "$BT/home/shop/.deployer/deploy.php"
+bt_before blog laravel-octane > "$BT/home/blog/.deployer/deploy.php"
+bt_before front node > "$BT/home/front/.deployer/deploy.php"
+cp "${DPL}/custom.php" "$BT/home/static/.deployer/deploy.php"
+bt_before hand laravel | sed "s#^    run('test ! -x .*#    run('cd {{release_path}} \&\& npm ci \&\& npm run build', ['timeout' => 900]);#" > "$BT/home/hand/.deployer/deploy.php"
+{ bt_before twice laravel; printf "task('cipi:node_build', function () {\n    run('cd {{release_path}} && make assets');\n});\n"; } > "$BT/home/twice/.deployer/deploy.php"
+bt_before early laravel | sed -e "/^\/\/ Optional frontend build/,/^});\$/d" -e "/'cipi:node_build'/d" > "$BT/home/early/.deployer/deploy.php"
+{ bt_before closed laravel; echo '?>'; } > "$BT/home/closed/.deployer/deploy.php"
+bt_recipe fresh laravel > "$BT/home/fresh/.deployer/deploy.php"
+bt_before handnode node | sed "s#'npm ci --no-audit --no-fund'#'npm ci --no-audit --no-fund --legacy-peer-deps'#" > "$BT/home/handnode/.deployer/deploy.php"
+# The recipes "before" are the ones on the servers: the command of the report, word for word.
+grep -qxF -- "$OLD_BUILD" "$BT/home/shop/.deployer/deploy.php" && ! grep -q 'cipi_build_run\|cipi:build-timeout' "$BT/home/shop/.deployer/deploy.php" \
+    && pass "a recipe from before: the build is a plain run(), on Deployer's 300 seconds" || fail "the recipe 'before' is not the one on the servers"
+grep -qxF -- "        run(\$cd . 'npm ci --no-audit --no-fund');" "$BT/home/front/.deployer/deploy.php" \
+    && grep -qxF -- "    run('{{cipi_node_env}} NODE_ENV=production && {{deploy_path}}/.deployer/node-build.sh {{release_path}}');" "$BT/home/front/.deployer/deploy.php" \
+    && pass "…and so are the install and the build of a Node app" || fail "the Node recipe 'before'"
+for a in shop blog front static hand twice early closed fresh handnode; do md5sum < "$BT/home/$a/.deployer/deploy.php" > "$BT/$a.sum"; done
+same() { [[ "$(md5sum < "$BT/home/$1/.deployer/deploy.php")" == "$(cat "$BT/$1.sum")" ]]; }
+BTH() {
+    CIPI_LIB="$LIB" CIPI_CONFIG="$BT/cfg" CIPI_LOG="$BT/log" D1="$BT" bash -c 'set -uo pipefail
+        RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
+        source "$CIPI_LIB/common.sh" 2>/dev/null
+        vault_read() { cat "$D1/cfg/apps.json"; }
+        app_read() { cat -- "${2/#\/home\//$D1/home/}" 2>/dev/null; }
+        app_append() { cat >> "${2/#\/home\//$D1/home/}"; }
+        eval "$(declare -f deployer_build_timeout_ensure_hook | sed "s|\[\[ -f \"\$df\" \]\]|[[ -f \"\${df/#\\\\/home\\\\//\$D1/home/}\" ]]|")"
+        deployer_build_timeout_ensure_hook "$1"; echo "rc=$?"' _ "$1"
+}
+out=$(BTH shop)
+[[ "$out" == "rc=0" ]] && [[ "$(grep -c '^// cipi:build-timeout ' "$BT/home/shop/.deployer/deploy.php")" == 2 ]] \
+    && [[ "$(tail -n 4 "$BT/home/shop/.deployer/deploy.php" | head -n 1)" == "task('cipi:node_build', function () {" && "$(tail -n 1 "$BT/home/shop/.deployer/deploy.php")" == "// cipi:build-timeout end" ]] \
+    && pass "a Laravel recipe from before gets the block: the build task again, last, with the limit" || fail "shop: ${out}"
+[[ "$(sed -n '/^\/\/ cipi:build-timeout /,$p' "$BT/home/shop/.deployer/deploy.php")" == "$(bt_block "${DPL}/laravel.php")" ]] && grep -qxF -- "$OLD_BUILD" "$BT/home/shop/.deployer/deploy.php" \
+    && pass "…word for word the block of today's recipe, appended: nothing that was there is rewritten" || fail "shop: what was appended"
+out=$(BTH shop); [[ "$out" == "rc=0" && "$(grep -c '^// cipi:build-timeout ' "$BT/home/shop/.deployer/deploy.php")" == 2 ]] && pass "a second run adds nothing" || fail "shop twice: ${out}"
+out=$(BTH blog); [[ "$out" == "rc=0" ]] && grep -q "^    cipi_build_run('test ! -x" "$BT/home/blog/.deployer/deploy.php" && pass "an Octane recipe too" || fail "blog: ${out}"
+out=$(BTH front)
+[[ "$out" == "rc=0" ]] && [[ "$(grep -c "^task('node:install'," "$BT/home/front/.deployer/deploy.php")" == 2 && "$(grep -c "^task('node:build'," "$BT/home/front/.deployer/deploy.php")" == 2 ]] \
+    && [[ "$(grep -c '^[[:space:]]*cipi_build_run(' "$BT/home/front/.deployer/deploy.php")" == 6 ]] \
+    && pass "a Node app (custom, with a runtime): its install and its build again, with the limit" || fail "front: ${out}"
+out=$(BTH static); [[ "$out" == "rc=0" ]] && same static && pass "a classic app builds nothing: left alone (0)" || fail "static: ${out}"
+out=$(BTH hand); [[ "$out" == "rc=2" ]] && same hand && pass "a build task edited by hand is left as it is (2): defining it again would undo the edit" || fail "hand: ${out}"
+out=$(BTH twice); [[ "$out" == "rc=2" ]] && same twice && pass "a build task the file defines again is left as it is (2)" || fail "twice: ${out}"
+out=$(BTH handnode); [[ "$out" == "rc=2" ]] && same handnode && pass "a Node install edited by hand: left as it is (2)" || fail "handnode: ${out}"
+out=$(BTH early); [[ "$out" == "rc=0" ]] && same early && pass "a recipe from before the build task has nothing to give more time to (0)" || fail "early: ${out}"
+out=$(BTH closed); [[ "$out" == "rc=1" ]] && same closed && pass "a deploy.php closed with ?> is not appended to (1)" || fail "closed: ${out}"
+out=$(BTH fresh); [[ "$out" == "rc=0" ]] && same fresh && pass "a recipe written today has the block: nothing to add" || fail "fresh: ${out}"
+grep -q 'deployer_build_timeout_ensure_hook "$app"' "${LIB}/sync.sh" && grep -q 'deployer_build_timeout_ensure_hook "$u"' "${LIB}/migrations/5.18.0.sh" \
+    && pass "the hook runs for an app restored by cipi sync, and in the migration" || fail "hook call sites"
+
+# What a deploy does with it. A Deployer of a few lines: the config of the host
+# and the tasks by name — the last definition of a name is the one that runs.
+if command -v php >/dev/null 2>&1; then
+    for a in shop blog front fresh; do php -l "$BT/home/$a/.deployer/deploy.php" >/dev/null 2>&1 || fail "php -l: $a"; done
+    pass "the recipes with the block are valid PHP"
+    cat > "$BT/dep-stub.php" <<'PHPSTUB'
+<?php
+namespace Deployer;
+
+final class Stub
+{
+    public static array $cfg = ['default_timeout' => 300];
+    public static array $tasks = [];
+    public static array $seen = [];
+    public static string $lock = 'package-lock.json';
+    public static ?string $fail = null;
+}
+final class Chain { public function __call($name, $args) { return $this; } }
+function set($k, $v) { Stub::$cfg[$k] = $v; }
+function get($k, $d = null) { return array_key_exists($k, Stub::$cfg) ? Stub::$cfg[$k] : $d; }
+function add($k, $v) {}
+function host(...$a) { return new Chain(); }
+function after(...$a) {}
+function before(...$a) {}
+function desc(...$a) {}
+function task($name, $body = null) { if (is_callable($body)) { Stub::$tasks[$name] = $body; } return new Chain(); }
+function test($command) { return strpos($command, Stub::$lock) !== false; }
+function writeln($line) {}
+function run($command)
+{
+    Stub::$seen[] = var_export(get('default_timeout', 300), true);
+    if (Stub::$fail !== null && strpos($command, Stub::$fail) !== false) {
+        throw new \RuntimeException('exceeded the timeout');
+    }
+    return '';
+}
+function probe(string $label, array $tasks): void
+{
+    Stub::$seen = [];
+    $threw = 'no';
+    try {
+        foreach ($tasks as $t) { (Stub::$tasks[$t])(); }
+    } catch (\RuntimeException $e) {
+        $threw = 'yes';
+    }
+    $build = implode(',', array_unique(Stub::$seen));
+    $runs = count(Stub::$seen);
+    // The step that comes after the build, whatever became of it.
+    [$fail, Stub::$fail, Stub::$seen] = [Stub::$fail, null, []];
+    run('php artisan migrate --force');
+    Stub::$fail = $fail;
+    printf("%s build=%s runs=%d threw=%s next=%s\n", $label, $build, $runs, $threw, Stub::$seen[0]);
+}
+
+[$file, $tasks] = [$argv[1], explode(',', $argv[2])];
+require $file;
+probe('default', $tasks);
+Stub::$cfg['default_timeout'] = 0;    probe('zero', $tasks);
+Stub::$cfg['default_timeout'] = null; probe('null', $tasks);
+Stub::$cfg['default_timeout'] = 3600; probe('longer', $tasks);
+Stub::$cfg['default_timeout'] = 300;  Stub::$cfg['cipi_build_timeout'] = 900; probe('own', $tasks);
+Stub::$cfg['cipi_build_timeout'] = 1800; Stub::$fail = 'node-build.sh'; probe('failed', $tasks);
+PHPSTUB
+    dep_stub() {   # <app> <tasks>
+        grep -v "^require 'recipe/" "$BT/home/$1/.deployer/deploy.php" > "$BT/$1.php"
+        php "$BT/dep-stub.php" "$BT/$1.php" "$2" 2>&1
+    }
+    for a in shop blog fresh; do
+        out=$(dep_stub "$a" cipi:node_build)
+        grep -qx 'default build=1800 runs=1 threw=no next=300' <<< "$out" \
+            && pass "${a}: the build runs with 1800 seconds, and the step after it with Deployer's 300 again" || fail "${a}: $(head -n 3 <<< "$out")"
+    done
+    out=$(dep_stub shop cipi:node_build)
+    grep -qx 'zero build=0 runs=1 threw=no next=0' <<< "$out" && grep -qx 'null build=NULL runs=1 threw=no next=NULL' <<< "$out" \
+        && pass "a default_timeout turned off (0, null) stays off: the build gets no limit it did not have" || fail "no limit: ${out}"
+    grep -qx 'longer build=3600 runs=1 threw=no next=3600' <<< "$out" && pass "a default_timeout that is longer already is not shortened" || fail "longer: ${out}"
+    grep -qx 'own build=900 runs=1 threw=no next=300' <<< "$out" && pass "cipi_build_timeout is the one number to change" || fail "own: ${out}"
+    grep -qx 'failed build=1800 runs=1 threw=yes next=300' <<< "$out" \
+        && pass "a build that fails (or does time out) leaves the 300 seconds in place for what runs after it" || fail "failed: ${out}"
+    out=$(dep_stub front node:install,node:build)
+    grep -qx 'default build=1800 runs=2 threw=no next=300' <<< "$out" && grep -qx 'failed build=1800 runs=2 threw=yes next=300' <<< "$out" \
+        && pass "a Node app: npm ci and the build with 1800 seconds each, then 300 again" || fail "front: ${out}"
+    # The function is declared once, however many times the block is there.
+    { cat "$BT/shop.php"; bt_block "${DPL}/laravel.php"; } > "$BT/shop2.php"
+    php "$BT/dep-stub.php" "$BT/shop2.php" cipi:node_build 2>&1 | grep -qx 'default build=1800 runs=1 threw=no next=300' \
+        && pass "the block twice in one file is not a fatal error (cipi_build_run is declared once)" || fail "block twice"
+else
+    echo "  (php not installed: the block is not run)"
+fi
+
+# With the real Deployer, when it is on this machine: a command that outlasts
+# default_timeout is stopped by run() and finishes through cipi_build_run().
+DEP=""; for c in /usr/local/bin/dep "${CIPI_TEST_DEP:-}"; do [[ -n "$c" && -f "$c" ]] && DEP="$c" && break; done
+if [[ -n "$DEP" ]] && command -v php >/dev/null 2>&1 && php "$DEP" --version >/dev/null 2>&1; then
+    {
+        printf '<?php\nnamespace Deployer;\nlocalhost();\nset("default_timeout", 2);\n'
+        bt_helper "${DPL}/laravel.php" | sed "s/^set('cipi_build_timeout', 1800);/set('cipi_build_timeout', 30);/"
+        printf '%s\n' "task('probe:build', function () { cipi_build_run('sleep 4'); writeln('after=' . get('default_timeout')); });" \
+                      "task('probe:plain', function () { run('sleep 4'); writeln('not stopped'); });"
+    } > "$BT/probe.php"
+    out=$(cd "$BT" && php "$DEP" probe:build -f "$BT/probe.php" 2>&1); rc=$?
+    [[ $rc -eq 0 ]] && grep -q 'after=2' <<< "$out" && pass "real Deployer: a build of 4 seconds under a default_timeout of 2 finishes, and the 2 seconds are back" || fail "real Deployer, build: rc=${rc} ${out}"
+    out=$(cd "$BT" && php "$DEP" probe:plain -f "$BT/probe.php" 2>&1); rc=$?
+    [[ $rc -ne 0 ]] && ! grep -q 'not stopped' <<< "$out" && pass "real Deployer: the same command through run() is stopped at the default" || fail "real Deployer, plain: rc=${rc} ${out}"
+else
+    echo "  (no Deployer on this machine: the limit is checked against the stub only)"
+fi
+
+# cipi deploy, when Deployer stops a step on its clock: said in plain words.
+bash -n "${LIB}/deploy.sh" && pass "deploy.sh parses" || fail "deploy.sh parse"
+DTN() {   # <app> <log>: what cipi deploy adds under "Deploy failed"
+    CIPI_LIB="$LIB" CIPI_CONFIG="$BT/cfg" CIPI_LOG="$BT/log" D1="$BT" bash -c 'set -uo pipefail
+        source "$CIPI_LIB/common.sh" 2>/dev/null
+        RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
+        vault_read() { cat "$D1/cfg/apps.json"; }
+        app_read() { cat -- "${2/#\/home\//$D1/home/}" 2>/dev/null; }
+        eval "$(sed -n "/^_deploy_timeout_note() {/,/^}/p" "$CIPI_LIB/deploy.sh")"
+        _deploy_timeout_note "$1" "$2"; echo "rc=$?"' _ "$1" "$2"
+}
+dlog() {   # <file> <step> <seconds> <command>: one failed run, as the deploy log has it
+    {
+        printf '[2026-11-27 14:05:02] ===== deploy start  app=x trigger=cli branch=main from-release=70 =====\n'
+        printf '[2026-11-27 14:05:40] task deploy:vendors\n[2026-11-27 14:08:19] task %s\n' "$2"
+        printf '[2026-11-27 14:13:19] [localhost] Deployer\\Exception\\TimeoutException in deploy.php on line 52:\n[2026-11-27 14:13:19] \n'
+        printf '[2026-11-27 14:13:19]   The command "%s" exceeded the timeout of %s seconds.\n[2026-11-27 14:13:19] \n' "$4" "$3"
+        printf '[2026-11-27 14:13:20] task deploy:failed\n[2026-11-27 14:13:20] task deploy:unlock\n'
+    } >> "$1"
+}
+# The report: an app whose deploy.php is still the one from before (twice: defined again by hand, left alone by the hook).
+dlog "$BT/twice.log" cipi:node_build 300 "test ! -x /home/twice/.deployer/node-build.sh || /home/twice/.deployer/node-build.sh /home/twice/releases/71"
+out=$(DTN twice "$BT/twice.log")
+grep -q '^\[WARN\] The build (cipi:node_build) was stopped at the 300 seconds Deployer gives any command' <<< "$out" && grep -q 'cipi app deploy-config twice --keep-releases=5' <<< "$out" && grep -qx 'rc=0' <<< "$out" \
+    && pass "a build stopped at 300 seconds in a deploy.php without the limit: said, with the command that writes the recipe again" || fail "timeout note, old recipe: ${out}"
+dlog "$BT/handnode.log" node:install 300 "export PATH=/opt/cipi/node/22/bin && cd /home/handnode/releases/3 && npm ci --no-audit --no-fund --legacy-peer-deps"
+out=$(DTN handnode "$BT/handnode.log"); grep -q 'The build (node:install) was stopped at the 300 seconds' <<< "$out" && grep -q 'cipi app edit handnode --build="npm run build"' <<< "$out" \
+    && pass "…for a Node app that command is cipi app edit --build" || fail "timeout note, node: ${out}"
+dlog "$BT/shop.log" cipi:node_build 1800 "test ! -x /home/shop/.deployer/node-build.sh || /home/shop/.deployer/node-build.sh /home/shop/releases/9"
+out=$(DTN shop "$BT/shop.log"); grep -q 'The build (cipi:node_build) was stopped after 30 minutes, the most it is given (cipi_build_timeout in deploy.php)' <<< "$out" && grep -q 'cipi deploy shop --log' <<< "$out" && ! grep -q 'deploy-config' <<< "$out" \
+    && pass "a build that used its 30 minutes: said as that, with where to look" || fail "timeout note, 30 minutes: ${out}"
+dlog "$BT/blog.log" artisan:migrate 300 "/usr/bin/php8.5 /home/blog/releases/4/artisan migrate --force"
+out=$(DTN blog "$BT/blog.log"); grep -q 'The step artisan:migrate was stopped after 300 seconds, the most Deployer gives a command' <<< "$out" && ! grep -q 'The build (' <<< "$out" \
+    && pass "another step (a migration) stopped at 300 seconds is named as what it is" || fail "timeout note, migrate: ${out}"
+# The same log, then a run that failed for another reason: nothing to add to that one.
+printf '%s\n' '[2026-11-27 15:00:00] ===== deploy start  app=x trigger=cli branch=main from-release=70 =====' '[2026-11-27 15:00:03] task deploy:update_code' \
+    '[2026-11-27 15:00:04] fatal: Could not read from remote repository.' >> "$BT/blog.log"
+out=$(DTN blog "$BT/blog.log"); [[ "$out" == "rc=0" ]] && pass "a run that failed for another reason gets no such line — an earlier run's timeout is not this one's" || fail "timeout note, another failure: ${out}"
+out=$(DTN shop "$BT/none.log"); [[ "$out" == "rc=0" ]] && pass "no log, no line" || fail "timeout note, no log: ${out}"
+grep -q '_deploy_timeout_note "$app" "$lf"' "${LIB}/deploy.sh" && pass "cipi deploy says it right under \"Deploy failed\"" || fail "deploy.sh does not call the note"
+
+echo "--- migration 5.18.0"
+MG="${TMP}/mig"; mkdir -p "$MG/cfg" "$MG/lib/migrations" "$MG/bin" "$MG/log"
+for a in shop blog front static hand handnode; do mkdir -p "$MG/home/$a/.deployer"; done
+printf '%s\n' '{"shop":{"php":"8.5","keep_releases":"3"},"blog":{"php":"8.5","octane":"frankenphp"},"front":{"php":"8.5","custom":true,"runtime":"node","node_build":"npm run build"},
+  "static":{"php":"8.5","custom":true},"hand":{"php":"8.5"},"handnode":{"php":"8.5","custom":true,"runtime":"node","node_build":"pnpm build"}}' > "$MG/cfg/apps.json"
+bt_before shop laravel > "$MG/home/shop/.deployer/deploy.php"
+bt_before blog laravel-octane > "$MG/home/blog/.deployer/deploy.php"
+bt_before front node > "$MG/home/front/.deployer/deploy.php"
+cp "${DPL}/custom.php" "$MG/home/static/.deployer/deploy.php"
+cp "$BT/home/hand/.deployer/deploy.php" "$MG/home/hand/.deployer/deploy.php"
+cp "$BT/home/handnode/.deployer/deploy.php" "$MG/home/handnode/.deployer/deploy.php"
+for f in "${LIB}"/*.sh; do sed -e "s#/home/#${MG}/home/#g" "$f" > "$MG/lib/$(basename "$f")"; done
+cp -r "${LIB}/deployer" "$MG/lib/"
+sed -e "s#/home/#${MG}/home/#g" "${LIB}/migrations/5.18.0.sh" > "$MG/lib/migrations/5.18.0.sh"
+cat > "$MG/bin/sudo" <<'EOF'
+#!/bin/bash
+while [ $# -gt 0 ] && [ "$1" != "--" ] && [ "${1#-}" != "$1" ]; do [ "$1" = "-u" ] && shift; shift; done
+[ "$1" = "--" ] && shift
+exec "$@"
+EOF
+cat > "$MG/bin/id" <<'EOF'
+#!/bin/bash
+case "$1" in -u) echo 0 ;; -un|-gn|-nG) echo root ;; *) exit 0 ;; esac
+EOF
+cat > "$MG/bin/install" <<'EOF'
+#!/bin/bash
+a=(); skip=
+for x in "$@"; do case "$x" in -o|-g) skip=1 ;; *) if [ -n "$skip" ]; then skip=; else a+=("$x"); fi ;; esac; done
+exec /usr/bin/install "${a[@]}"
+EOF
+chmod +x "$MG/bin/sudo" "$MG/bin/id" "$MG/bin/install"
+head -c 32 /dev/urandom | base64 > "$MG/cfg/.vault_key"
+mig518() { PATH="$MG/bin:$PATH" CIPI_LIB="$MG/lib" CIPI_CONFIG="$MG/cfg" CIPI_LOG="$MG/log" bash "$MG/lib/migrations/5.18.0.sh" 2>&1; }
+out=$(mig518); rc=$?
+[[ $rc -eq 0 ]] && grep -q 'Migration 5.18.0 complete' <<< "$out" && pass "the migration runs" || fail "migration: rc=${rc} ${out}"
+grep -q 'cipi:build-timeout' "$MG/home/shop/.deployer/deploy.php" && grep -q 'cipi:build-timeout' "$MG/home/blog/.deployer/deploy.php" && grep -q 'cipi:build-timeout' "$MG/home/front/.deployer/deploy.php" \
+    && grep -q '3 app(s) give the build step 30 minutes instead of 300 seconds' <<< "$out" && pass "…Laravel, Octane and Node recipes get the block, and it is said" || fail "migration block: ${out}"
+! grep -q 'cipi:build-timeout' "$MG/home/static/.deployer/deploy.php" && ! grep -q 'static' <<< "$out" && pass "…a classic app is not touched and not named" || fail "migration static: ${out}"
+grep -q 'hand: deploy.php was edited by hand' <<< "$out" && ! grep -q 'cipi:build-timeout' "$MG/home/hand/.deployer/deploy.php" && grep -q 'cipi app deploy-config hand --keep-releases=5' <<< "$out" \
+    && pass "…a build task edited by hand is left as it is, with the command that writes the recipe again" || fail "migration hand: ${out}"
+grep -q 'handnode: deploy.php was edited by hand' <<< "$out" && grep -q 'cipi app edit handnode --build="pnpm build"' <<< "$out" \
+    && pass "…for a Node app that command is cipi app edit --build (deploy-config is not for it)" || fail "migration handnode: ${out}"
+out2=$(mig518); grep -q 'deploy.php: nothing to change' <<< "$out2" && ! grep -q 'app(s) give' <<< "$out2" && grep -q 'hand: deploy.php was edited by hand' <<< "$out2" \
+    && pass "a second run changes nothing (and names the ones edited by hand again)" || fail "migration twice: ${out2}"
+grep -q 'exceeded the timeout' "${ROOT}/CHANGELOG.md" && grep -q 'cipi_build_timeout\|30 minutes' "${ROOT}/CHANGELOG.md" && pass "CHANGELOG says it" || fail "CHANGELOG: build timeout"
 
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="

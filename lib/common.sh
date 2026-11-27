@@ -884,6 +884,71 @@ deployer_flow_ensure_hook() {
     return 0
 }
 
+# The command that makes Cipi write an app's deploy.php again from today's
+# recipe (edits made to the file by hand are lost): what a message says when
+# it leaves a hand-edited deploy.php as it is. deploy-config is not for Node
+# apps, which are custom apps with a runtime.
+deployer_recipe_again_cmd() {   # <app>
+    local app="$1" kr
+    if [[ "$(app_get "$app" runtime 2>/dev/null || true)" == "node" ]]; then
+        printf 'cipi app edit %s --build="%s"\n' "$app" "$(app_get "$app" node_build 2>/dev/null || true)"
+    else
+        kr=$(app_get "$app" keep_releases 2>/dev/null || true); [[ "$kr" =~ ^[0-9]+$ ]] || kr=5
+        printf 'cipi app deploy-config %s --keep-releases=%s\n' "$app" "$kr"
+    fi
+}
+
+# Deployer stops a command after default_timeout — 300 seconds — and the
+# frontend build is the step of a deploy that takes longer than that on a small
+# or busy server: the deploy ended at "exceeded the timeout of 300 seconds",
+# some days and not others. The recipes now run the build (the node_build of a
+# Laravel app; the install and the build of a Node app) through
+# cipi_build_run(), with a limit of its own (5.18.0). This appends the same
+# lines — the block between the two "cipi:build-timeout" comments of the recipe
+# the app would be given today — to a deploy.php written before: the build
+# tasks are defined again, with the limit.
+#
+# Returns 0 when the block is there, was added, or there is nothing to give
+# more time to (custom apps; a Laravel recipe from before the build task); 2
+# when the file was left as it is on purpose: a build task is defined more than
+# once, or does not run the commands Cipi wrote (a deploy.php edited by hand —
+# defining the task again would undo the edit).
+deployer_build_timeout_ensure_hook() {
+    local app="$1" df cur tpl block name line
+    df="/home/${app}/.deployer/deploy.php"
+    [[ -f "$df" ]] || return 1
+    # A Node app is a custom app with a runtime: asked first.
+    if [[ "$(app_get "$app" runtime 2>/dev/null || true)" == "node" ]]; then
+        tpl="${CIPI_LIB}/deployer/node.php"
+    elif [[ "$(app_get "$app" custom 2>/dev/null || true)" == "true" ]]; then
+        return 0
+    elif [[ -n "$(app_get "$app" octane 2>/dev/null || true)" ]]; then
+        tpl="${CIPI_LIB}/deployer/laravel-octane.php"
+    else
+        tpl="${CIPI_LIB}/deployer/laravel.php"
+    fi
+    cur=$(app_read "$app" "$df") || return 1
+    grep -q 'cipi:build-timeout' <<< "$cur" && return 0
+    if [[ "$tpl" != */node.php ]]; then
+        grep -q "recipe/laravel.php" <<< "$cur" || return 0
+        grep -qE "task\([[:space:]]*['\"]cipi:node_build['\"]" <<< "$cur" || return 0
+    fi
+    [[ -f "$tpl" ]] || return 1
+    grep -qE '^[[:space:]]*\?>[[:space:]]*$' <<< "$cur" && return 1
+    block=$(sed -n '/^\/\/ cipi:build-timeout /,/^\/\/ cipi:build-timeout end$/p' "$tpl")
+    [[ "$(tail -n 1 <<< "$block")" == "// cipi:build-timeout end" ]] || return 1
+    # Each task of the block is in the file once…
+    while IFS= read -r name; do
+        [[ "$(grep -cE "task\([[:space:]]*['\"]${name}['\"]" <<< "$cur")" == 1 ]] || return 2
+    done < <(grep -oE "^task\('[^']+'" <<< "$block" | cut -d"'" -f2)
+    # …and runs the commands of the block, as Cipi wrote them before the limit.
+    while IFS= read -r line; do
+        grep -qxF -- "${line/cipi_build_run(/run(}" <<< "$cur" || return 2
+    done < <(grep -E '^[[:space:]]+cipi_build_run\(' <<< "$block")
+    printf '\n%s\n' "$block" | app_append "$app" "$df" || return 1
+    return 0
+}
+
 # What the move from Deployer 6 to 8 left behind in an app that had released
 # on Deployer 6, repaired as the app user (idempotent, prints one line per
 # change and nothing when there was nothing to do):

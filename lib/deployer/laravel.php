@@ -47,10 +47,34 @@ task('cipi:chmod_storage_logs_dir', function () {
     run('chmod 775 {{release_path}}/storage/logs 2>/dev/null || true');
 });
 
+// cipi:build-timeout — Deployer stops a command after default_timeout (300
+// seconds), and the frontend build is the one step of a deploy that can take
+// longer than that: what runs through cipi_build_run() gets cipi_build_timeout
+// seconds. Every other step keeps the default.
+set('cipi_build_timeout', 1800);
+if (!function_exists(__NAMESPACE__ . '\\cipi_build_run')) {
+    function cipi_build_run(string $command): string
+    {
+        $default = get('default_timeout', 300);
+        $build = (int) get('cipi_build_timeout', 1800);
+        // No limit at all (0, null), or one that is longer already: left as it is.
+        if (!$default || (int) $default >= $build) {
+            return run($command);
+        }
+        set('default_timeout', $build);
+        try {
+            return run($command);
+        } finally {
+            set('default_timeout', $default);
+        }
+    }
+}
+
 // Optional frontend build (script written by cipi when node_build is set).
 task('cipi:node_build', function () {
-    run('test ! -x {{deploy_path}}/.deployer/node-build.sh || {{deploy_path}}/.deployer/node-build.sh {{release_path}}');
+    cipi_build_run('test ! -x {{deploy_path}}/.deployer/node-build.sh || {{deploy_path}}/.deployer/node-build.sh {{release_path}}');
 });
+// cipi:build-timeout end
 
 task('workers:stop', function () {
     run('sudo /usr/local/bin/cipi-worker stop __CIPI_APP_USER__');

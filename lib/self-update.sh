@@ -64,7 +64,11 @@ _su_delay_hours()  { _su_policy | jq -r '.delay_hours'; }
 
 # The keys a release may be signed with: "<principal> <type> <key>" lines of
 # an allowed_signers file (git, gpg.format=ssh).
-_su_signers_count() { grep -cE '^[^#[:space:]][^[:space:]]*[[:space:]].*(ssh-ed25519|ssh-rsa|ecdsa-sha2-|sk-ssh-ed25519|sk-ecdsa)' "${1:-$_SU_SIGNERS}" 2>/dev/null || echo 0; }
+# (grep -c prints 0 and fails when nothing matches: one number either way.)
+_su_signers_count() {
+    local n; n=$(grep -cE '^[^#[:space:]][^[:space:]]*[[:space:]].*(ssh-ed25519|ssh-rsa|ecdsa-sha2-|sk-ssh-ed25519|sk-ecdsa)' "${1:-$_SU_SIGNERS}" 2>/dev/null)
+    [[ "$n" =~ ^[0-9]+$ ]] && echo "$n" || echo 0
+}
 
 # "<sha256 fingerprint> <principal>" of each signer.
 _su_signers_list() {
@@ -171,6 +175,7 @@ _su_policy_json() {
     jq -n --argjson p "$p" --argjson s "$s" --argjson g "$signers" --argjson sh "$shipped" --arg f "$_SU_SIGNERS" --arg v "${CIPI_VERSION:-}" \
         --argjson def "$_SU_DELAY_DEFAULT" '
         $p + {delay_default_hours: $def, signers_file: $f, signers: $g, signers_ready: ($g | length > 0), shipped_signers: $sh,
+              signed_releases: (($g | length > 0) or ($sh | length > 0)),
               version: $v, installed_sha: ($s.installed_sha // null), pending: ($s.pending // null), held: ($s.held // null)}'
 }
 
@@ -187,8 +192,10 @@ selfupdate_policy() {
                     # once its fingerprints are the ones published on cipi.sh.
                     local shipped="${CIPI_SHIPPED_SIGNERS:-/opt/cipi/release-signers}" fps
                     if (( $(_su_signers_count "$shipped") == 0 )); then
-                        error "No signer to trust: neither ${_SU_SIGNERS} nor ${shipped} has a key — nothing changed"
-                        echo "  Write it by hand, one line per key:  <principal> namespaces=\"git\" ssh-ed25519 AAAA…"
+                        # No release ships a signer yet: there is nothing to check a release against.
+                        error "Signed releases are not available yet: Cipi releases are not signed at the moment — nothing changed"
+                        echo "  Until they are, a delay is the safeguard to use:  cipi self-update policy --delay=12h"
+                        echo "  https://cipi.sh/docs/self-update#signers"
                         exit 1
                     fi
                     fps=$(_su_signers_list "$shipped" | awk '{print $1}')
@@ -243,7 +250,11 @@ selfupdate_policy() {
     if [[ "$(jq -r '.verify' <<< "$j")" == true ]]; then
         echo -e "  Signature   ${GREEN}required${NC} — a release is installed only when its tag v<version> is signed by:"
     else
-        echo -e "  Signature   ${DIM}not checked${NC} (cipi self-update policy --verify=on)"
+        if [[ "$(jq -r '.signed_releases' <<< "$j")" == true ]]; then
+            echo -e "  Signature   ${DIM}not checked${NC} (cipi self-update policy --verify=on)"
+        else
+            echo -e "  Signature   ${DIM}not checked — signed releases are not available yet${NC}"
+        fi
     fi
     jq -r '.signers[] | "                \(.fingerprint)  \(.principal)"' <<< "$j"
     [[ "$(jq -r '.signers_ready' <<< "$j")" == true ]] || echo -e "              ${DIM}no signer in ${_SU_SIGNERS} yet${NC}"

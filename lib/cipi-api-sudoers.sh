@@ -76,6 +76,16 @@
 # makes the key on the server). `backup sftp` touches SFTP destinations only;
 # `backup destination add|edit|remove`, which take S3 secrets, stay out.
 #
+# 5.19.0 lets the panel set up and manage backups whole: `backup configure`
+# (the default bucket, or local only), `backup destination add|edit|remove`
+# (S3 buckets and SFTP servers), `backup key show --raw` and `key rotate`, and
+# `backup prune`. A secret key never rides a command line: from www-data the
+# CLI takes it only on standard input (--secret-stdin), which the API writes
+# into the command's stdin, in a synchronous call — never a job, never kept,
+# never answered back. The folders of `configure` stay the server's: from
+# www-data --local-dir and --tmpdir are refused. Still not here: `backup
+# fetch` (an archive at a path of the server).
+#
 # And how Cipi updates itself: `self-update policy` (the signature check and
 # the delay; trusting signers takes the fingerprint the person compared).
 # Not `self-update` itself: an update is started at the shell or by cron.
@@ -230,6 +240,14 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi backup destination test, \
                                /usr/local/bin/cipi backup destination test *, \
                                /usr/local/bin/cipi backup sftp *, \
+                               /usr/local/bin/cipi backup configure *, \
+                               /usr/local/bin/cipi backup destination add *, \
+                               /usr/local/bin/cipi backup destination edit *, \
+                               /usr/local/bin/cipi backup destination remove *, \
+                               /usr/local/bin/cipi backup key show --raw, \
+                               /usr/local/bin/cipi backup key rotate, \
+                               /usr/local/bin/cipi backup prune, \
+                               /usr/local/bin/cipi backup prune *, \
                                /usr/local/bin/cipi self-update policy --json, \
                                /usr/local/bin/cipi self-update policy *, \
                                /usr/local/bin/cipi search status, \

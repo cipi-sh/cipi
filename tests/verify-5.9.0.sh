@@ -1427,10 +1427,12 @@ for rule in 'node install \*' 'node default \*' 'node upgrade' 'node upgrade \*'
     grep -qE "/usr/local/bin/cipi ${rule}, \\\\\$" "$S" || fail "sudoers: missing 'cipi ${rule//\\/}'"
 done
 pass "Node runtimes, database links and backup profiles are in the whitelist"
-for no in 'backup configure' 'backup destination add' 'backup destination edit' 'backup destination remove' 'backup key' 'backup fetch' 'backup prune' 'backup run,' 'backup run \*' 'backup status,' 'backup \*'; do
+# 5.19.0: configure, destination add|edit|remove, key show --raw|rotate and prune
+# are the panel's too — a secret only on standard input (verify-5.19.0.sh).
+for no in 'backup fetch' 'backup run,' 'backup run \*' 'backup status,' 'backup \*' 'backup key \*' 'backup key show,'; do
     grep -qE "/usr/local/bin/cipi ${no}" "$S" && fail "sudoers: '${no//\\/}' must not be there"
 done
-pass "not there: backup configure, destination add|edit|remove (an S3 secret on a command line), key, fetch, prune, a run that is not detached"
+pass "not there: fetch, a run that is not detached, any backup command, key show without --raw"
 ! grep -E '\* [^,\\]' "$S" | grep -q . && pass "'*' is the last argument everywhere (sudo-rs)" || fail "a rule has something after '*': $(grep -E '\* [^,\\]' "$S")"
 if command -v visudo >/dev/null 2>&1; then
     visudo -cqf "$S" >/dev/null 2>&1 && pass "visudo accepts the whitelist" || fail "visudo refuses the whitelist"

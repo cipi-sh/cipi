@@ -1432,7 +1432,7 @@ echo 'dump' > "$BS/run/databases/mariadb/shop.sql.gz"; echo '{"v":1}' > "$BS/run
 BK() {   # <function and args> — the backup library with a vault of files
     PATH="$BS/bin:$PATH" SFTP_ROOT="$BS/remote" SFTP_LOG="$BS/sftp.log" CIPI_LIB="$LIB" CIPI_CONFIG="$BS/cfg" CIPI_LOG="$BS/log" BACKUP_SFTP_KEY_DIR="$BS/keys" \
     bash -c 'source "$CIPI_LIB/common.sh" 2>/dev/null; RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
-        vault_read() { cat "$CIPI_CONFIG/$1" 2>/dev/null; }; vault_write() { cat > "$CIPI_CONFIG/$1"; }
+        vault_read() { cat "$CIPI_CONFIG/$1" 2>/dev/null; }; vault_write() { local t; t=$(mktemp "$CIPI_CONFIG/.vw.XXXXXX") && cat > "$t" && mv "$t" "$CIPI_CONFIG/$1"; }
         log_action() { echo "$*" >> "$CIPI_LOG/actions.log"; }; hostname() { echo web1; }
         source "$CIPI_LIB/backup.sh"; "$@"' _ "$@" 2>&1
 }
@@ -1483,12 +1483,13 @@ out=$(BK _bk_destination_command edit box --port=22 < /dev/null); [[ "$(jq -r '.
     && pass "destination edit: what is given changes, the rest stays, the key too" || fail "edit: ${out}"
 out=$(BK _bk_destination_command add pj --type=sftp --host=10.0.0.5 --user=backup --json < /dev/null)
 [[ "$(jq -r '[.name, .type, .host, .port, .user, (.public_key | startswith("ssh-ed25519 "))] | @tsv' <<< "$out")" == $'pj\tsftp\t10.0.0.5\t22\tbackup\ttrue' ]] && pass "add --json: what the panel shows — the destination and the key to install" || fail "add json: ${out}"
-out=$(SUDO_USER=www-data BK _bk_destination_command add s3x --bucket=b --key=k --secret=s < /dev/null); grep -q 'An S3 destination is added at the server' <<< "$out" && ! jq -e '.s3_destinations.s3x' "$BS/cfg/backup.json" >/dev/null \
-    && pass "from the panel an S3 destination is refused: its secret would be kept there" || fail "www-data s3: ${out}"
+# 5.19.0: from the panel an S3 secret comes on standard input only (verify-5.19.0.sh).
+out=$(SUDO_USER=www-data BK _bk_destination_command add s3x --bucket=b --key=k --secret=s < /dev/null); grep -q 'From the panel a secret key comes on standard input' <<< "$out" && ! jq -e '.s3_destinations.s3x' "$BS/cfg/backup.json" >/dev/null \
+    && pass "from the panel an S3 secret on the command line is refused: nothing saved" || fail "www-data s3: ${out}"
 out=$(BK _bk_destination_command remove pj < /dev/null); [[ ! -e "$BS/keys/pj" && ! -e "$BS/keys/pj.pub" ]] && ! jq -e '.sftp_destinations.pj' "$BS/cfg/backup.json" >/dev/null && grep -q 'authorized_keys' <<< "$out" \
     && pass "destination remove: its key deleted here, and a word about the remote's authorized_keys" || fail "remove: ${out}"
-grep -q '/usr/local/bin/cipi backup sftp \*,' "${LIB}/cipi-api-sudoers.sh" && ! grep -qE 'cipi backup destination (add|edit|remove)' "${LIB}/cipi-api-sudoers.sh" \
-    && pass "the panel runs backup sftp — SFTP destinations only; destination add|edit|remove (S3 secrets) stay out" || fail "sudoers sftp"
+grep -q '/usr/local/bin/cipi backup sftp \*,' "${LIB}/cipi-api-sudoers.sh" \
+    && pass "the panel runs backup sftp (SFTP destinations; 5.19.0 adds the S3 ones, the secret on stdin)" || fail "sudoers sftp"
 out=$(BK backup_command sftp add vps --host=10.0.0.9 --user=backup --json < /dev/null); [[ "$(jq -r '.type' <<< "$out")" == sftp ]] && pass "backup sftp add: the same destination, SFTP always" || fail "sftp add: ${out}"
 echo '{"s3x": 1}' > /dev/null; jq '.s3_destinations = {"bucket1": {"bucket": "b"}}' "$BS/cfg/backup.json" > "$BS/x" && mv "$BS/x" "$BS/cfg/backup.json"
 out=$(BK backup_command sftp remove bucket1 < /dev/null); grep -q "'bucket1' is not an SFTP destination" <<< "$out" && jq -e '.s3_destinations.bucket1' "$BS/cfg/backup.json" >/dev/null \
@@ -1521,7 +1522,7 @@ printf '# comment\nandrea@cipi.sh namespaces="git" ssh-ed25519 AAAAkeyOne\n' > "
 SUH() {
     PATH="$SU/bin:$PATH" CIPI_LIB="$LIB" CIPI_CONFIG="$SU/cfg" CIPI_LOG="$SU/log" CIPI_SHIPPED_SIGNERS="$SU/opt/release-signers" CIPI_SELFUPDATE_DELAY_CRON="$SU/cron" CIPI_VERSION=5.18.0 \
     bash -c 'source "$CIPI_LIB/common.sh" 2>/dev/null; RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
-        vault_read() { cat "$CIPI_CONFIG/$1" 2>/dev/null; }; vault_write() { cat > "$CIPI_CONFIG/$1"; }
+        vault_read() { cat "$CIPI_CONFIG/$1" 2>/dev/null; }; vault_write() { local t; t=$(mktemp "$CIPI_CONFIG/.vw.XXXXXX") && cat > "$t" && mv "$t" "$CIPI_CONFIG/$1"; }
         log_action() { echo "$*" >> "$CIPI_LOG/actions.log"; }; cipi_notify() { echo "NOTIFY $1" >> "$CIPI_LOG/notify.log"; }
         _cipi_run_timed() { shift; "$@"; }
         source "$CIPI_LIB/self-update.sh"; "$@"' _ "$@" 2>&1

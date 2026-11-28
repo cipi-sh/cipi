@@ -114,6 +114,7 @@ scan_incomplete|Security|Malware scan did not finish
 scan_integrity|Security|Release files drifted from the deploy manifest
 backup_fail|Backup|Backup failed
 backup_stale|Backup|Backup overdue (no successful run in its window)
+backup_config|Security|Backup destinations, settings or encryption key changed
 cron_fail|Cron|Cron job failed
 ini_set|PHP|PHP setting changed
 yml_apply|cipi.yml|cipi.yml applied

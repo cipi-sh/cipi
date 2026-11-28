@@ -357,7 +357,9 @@ app_create() {
     local docroot=""
     if [[ "$app_type" == "custom" ]]; then
         docroot="${ARG_docroot:-}"
-        if [[ -z "$docroot" ]]; then
+        # Asked on a terminal only: the panel sends no --docroot for htdocs
+        # itself, and the prompt then read end-of-file and stopped the create.
+        if [[ -z "$docroot" && -t 0 ]]; then
             echo -e "  Document root, inside ${CYAN}~/htdocs${NC} — ${CYAN}/${NC} is htdocs itself (default); or a folder in it: ${CYAN}www${NC}, ${CYAN}dist${NC}, ${CYAN}public${NC}"
             read_input "Docroot" "/" docroot
         fi

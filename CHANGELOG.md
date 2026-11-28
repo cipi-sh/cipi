@@ -6,12 +6,18 @@ All notable changes to Cipi are documented in this file.
 
 ## [5.19.1] — 2026-11-28
 
-`cipi backup configure` **asks first where backups go — this server only, an S3 bucket or an SFTP server** — and the panel can set a server up to an SFTP server too (cipi/api 1.49.0, cipi/gui 4.11.0). **Every change of where archives go is notified.**
+**Backups start on the server; S3 buckets and SFTP servers are added on a par.** `cipi backup configure` no longer asks for "the default bucket": it sets backups up on this server — the local folder and a nightly profile — and then offers to send them to an S3 bucket and/or an SFTP server too. The panel works the same way (cipi/api 1.49.0, cipi/gui 4.11.0). **Every change of where archives go is notified.**
+
+### Changed
+
+- **`cipi backup configure` sets up backups on this server**: the local folder, the temp folder, and the nightly profile `default` — every app and every database, kept here. At a terminal it then asks *Send the backups somewhere else too?* — an S3 bucket, an SFTP server, as many as wanted — and sends the nightly profile there as well. Without a terminal it asks nothing and sets up the defaults (what the panel runs). 5.19.0's flags still work: `--local-only` is the same as nothing, and `--bucket= --key= --secret-stdin …` make the S3 destination named `s3` — with the nightly profile sent there too on a first setup. At a terminal the secret key is no longer shown as it is typed.
+- **S3 buckets and SFTP servers are destinations on a par**: each with a name and its own credentials. The bucket that configure used to set is the destination `s3`, edited, tested and removed like any other (`cipi backup destination edit|remove s3`; removal only when no profile uses it) — a server configured before carries on unchanged. A new bucket can be named `s3`. That bucket now uses its own keys from the backup configuration, like the others, instead of the `/root/.aws` profile; nothing is written to `/root/.aws` any more.
+- `cipi backup status --json`: no destination is `default` any more.
 
 ### Added
 
-- **`cipi backup configure` asks where backups go: this server only, an S3 bucket or an SFTP server** (5.19.0 went straight to the S3 keys). An SFTP server becomes the destination `sftp` (`--name=` for another), with a key Cipi makes and shows with how to install it; at a terminal it can be tested right after. A first setup sends the nightly profile to what was chosen. Flags for a script and for the panel: `--type=local` (or `--local-only`), `--type=s3 --bucket= --key= --secret-stdin [--region=] [--endpoint=]`, `--type=sftp --host= --user= [--port=] [--path=] [--name=]`; `--json` answers `{configured, type, destination}` — an SFTP one with its public key. An SFTP server is checked field by field before anything is written. At a terminal the secret key is no longer shown as it is typed.
-- **A new trigger, `backup_config` (Security)**: every change of where archives go — `backup configure`, a destination added, changed or removed, the encryption key rotated — is notified, with who did it ("the panel" for `www-data`). A panel token that can manage backups can point them at a bucket or a server of its choosing: the owner hears of it.
+- **`--use=<profile>[,<profile>]`** on `cipi backup destination add|edit`: send these profiles there too.
+- **A new trigger, `backup_config` (Security)**: every change of where archives go — the setup, a destination added, changed or removed, the encryption key rotated — is notified, with who did it ("the panel" for `www-data`). A panel token that can manage backups can point them at a bucket or a server of its choosing: the owner hears of it.
 
 ## [5.19.0] — 2026-11-28
 

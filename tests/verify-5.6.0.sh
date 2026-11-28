@@ -311,7 +311,7 @@ _bk_s3_exists nope    && exit 14
 _bk_s3_exists s3      || exit 15
 _bk_valid_dest_name offsite || exit 16
 _bk_valid_dest_name local   && exit 17
-_bk_valid_dest_name s3      && exit 18
+_bk_valid_dest_name s3      || exit 18   # 5.19.1: s3 is an S3 bucket's name like any other
 _bk_valid_dest_name 'Bad;'  && exit 19
 [[ "$(_bk_s3_uri offsite nightly 2026-01-01_000000)" == "s3://off-bucket/cipi/nightly/2026-01-01_000000/" ]] || exit 20
 [[ "$(_bk_s3_uri offsite)" == "s3://off-bucket/cipi/" ]]                     || exit 21
@@ -329,7 +329,8 @@ grep -q 'KEY=AKIAOFF' "${TMP}/aws.log" && grep -q -- '--endpoint-url https://s3.
     && grep -q -- '--region us-east-1' "${TMP}/aws.log" \
     && pass "a named destination uses its own keys, region and endpoint" || fail "named aws call: $(cat "${TMP}/aws.log")"
 rm -f "${TMP}/aws.log"; bk _bk_aws s3 ls s3://default-bucket/ >/dev/null
-grep -q '^KEY= ARGS=s3 ls' "${TMP}/aws.log" && pass "the default bucket keeps the /root/.aws profile" || fail "default aws call: $(cat "${TMP}/aws.log")"
+# 5.19.1: the bucket "s3" uses its own keys like any other (no /root/.aws profile)
+grep -q '^KEY=AKIADEFAULT ARGS=s3 --region eu-central-1 ls' "${TMP}/aws.log" && pass "the bucket s3 uses its own keys" || fail "default aws call: $(cat "${TMP}/aws.log")"
 out=$(bk _bk_aws nope ls x); [[ $? -ne 0 ]] && grep -q 'unknown backup destination' <<< "$out" \
     && pass "an unknown destination is refused" || fail "unknown dest: ${out}"
 
@@ -349,8 +350,8 @@ out=$(bk _bk_run_profile nightly)
 [[ $? -eq 0 ]] && grep -q "Backup 'nightly' complete" <<< "$out" || fail "run: ${out}"
 ts=$(ls -1 "${TMP}/local/nightly" 2>/dev/null | head -1)
 [[ -n "$ts" && -f "${TMP}/local/nightly/${ts}/apps/shop/files.tar.gz" ]] && pass "run: local copy written" || fail "run: no local copy ($(ls -R "${TMP}/local" 2>/dev/null))"
-grep -q "^KEY= ARGS=s3 cp ${TMP}/tmp/cipi-bk-nightly-${ts}/ s3://default-bucket/cipi/nightly/${ts}/ --recursive" "${TMP}/aws.log" \
-    && pass "run: uploaded to the default bucket with the /root/.aws profile" || fail "run default upload: $(cat "${TMP}/aws.log")"
+grep -q "^KEY=AKIADEFAULT ARGS=s3 --region eu-central-1 cp ${TMP}/tmp/cipi-bk-nightly-${ts}/ s3://default-bucket/cipi/nightly/${ts}/ --recursive" "${TMP}/aws.log" \
+    && pass "run: uploaded to the bucket s3 with its own keys" || fail "run default upload: $(cat "${TMP}/aws.log")"
 grep -q "^KEY=AKIAOFF ARGS=s3 --region us-east-1 --endpoint-url https://s3.example.test cp ${TMP}/tmp/cipi-bk-nightly-${ts}/ s3://off-bucket/cipi/nightly/${ts}/ --recursive" "${TMP}/aws.log" \
     && pass "run: uploaded to the named destination with its own keys" || fail "run named upload: $(cat "${TMP}/aws.log")"
 grep -q "s3://off-bucket/cipi/nightly/${ts}/ (offsite)" <<< "$out" && pass "run: the named destination is reported" || fail "run report: ${out}"
@@ -390,8 +391,8 @@ out=$(bk _bk_destination_add add eu3 --bucket=eu3-bucket --key=K3 --secret=S3); 
 rm -f "${TMP}/aws.failbucket"
 out=$(bk _bk_destination_add add eu2 --bucket=x --key=k --secret=s); [[ $? -ne 0 ]] && grep -q 'already exists' <<< "$out" \
     && pass "add refuses an existing name" || fail "add existing: ${out}"
-out=$(bk _bk_destination_add add s3 --bucket=x --key=k --secret=s); [[ $? -ne 0 ]] && grep -q 'default bucket' <<< "$out" \
-    && pass "'s3' is the default bucket, not a named destination" || fail "add s3: ${out}"
+out=$(bk _bk_destination_add add s3 --bucket=x --key=k --secret=s); [[ $? -ne 0 ]] && grep -q 'already exists' <<< "$out" \
+    && pass "'s3' exists already: add refuses it like any other name (5.19.1)" || fail "add s3: ${out}"
 out=$(bk _bk_destination_add add local --bucket=x --key=k --secret=s); [[ $? -ne 0 ]] && grep -q 'Invalid destination name' <<< "$out" \
     && pass "'local' cannot be a destination name" || fail "add local: ${out}"
 out=$(bk _bk_destination_add edit eu2 --endpoint=https://eu2.example.test); rc=$?
@@ -403,10 +404,10 @@ out=$(bk _bk_destination_remove offsite); [[ $? -ne 0 ]] && grep -q 'still used 
     && pass "remove is refused while a profile uses the destination" || fail "remove used: ${out}"
 out=$(bk _bk_destination_remove eu2); [[ $? -eq 0 ]] && ! jq -e '.s3_destinations.eu2' "${TMP}/backup.json" >/dev/null \
     && pass "remove drops an unused destination" || fail "remove unused: ${out}"
-out=$(bk _bk_destination_remove s3); [[ $? -ne 0 ]] && pass "the default bucket is not removed this way" || fail "remove s3: ${out}"
+out=$(bk _bk_destination_remove s3); [[ $? -ne 0 ]] && grep -q 'still used by' <<< "$out" && pass "the bucket s3 is not removed while a profile uses it" || fail "remove s3: ${out}"
 out=$(bk _bk_destination_list)
-grep -q 'offsite' <<< "$out" && grep -q '\[default\]' <<< "$out" && grep -q '← nightly' <<< "$out" \
-    && pass "destination list shows the default and who uses what" || fail "list: ${out}"
+grep -q 'offsite' <<< "$out" && grep -q 's3://default-bucket' <<< "$out" && ! grep -q '\[default\]' <<< "$out" && grep -q '← nightly' <<< "$out" \
+    && pass "destination list shows every bucket on a par, and who uses what" || fail "list: ${out}"
 out=$(bk _bk_destination_show offsite)
 grep -q 'off-bucket' <<< "$out" && grep -q 'AKIA…AOFF' <<< "$out" && grep -q 'nightly' <<< "$out" \
     && pass "destination show masks the key" || fail "show: ${out}"
@@ -425,7 +426,7 @@ cols=$(grep -E '^  (PROFILE|nightly|shop-db-quarterly-long) ' <<< "$out" | awk '
     && pass "profile list: columns line up whatever the name length" || fail "profile list alignment: ${out}"
 out=$(bk _bk_status)
 grep -q 'offsite' <<< "$out" && grep -q 'S3 (s3)' <<< "$out" && pass "backup status lists named destinations" || fail "status: ${out}"
-grep -q '"s3_destinations":$d' "${LIB}/backup.sh" && pass "cipi backup configure keeps the named destinations" || fail "configure drops s3_destinations"
+grep -q 's3_destinations: {}, sftp_destinations: {}, profiles: {}} + . + {tmpdir: $t, local_dir: $l}' "${LIB}/backup.sh" && pass "cipi backup configure keeps the named destinations" || fail "configure drops s3_destinations"
 grep -q 'destination|destinations|dest) _bk_destination_command' "${LIB}/backup.sh" \
     && grep -q 'cipi backup destination add <name>' "${ROOT}/cipi" \
     && grep -q 'destination) sub="list show add edit remove test"' "${LIB}/completion.sh" \

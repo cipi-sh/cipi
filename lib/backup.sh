@@ -34,7 +34,7 @@ case ":${PATH}:" in *:/usr/local/bin:*) ;; *) export PATH="/usr/local/bin:${PATH
 backup_command() {
     local sub="${1:-}"; shift||true
     case "$sub" in
-        configure) _bk_configure ;;
+        configure) _bk_configure "$@" ;;
         status)    _bk_status "$@" ;;
         profile|profiles) _bk_profile_command "$@" ;;
         destination|destinations|dest) _bk_destination_command "$@" ;;
@@ -123,6 +123,38 @@ _bk_s3_exists() {
 # Same charset as profile names; local and s3 are taken.
 _bk_valid_dest_name() {
     [[ "$1" =~ ^[a-z][a-z0-9-]{1,31}$ && "$1" != "local" && "$1" != "s3" ]]
+}
+
+# The parts of an S3 destination. A key and a secret are printable characters
+# with no space and no line break: the default bucket's are written to
+# /root/.aws/credentials, where a line break would add a setting of its own.
+_bk_valid_bucket()   { [[ "$1" =~ ^[a-z0-9][a-z0-9._-]{1,62}$ ]]; }
+_bk_valid_region()   { [[ "$1" =~ ^[A-Za-z0-9-]{1,64}$ ]]; }
+_bk_valid_endpoint() { [[ -z "$1" || "$1" =~ ^https?://[A-Za-z0-9.:/_-]{1,255}$ ]]; }
+_bk_valid_s3_cred()  { [[ "$1" =~ ^[[:graph:]]{1,256}$ && "$1" != *[\"\'\\]* ]]; }
+
+# The secret key of an S3 destination: --secret-stdin reads it from the first
+# line of standard input — the panel's way: never on a command line (ps, the
+# shell's history, a log). From the panel it is the only way.
+# Prints it; nothing when none was given. Fails with the reason.
+_bk_secret_given() {
+    local sec=""
+    if [[ "${ARG_secret_stdin:-}" == "true" ]]; then
+        IFS= read -r sec || [[ -n "$sec" ]] || { echo "--secret-stdin: nothing on standard input" >&2; return 1; }
+        sec="${sec%$'\r'}"
+        [[ -n "$sec" ]] || { echo "--secret-stdin: an empty secret" >&2; return 1; }
+    elif [[ -n "${ARG_secret+x}" ]]; then
+        if [[ "${SUDO_USER:-}" == "www-data" ]]; then
+            echo "From the panel a secret key comes on standard input (--secret-stdin), never on the command line" >&2
+            return 1
+        fi
+        sec="${ARG_secret}"
+    fi
+    if [[ -n "$sec" ]] && ! _bk_valid_s3_cred "$sec"; then
+        echo "Invalid secret key: printable characters, no space, no quote" >&2
+        return 1
+    fi
+    printf '%s' "$sec"
 }
 
 # Profiles that write to a destination, one per line.
@@ -494,6 +526,13 @@ _bk_key_command() {
     case "$sub" in
         show)
             _bk_key_ensure || exit 1
+            local by="${SUDO_USER:-root}"; [[ "$by" == "www-data" ]] && by="the panel"
+            log_action "BACKUP KEY SHOWN (${by})"
+            cipi_notify "Backup encryption key shown on $(hostname)" \
+                "The backup encryption key was shown (cipi backup key show, by ${by}).\n\nServer: $(hostname)\nTime: $(notify_now)" \
+                credentials_show 2>/dev/null || true
+            # --raw: the key and nothing else — what the panel shows, once.
+            if [[ "${1:-}" == "--raw" ]]; then cat "$BACKUP_KEY_FILE"; echo; return 0; fi
             echo -e "\n${BOLD}Backup encryption key${NC}"
             echo -e "  ${DIM}File:${NC} ${BACKUP_KEY_FILE}"
             echo -e "  ${CYAN}$(cat "$BACKUP_KEY_FILE")${NC}"
@@ -517,7 +556,7 @@ _bk_key_command() {
             success "Backup encryption key rotated"
             log_action "BACKUP KEY ROTATED"
             ;;
-        *) error "Use: cipi backup key show|rotate"; exit 1 ;;
+        *) error "Use: cipi backup key show [--raw] | rotate"; exit 1 ;;
     esac
 }
 
@@ -2342,7 +2381,14 @@ _bk_fetch() {
 
 # ── Configure ────────────────────────────────────────────────
 
+# cipi backup configure — the default bucket ('s3' in profiles) and where the
+# local copies go. Asks at a terminal; takes flags otherwise (the panel, a
+# script): --bucket= --key= --secret=|--secret-stdin [--region=] [--endpoint=]
+# [--local-dir=] [--tmpdir=], or --local-only for no bucket. What is not given
+# keeps its value. The bucket is reached with the keys before anything is
+# saved: a wrong key changes nothing.
 _bk_configure() {
+    parse_args "$@"
     local cf="${CIPI_CONFIG}/backup.json"
     local ck="" cs="" cb="" cr="" ce="" ct="/var/tmp" cl=""
     if [[ -f "$cf" ]]; then
@@ -2356,34 +2402,93 @@ _bk_configure() {
         cl=$(echo "$_bkj" | jq -r '.local_dir // ""')
     fi
 
-    echo -e "\n${BOLD}Backup destination${NC} ${DIM}— the default bucket, 's3' in profiles${NC}"
-    echo -e "  ${DIM}Leave the bucket empty to keep backups on this server only.${NC}"
-    echo -e "  ${DIM}Further buckets are named destinations: cipi backup destination add <name>${NC}\n"
-
-    read_input "Access Key ID" "$ck" ck
-    read_input "Secret Access Key" "$cs" cs
-    read_input "Bucket name (empty = local only)" "$cb" cb
-    if [[ -n "$cb" ]]; then
-        read_input "Region" "${cr:-eu-central-1}" cr
-        echo -e "  ${DIM}Leave empty for AWS S3. For any other S3-compatible provider set the endpoint URL.${NC}"
-        echo -e "  ${DIM}Examples:${NC}"
-        echo -e "  ${DIM}  Cloudflare R2:  https://<account-id>.r2.cloudflarestorage.com${NC}"
-        echo -e "  ${DIM}  Hetzner:        https://<datacenter>.your-objectstorage.com${NC}"
-        echo -e "  ${DIM}  DO Spaces:      https://<region>.digitaloceanspaces.com${NC}"
-        echo -e "  ${DIM}  Backblaze B2:   https://s3.<region>.backblazeb2.com${NC}"
-        echo -e "  ${DIM}  Scaleway:       https://s3.<region>.scw.cloud${NC}"
-        echo -e "  ${DIM}  MinIO:          https://your-minio-host${NC}"
-        read_input "Endpoint URL (optional)" "$ce" ce
+    local flagged=false f
+    for f in bucket key secret secret_stdin region endpoint local_dir tmpdir local_only; do
+        [[ -n "$(eval "echo \${ARG_${f}+x}")" ]] && flagged=true
+    done
+    local from_panel=false; [[ "${SUDO_USER:-}" == "www-data" ]] && from_panel=true
+    if [[ "$from_panel" == true ]]; then
+        # Folders are the server's to choose: root creates the local one and
+        # makes it 0700 — a path from the panel could be any directory.
+        [[ -z "${ARG_local_dir+x}" && -z "${ARG_tmpdir+x}" ]] || { error "The local and temp directories are set at the server's shell: cipi backup configure"; exit 1; }
     fi
-    echo -e "  ${DIM}Where local copies are kept (profiles with --dest=local).${NC}"
-    read_input "Local backup directory" "${cl:-$BACKUP_DEFAULT_LOCAL}" cl
-    echo -e "  ${DIM}Temp directory for backup archives (must have enough disk space; /tmp is often RAM-backed).${NC}"
-    read_input "Temp directory" "$ct" ct
+
+    local s_given errf
+    errf=$(mktemp) || exit 1
+    s_given=$(_bk_secret_given 2>"$errf") || { error "$(cat "$errf" 2>/dev/null)"; rm -f "$errf"; exit 1; }
+    rm -f "$errf"
+
+    if [[ "$flagged" == true ]]; then
+        if [[ "${ARG_local_only:-}" == "true" ]]; then
+            cb=""; ck=""; cs=""; ce=""
+        else
+            [[ -n "${ARG_bucket+x}" ]] && cb="${ARG_bucket}"
+            [[ -n "${ARG_key+x}" ]] && ck="${ARG_key}"
+            [[ -n "$s_given" ]] && cs="$s_given"
+            [[ -n "${ARG_region+x}" ]] && cr="${ARG_region}"
+            [[ -n "${ARG_endpoint+x}" ]] && ce="${ARG_endpoint}"
+            [[ "$ce" == "none" ]] && ce=""
+        fi
+        [[ -n "${ARG_local_dir+x}" ]] && cl="${ARG_local_dir}"
+        [[ -n "${ARG_tmpdir+x}" ]] && ct="${ARG_tmpdir}"
+    elif [[ -t 0 && "$from_panel" == false ]]; then
+        echo -e "\n${BOLD}Backup destination${NC} ${DIM}— the default bucket, 's3' in profiles${NC}"
+        echo -e "  ${DIM}Leave the bucket empty to keep backups on this server only.${NC}"
+        echo -e "  ${DIM}Further buckets and SFTP servers are named destinations: cipi backup destination add <name>${NC}\n"
+
+        read_input "Access Key ID" "$ck" ck
+        read_input "Secret Access Key" "$cs" cs
+        read_input "Bucket name (empty = local only)" "$cb" cb
+        if [[ -n "$cb" ]]; then
+            read_input "Region" "${cr:-eu-central-1}" cr
+            echo -e "  ${DIM}Leave empty for AWS S3. For any other S3-compatible provider set the endpoint URL.${NC}"
+            echo -e "  ${DIM}Examples:${NC}"
+            echo -e "  ${DIM}  Cloudflare R2:  https://<account-id>.r2.cloudflarestorage.com${NC}"
+            echo -e "  ${DIM}  Hetzner:        https://<datacenter>.your-objectstorage.com${NC}"
+            echo -e "  ${DIM}  DO Spaces:      https://<region>.digitaloceanspaces.com${NC}"
+            echo -e "  ${DIM}  Backblaze B2:   https://s3.<region>.backblazeb2.com${NC}"
+            echo -e "  ${DIM}  Scaleway:       https://s3.<region>.scw.cloud${NC}"
+            echo -e "  ${DIM}  MinIO:          https://your-minio-host${NC}"
+            read_input "Endpoint URL (optional)" "$ce" ce
+        fi
+        echo -e "  ${DIM}Where local copies are kept (profiles with --dest=local).${NC}"
+        read_input "Local backup directory" "${cl:-$BACKUP_DEFAULT_LOCAL}" cl
+        echo -e "  ${DIM}Temp directory for backup archives (must have enough disk space; /tmp is often RAM-backed).${NC}"
+        read_input "Temp directory" "$ct" ct
+    else
+        error "Nothing to ask without a terminal: give the bucket (--bucket= --key= --secret-stdin [--region=] [--endpoint=]) or --local-only"
+        exit 1
+    fi
 
     # Region must not be empty — AWS CLI fails with "NoneType is not iterable" when region is blank
     cr="${cr:-eu-central-1}"
     ct="${ct:-/var/tmp}"
     cl="${cl:-$BACKUP_DEFAULT_LOCAL}"
+    if [[ -n "$cb" ]]; then
+        _bk_valid_bucket "$cb" || { error "Invalid bucket name '${cb}'"; exit 1; }
+        _bk_valid_region "$cr" || { error "Invalid region '${cr}'"; exit 1; }
+        _bk_valid_endpoint "$ce" || { error "Invalid endpoint URL '${ce}'"; exit 1; }
+        [[ -n "$ck" && -n "$cs" ]] || { error "An access key and a secret key are required for the bucket (--key=… and --secret-stdin)"; exit 1; }
+        # They are written to /root/.aws/credentials: no line break, no space.
+        _bk_valid_s3_cred "$ck" || { error "Invalid access key: printable characters, no space, no quote"; exit 1; }
+        _bk_valid_s3_cred "$cs" || { error "Invalid secret key: printable characters, no space, no quote"; exit 1; }
+    fi
+    [[ "$cl" == /* && "$cl" != *..* && "$cl" =~ ^[A-Za-z0-9._/-]+$ ]] || { error "Invalid local directory '${cl}' (an absolute path)"; exit 1; }
+    [[ "$ct" == /* && "$ct" != *..* && "$ct" =~ ^[A-Za-z0-9._/-]+$ ]] || { error "Invalid temp directory '${ct}' (an absolute path)"; exit 1; }
+
+    # The bucket answers with these keys, or nothing is saved.
+    if [[ -n "$cb" ]]; then
+        _ensure_awscli
+        step "Testing s3://${cb}..."
+        local test_err dj
+        dj=$(jq -n --arg k "$ck" --arg s "$cs" --arg r "$cr" --arg e "$ce" '{aws_key:$k, aws_secret:$s, region:$r, endpoint_url:$e}')
+        if ! test_err=$(_bk_aws_json "$dj" ls "s3://${cb}" 2>&1); then
+            error "S3 connection failed — nothing saved:"
+            echo "$test_err" | sed 's/^/  /'
+            exit 1
+        fi
+        success "S3 connection OK"
+    fi
 
     local existing_profiles existing_dests
     existing_profiles=$(_bk_profiles_json)
@@ -2399,28 +2504,19 @@ _bk_configure() {
     mkdir -p "$cl" && chmod 700 "$cl" 2>/dev/null || true
 
     if [[ -n "$cb" ]]; then
-        _ensure_awscli
-        mkdir -p /root/.aws
-        cat > /root/.aws/credentials <<AWSCREDS
+        local awsd="${CIPI_AWS_DIR:-/root/.aws}"
+        mkdir -p "$awsd"
+        cat > "${awsd}/credentials" <<AWSCREDS
 [default]
 aws_access_key_id = ${ck}
 aws_secret_access_key = ${cs}
 AWSCREDS
-        cat > /root/.aws/config <<AWSCFG
+        cat > "${awsd}/config" <<AWSCFG
 [default]
 region = ${cr}
 output = json
 AWSCFG
-        chmod 600 /root/.aws/credentials /root/.aws/config
-
-        step "Testing S3 connectivity..."
-        local test_err
-        if ! test_err=$(_aws_s3 ls "s3://${cb}" 2>&1); then
-            error "S3 connection failed:"
-            echo "$test_err" | sed 's/^/  /'
-            exit 1
-        fi
-        success "S3 connection OK"
+        chmod 600 "${awsd}/credentials" "${awsd}/config"
     else
         warn "No bucket configured — backups stay on this server only."
         warn "A local-only backup does not survive losing the server."
@@ -2428,12 +2524,14 @@ AWSCFG
 
     _bk_ensure_default_profile
     _bk_write_cron
+    log_action "BACKUP CONFIGURED: ${cb:+s3://${cb}}${cb:-local only}"
     success "Backup configured"
     echo ""
     echo -e "  ${DIM}The schedule is managed for you — no crontab editing needed.${NC}"
     echo -e "  ${DIM}Review it:            ${CYAN}cipi backup status${NC}"
     echo -e "  ${DIM}Add another strategy: ${CYAN}cipi backup profile add hourly-db --scope=db --every=30m --keep=48 --dest=local${NC}"
     echo -e "  ${DIM}Add another bucket:   ${CYAN}cipi backup destination add offsite --bucket=<name> --key=<id> --secret=<key> [--endpoint=<url>]${NC}"
+    echo -e "  ${DIM}Or an SFTP server:    ${CYAN}cipi backup destination add box --type=sftp --host=<host> --user=<user> [--port=23]${NC}"
     echo ""
 }
 
@@ -2551,10 +2649,11 @@ _bk_destination_add() {
         return $?
     fi
     [[ -z "${ARG_type:-}" || "${ARG_type}" == "s3" ]] || { error "--type is s3 (the default) or sftp"; exit 1; }
-    # From the panel: SFTP only — an S3 secret has no place on a command line it keeps.
-    if [[ "${SUDO_USER:-}" == "www-data" ]]; then
-        error "An S3 destination is added at the server's shell (its secret key would be kept by the panel)"; exit 1
-    fi
+    # The secret first: --secret-stdin is the first thing read from stdin.
+    local s_given errf
+    errf=$(mktemp) || exit 1
+    s_given=$(_bk_secret_given 2>"$errf") || { error "$(cat "$errf" 2>/dev/null)"; rm -f "$errf"; exit 1; }
+    rm -f "$errf"
 
     local cur="{}"
     if _bk_s3_exists "$name"; then
@@ -2566,12 +2665,12 @@ _bk_destination_add() {
     local b k s r e
     b="${ARG_bucket:-$(echo "$cur" | jq -r '.bucket // ""')}"
     k="${ARG_key:-$(echo "$cur" | jq -r '.aws_key // ""')}"
-    s="${ARG_secret:-$(echo "$cur" | jq -r '.aws_secret // ""')}"
+    s="${s_given:-$(echo "$cur" | jq -r '.aws_secret // ""')}"
     r="${ARG_region:-$(echo "$cur" | jq -r '.region // ""')}"
     e="${ARG_endpoint:-$(echo "$cur" | jq -r '.endpoint_url // ""')}"
     [[ "${ARG_endpoint:-}" == "none" ]] && e=""
 
-    if [[ -t 0 ]]; then
+    if [[ -t 0 && "${ARG_secret_stdin:-}" != "true" && "${ARG_json:-}" != "true" ]]; then
         echo -e "\n${BOLD}S3 destination '${name}'${NC}"
         [[ -z "${ARG_key+x}" ]]    && read_input "Access Key ID" "$k" k
         [[ -z "${ARG_secret+x}" ]] && read_input "Secret Access Key" "$s" s
@@ -2585,9 +2684,11 @@ _bk_destination_add() {
     fi
     [[ -z "$b" ]] && { error "A bucket is required (--bucket=<name>)"; exit 1; }
     r="${r:-eu-central-1}"
-    [[ "$b" =~ ^[a-z0-9][a-z0-9._-]{1,62}$ ]] || { error "Invalid bucket name '${b}'"; exit 1; }
-    [[ "$r" =~ ^[A-Za-z0-9-]+$ ]] || { error "Invalid region '${r}'"; exit 1; }
-    [[ -z "$e" || "$e" =~ ^https?://[A-Za-z0-9.:/_-]+$ ]] || { error "Invalid endpoint URL '${e}'"; exit 1; }
+    _bk_valid_bucket "$b" || { error "Invalid bucket name '${b}'"; exit 1; }
+    _bk_valid_region "$r" || { error "Invalid region '${r}'"; exit 1; }
+    _bk_valid_endpoint "$e" || { error "Invalid endpoint URL '${e}'"; exit 1; }
+    [[ -n "$k" && -n "$s" ]] || { error "An access key and a secret key are required (--key=… --secret=…, or --secret-stdin)"; exit 1; }
+    [[ -z "${ARG_key:-}" ]] || _bk_valid_s3_cred "$k" || { error "Invalid access key: printable characters, no space, no quote"; exit 1; }
 
     local dj
     dj=$(jq -n --arg b "$b" --arg k "$k" --arg s "$s" --arg r "$r" --arg e "$e" \
@@ -2595,17 +2696,23 @@ _bk_destination_add() {
         '{bucket:$b, aws_key:$k, aws_secret:$s, region:$r, endpoint_url:$e, created_at:$c}')
 
     _ensure_awscli
-    step "Testing ${name} (s3://${b})..."
+    [[ "${ARG_json:-}" == "true" ]] || step "Testing ${name} (s3://${b})..."
     local test_err
     if ! test_err=$(_bk_aws_json "$dj" ls "s3://${b}" 2>&1); then
         error "S3 connection failed — nothing saved:"
         echo "$test_err" | sed 's/^/  /'
         exit 1
     fi
-    success "S3 connection OK"
+    [[ "${ARG_json:-}" == "true" ]] || success "S3 connection OK"
 
     _bk_cfg | jq --arg n "$name" --argjson d "$dj" \
         '.s3_destinations = ((.s3_destinations // {}) | .[$n] = $d)' | _bk_cfg_write
+    if [[ "${ARG_json:-}" == "true" ]]; then
+        log_action "BACKUP DESTINATION $( [[ "$mode" == add ]] && echo ADD || echo EDIT ): ${name} s3://${b}"
+        # Never the secret, nor the access key: what the panel shows of it.
+        jq -n --arg n "$name" --arg b "$b" --arg r "$r" --arg e "$e" '{name: $n, type: "s3", bucket: $b, region: $r, endpoint: $e}'
+        return 0
+    fi
     if [[ "$mode" == "add" ]]; then
         success "Backup destination '${name}' added"
         log_action "BACKUP DESTINATION ADD: ${name} s3://${b}"

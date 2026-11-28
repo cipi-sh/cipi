@@ -4,6 +4,29 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.19.0] — 2026-11-28
+
+Backups are set up and managed **from the panel too** (cipi/api 1.49.0, cipi/gui 4.11.0, cipi-cli and the PHP SDK): the default bucket or local copies only, S3 buckets and SFTP servers, the encryption key, the retention — next to the profiles and runs it already had. A secret key goes **on standard input**, never on a command line. And `cipi help backup` says it in order.
+
+### Added
+
+- **`cipi backup configure` takes flags** — `--bucket= --key= --secret=|--secret-stdin [--region=] [--endpoint=]`, or `--local-only` — for a script and for the panel; it still asks at a terminal. What is not given keeps its value. **The bucket is reached with the keys before anything is saved**: a wrong key changes nothing (before, the configuration was written first, and a failed test left it there). Without a terminal and without flags it says what to give, instead of stopping at the first question.
+- **`--secret-stdin`** for `backup configure` and `backup destination add|edit`: the secret key from the first line of standard input — not in `ps`, the shell's history or a log. From the panel (`www-data`) it is the only way: `--secret=` is refused there.
+- **The panel manages destinations**: `backup destination add|edit|remove` for S3 buckets as well as SFTP servers (`--json` answers the destination, never its keys). `backup configure` from the panel cannot set the local or temp folder — root creates the local one and makes it 0700, and a path from the panel could be any directory.
+- **`cipi backup key show --raw`**: the key and nothing else, for the panel to show once. Every show is logged and notified (`credentials_show`), with who asked.
+- The panel's sudoers: `backup configure *`, `backup destination add|edit|remove *`, `backup key show --raw`, `backup key rotate`, `backup prune [*]`. Still not `backup fetch`.
+
+### Changed
+
+- **`cipi help backup`**: one list of destination commands — list, add, edit, show, test, key, remove — with the flags of an S3 bucket and of an SFTP server under it, and the runs and the key in a list of their own. `cipi backup sftp …` (what cipi/api 1.48 runs) still works and is no longer shown.
+- **`cipi self-update policy --verify=on`** says that **signed releases are not available yet** — Cipi releases are not signed at the moment — and points at the delay; nothing changes. `--json` has `signed_releases` (false until a release ships a signer), for the panel.
+
+### Fixed
+
+- **A key or a secret with a line break could add a setting to `/root/.aws/credentials`** (`cipi backup configure`, at the shell): they are now printable characters with no space and no quote, and bucket, region and endpoint are checked as for named destinations.
+- **The release signers were miscounted in a file with no key** (`grep -c` printed `0` twice): `--verify=on` then compared a fingerprint with an empty list instead of saying there was none.
+- Tests: the vault stand-in of the test suites wrote in place while the same pipeline read it — the intermittent failures of the SFTP checks. It writes next to the file and renames, as the vault does.
+
 ## [5.18.0] — 2026-11-27
 
 Zero Trust gets its private side. Cloudflare Tunnel publishes the sites; **Tailscale** and **NetBird** are how the people who run the server reach it — SSH, the panel, the API and the sites on an address only the devices of the network can route to. `cipi zt tailscale …` and `cipi zt netbird …`, next to the Cloudflare commands, which do not change. **The panel does all of it too** (cipi/api 1.48.0, cipi/gui 4.10.0): join and leave a network, the two locks, Tailscale SSH — with the checks that keep a click from locking anyone out.

@@ -1722,10 +1722,45 @@ _env_escape_value() {
 # itself to the app user first (app_of_path and app_call in common.sh): the
 # same code, with that user's rights.
 
+# The value of a KEY=value line, from the text after "=", as Laravel reads it:
+#   - "in double quotes": what is between them, with \" and \\ taken back;
+#   - 'in single quotes': what is between them, as it is;
+#   - bare: up to a blank followed by # (a comment), without the blanks
+#     around it.
+# After a closing quote only blanks and a comment can follow: they are not
+# part of the value. Before 5.19.2 a value followed by blanks kept them — and
+# its quotes ("x"   was read as "x" with its quotes): the panel showed them,
+# then saved them inside new quotes.
+_env_value() {   # <text after the "=">
+    local raw="$1" t out="" c i n
+    t="${raw#"${raw%%[![:space:]]*}"}"
+    case "${t:0:1}" in
+        '"')
+            n=${#t}
+            for (( i = 1; i < n; i++ )); do
+                c="${t:i:1}"
+                if [[ "$c" == '\' ]] && (( i + 1 < n )) && [[ "${t:i+1:1}" == '"' || "${t:i+1:1}" == '\' ]]; then
+                    out+="${t:i+1:1}"; i=$(( i + 1 )); continue
+                fi
+                if [[ "$c" == '"' ]]; then printf '%s' "$out"; return 0; fi
+                out+="$c"
+            done
+            ;;   # never closed: read as a bare value
+        "'")
+            out="${t:1}"
+            if [[ "$out" == *"'"* ]]; then printf '%s' "${out%%"'"*}"; return 0; fi
+            ;;
+    esac
+    raw="${raw%%[[:space:]]#*}"
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    raw="${raw%"${raw##*[![:space:]]}"}"
+    printf '%s' "$raw"
+}
+
 # Read KEY from .env file into stdout (unquoted). Exit 1 if missing.
 _env_read_key() {
-    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_read_key" _env_read_key "$@" < /dev/null; return; fi
-    local file="$1" key="$2" line raw
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_read_key _env_value" _env_read_key "$@" < /dev/null; return; fi
+    local file="$1" key="$2" line
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${line//[[:space:]]/}" ]] && continue
@@ -1734,16 +1769,7 @@ _env_read_key() {
             line="${line#"${line%%[![:space:]]*}"}"
         fi
         if [[ "$line" == "${key}="* ]] || [[ "$line" == "${key} ="* ]]; then
-            raw="${line#*=}"
-            raw="${raw#"${raw%%[![:space:]]*}"}"
-            if [[ "$raw" =~ ^\"(.*)\"$ ]]; then
-                raw="${BASH_REMATCH[1]}"
-                raw="${raw//\\\"/\"}"
-                raw="${raw//\\\\/\\}"
-            elif [[ "$raw" =~ ^\'(.*)\'$ ]]; then
-                raw="${BASH_REMATCH[1]}"
-            fi
-            printf '%s' "$raw"
+            _env_value "${line#*=}"
             return 0
         fi
     done < "$file"
@@ -1752,10 +1778,10 @@ _env_read_key() {
 
 # Emit all KEY=VALUE pairs as a JSON object on stdout.
 _env_to_json() {
-    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_to_json _env_valid_key" _env_to_json "$@" < /dev/null; return; fi
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_to_json _env_valid_key _env_value" _env_to_json "$@" < /dev/null; return; fi
     local file="$1"
     local -a args=()
-    local line key raw
+    local line key
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${line//[[:space:]]/}" ]] && continue
@@ -1768,16 +1794,7 @@ _env_to_json() {
         key="${key%"${key##*[![:space:]]}"}"
         key="${key#"${key%%[![:space:]]*}"}"
         _env_valid_key "$key" || continue
-        raw="${line#*=}"
-        raw="${raw#"${raw%%[![:space:]]*}"}"
-        if [[ "$raw" =~ ^\"(.*)\"$ ]]; then
-            raw="${BASH_REMATCH[1]}"
-            raw="${raw//\\\"/\"}"
-            raw="${raw//\\\\/\\}"
-        elif [[ "$raw" =~ ^\'(.*)\'$ ]]; then
-            raw="${BASH_REMATCH[1]}"
-        fi
-        args+=(--arg "$key" "$raw")
+        args+=(--arg "$key" "$(_env_value "${line#*=}")")
     done < "$file"
     if [[ ${#args[@]} -eq 0 ]]; then
         echo '{}'
@@ -1935,9 +1952,37 @@ _env_reorder() {
     rm -f "$out"
 }
 
+# The whole .env from standard input, written as it is — `cipi app env <app>
+# --stdin`, the panel's text editor: no line is parsed, quoted, trimmed or
+# moved; comments, blank lines and spaces stay where they were typed. Refused,
+# with the file as it was: nothing on standard input, more than 64 KB, a NUL
+# byte. Written by the app user, in place (app_write): 640, the same inode.
+_app_env_write_raw() {   # <app> <file>
+    local app="$1" file="$2" max=65536 buf size rc=0
+    buf=$(mktemp) || return 1
+    [[ -t 0 ]] && echo "Paste the whole .env, then press Ctrl-D:" >&2
+    if ! head -c $(( max + 1 )) > "$buf"; then
+        rm -f "$buf"; error "Could not read standard input: the .env is left as it was"; return 1
+    fi
+    size=$(( $(wc -c < "$buf") ))
+    if (( size == 0 )); then
+        rm -f "$buf"; error "Nothing on standard input: the .env is left as it was"; return 1
+    fi
+    if (( size > max )); then
+        rm -f "$buf"; error "The text is too long (64 KB at most): the .env is left as it was"; return 1
+    fi
+    if (( $(tr -d '\000' < "$buf" | wc -c) != size )); then
+        rm -f "$buf"; error "The text holds a NUL byte: the .env is left as it was"; return 1
+    fi
+    app_write "$app" "$file" 640 < "$buf" || rc=$?
+    rm -f "$buf"
+    (( rc == 0 )) || error "Could not write ${file}"
+    return $rc
+}
+
 app_env() {
     local app="${1:-}"; shift || true
-    [[ -z "$app" ]] && { error "Usage: cipi app env <app> [--show|--get=KEY|--set=K=V|--unset=KEY|--order=K1,K2,…] [--json]"; exit 1; }
+    [[ -z "$app" ]] && { error "Usage: cipi app env <app> [--show|--get=KEY|--set=K=V|--unset=KEY|--order=K1,K2,…|--raw|--stdin] [--json]"; exit 1; }
     app_exists "$app" || { error "Not found"; exit 1; }
     local is_custom; is_custom=$(app_get "$app" custom)
     [[ "$is_custom" == "true" && "$(app_get "$app" runtime)" != "node" ]] && { error "Custom apps have no .env"; exit 1; }
@@ -1945,13 +1990,15 @@ app_env() {
     local env_file="/home/${app}/shared/.env"
     [[ -f "$env_file" ]] || { error ".env not found at ${env_file}"; exit 1; }
 
-    local want_show=false want_json=false get_key="" order=""
+    local want_show=false want_json=false want_raw=false want_stdin=false get_key="" order=""
     local -a sets=() unsets=()
     local arg
 
     for arg in "$@"; do
         case "$arg" in
             --show)  want_show=true ;;
+            --raw)   want_raw=true ;;
+            --stdin) want_stdin=true ;;
             --json)  want_json=true ;;
             --get=*) get_key="${arg#--get=}" ;;
             --set=*) sets+=("${arg#--set=}") ;;
@@ -1959,7 +2006,7 @@ app_env() {
             --order=*) order="${arg#--order=}"; [[ -n "$order" ]] || { error "--order needs the keys, comma-separated"; exit 1; } ;;
             --*=*|--*)
                 error "Unknown flag: ${arg}"
-                echo "Use: cipi app env <app> [--show|--get=KEY|--set=K=V|--unset=KEY|--order=K1,K2,…] [--json]"
+                echo "Use: cipi app env <app> [--show|--get=KEY|--set=K=V|--unset=KEY|--order=K1,K2,…|--raw|--stdin] [--json]"
                 exit 1
                 ;;
             *)
@@ -1968,6 +2015,37 @@ app_env() {
                 ;;
         esac
     done
+
+    # The file as it is — every line, comment, blank line and space: --raw
+    # shows it, --stdin replaces it with standard input (the panel's text
+    # editor). Nothing is parsed, quoted, trimmed or moved, either way.
+    if [[ "$want_raw" == "true" || "$want_stdin" == "true" ]]; then
+        if [[ "$want_show" == "true" || -n "$get_key" || -n "$order" || ${#sets[@]} -gt 0 || ${#unsets[@]} -gt 0 ]]; then
+            error "--raw and --stdin work on the whole file: not with --show, --get, --set, --unset or --order"
+            exit 1
+        fi
+        if [[ "$want_stdin" == "true" ]]; then
+            _app_env_write_raw "$app" "$env_file" || exit 1
+            log_action "ENV UPDATED: $app (whole file)"
+        fi
+        if [[ "$want_raw" == "true" || "$want_json" == "true" ]]; then
+            # Through a file, not $(…): that would drop the newlines at the end.
+            local out
+            out=$(mktemp) || exit 1
+            if ! app_read "$app" "$env_file" > "$out"; then
+                rm -f "$out"; error "Could not read ${env_file}"; exit 1
+            fi
+            if [[ "$want_json" == "true" ]]; then
+                jq -Rs --arg app "$app" '{app: $app, text: .}' < "$out"
+            else
+                cat "$out"
+            fi
+            rm -f "$out"
+        else
+            success ".env updated"
+        fi
+        return 0
+    fi
 
     local noninteractive=false
     [[ "$want_show" == "true" || -n "$get_key" || -n "$order" || ${#sets[@]} -gt 0 || ${#unsets[@]} -gt 0 ]] && noninteractive=true
@@ -4476,7 +4554,7 @@ _env_set_or_add() {
 # `fill` = true keeps any existing non-empty value: used where Cipi derives a
 # value the application may legitimately have set for itself.
 _env_apply_group() {
-    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_apply_group _env_read_key" _env_apply_group "$@" < /dev/null; return; fi
+    local _o; if _o=$(app_of_path "${1:-}"); then _app_own_check "$_o" "$1"; app_call "$_o" "_env_apply_group _env_read_key _env_value" _env_apply_group "$@" < /dev/null; return; fi
     local file="$1" fill="$2" header="$3"; shift 3
     [[ -f "$file" ]] || return 0
     local -a missing=()

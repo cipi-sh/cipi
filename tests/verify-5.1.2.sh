@@ -68,7 +68,7 @@ run_sync() {
     local dom="$1"; shift
     bash -c '
         set -uo pipefail
-        for fn in _env_read_key _env_set_or_add _env_apply_group _reverb_sync_env; do
+        for fn in _env_value _env_read_key _env_set_or_add _env_apply_group _reverb_sync_env; do
             eval "$(sed -n "/^${fn}()/,/^}\$/p" '"${LIB}"'/app.sh \
                  | sed "s#/home/\\\${app}/shared#'"${TMP}"'/home/\\\${app}/shared#")"
         done

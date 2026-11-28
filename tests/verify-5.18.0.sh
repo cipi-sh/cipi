@@ -1527,6 +1527,10 @@ out=$(SUH selfupdate_policy --verify=on --fingerprint=SHA256:forged < /dev/null)
 out=$(SUH selfupdate_policy --verify=on --fingerprint=SHA256:keyONEfp --json < /dev/null)
 [[ "$(jq -c '[.verify, .signers_ready, .signers[0].fingerprint, .signers[0].principal]' <<< "$out")" == '[true,true,"SHA256:keyONEfp","andrea@cipi.sh"]' ]] && cmp -s "$SU/opt/release-signers" "$SU/cfg/release-signers" \
     && pass "…the right one: those signers are trusted, the check is on" || fail "verify on: ${out}"
+# A hardware key (YubiKey: ed25519-sk) is listed with its fingerprint like any other.
+printf 'releases@cipi.sh namespaces="git" sk-ssh-ed25519@openssh.com AAAAkeyOne sk\nother@cipi.sh namespaces="git" ssh-ed25519 AAAAkeyTwo\n' > "$SU/sk-signers"
+out=$(SUH _su_signers_list "$SU/sk-signers"); [[ "$out" == $'SHA256:keyONEfp releases@cipi.sh\nSHA256:otherfp other@cipi.sh' ]] && [[ "$(SUH _su_signers_count "$SU/sk-signers")" == 2 ]] \
+    && pass "a hardware key (sk-ssh-ed25519@openssh.com) is listed and counted with its fingerprint" || fail "sk key: ${out}"
 out=$(SUH selfupdate_policy --delay=12h --json); [[ "$(jq -r '.delay_hours' <<< "$out")" == 12 ]] && grep -q '^17 \* \* \* \* root /usr/local/bin/cipi self-update --if-due' "$SU/cron" \
     && pass "--delay=12h: kept, and an hourly check installs a held release once it is due" || fail "delay on: ${out} / $(cat "$SU/cron" 2>/dev/null)"
 for bad in 169 x -1 9d; do out=$(SUH selfupdate_policy --delay=$bad); grep -q 'a week at most' <<< "$out" || fail "delay took ${bad}: ${out}"; done

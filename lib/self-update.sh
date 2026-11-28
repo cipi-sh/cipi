@@ -73,7 +73,8 @@ _su_signers_list() {
     while IFS= read -r line; do
         [[ "$line" =~ ^[[:space:]]*# || -z "${line// }" ]] && continue
         principal="${line%% *}"
-        key=$(grep -oE '(sk-)?(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9]+|sk-ecdsa-sha2-[a-z0-9@.]+)[[:space:]]+[A-Za-z0-9+/=]+' <<< "$line" | head -1)
+        # A hardware key's type has a suffix: sk-ssh-ed25519@openssh.com.
+        key=$(grep -oE '(sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com|ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+)[[:space:]]+[A-Za-z0-9+/=]+' <<< "$line" | head -1)
         [[ -n "$key" ]] || continue
         echo "$(ssh-keygen -lf /dev/stdin <<< "$key" 2>/dev/null | awk '{print $2}') ${principal}"
     done < "$f"

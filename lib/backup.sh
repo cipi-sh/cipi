@@ -301,7 +301,10 @@ _bk_sftp_batch() {   # <name> <batch file>
 _bk_sftp_entries() {   # <name> <remote dir>
     local name="$1" dir="$2" batch out rc=0
     batch=$(mktemp)
-    printf 'ls -l "%s"\n' "$dir" > "$batch"
+    # -n: the client writes the long listing itself from the attributes
+    # (numeric owner), whatever text the server would give (a Storage Box,
+    # a NAS) — one format to read.
+    printf 'ls -ln "%s"\n' "$dir" > "$batch"
     out=$(_bk_sftp_batch "$name" "$batch" 2>&1) || rc=$?
     rm -f "$batch"
     if (( rc != 0 )); then
@@ -309,7 +312,7 @@ _bk_sftp_entries() {   # <name> <remote dir>
         grep -vE '^sftp>' <<< "$out" | grep -v '^[[:space:]]*$' | tail -1 >&2
         return 1
     fi
-    # ls -l prints the full path when given one: the last field, basename.
+    # ls -ln prints the full path when given one: the last field, basename.
     awk '$1 ~ /^[dl-][rwxsStT-]{9}/ {
             n = $NF; sub(/.*\//, "", n); if (n == "." || n == "..") next
             if (substr($1, 1, 1) == "d") print "d " n; else print "f " $5 " " n

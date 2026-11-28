@@ -405,6 +405,9 @@ _cache_purge_target() {   # <app> <target>
     if [[ "$t" =~ ^https?://([^/]+)(/.*)?$ ]]; then
         host="${BASH_REMATCH[1],,}"; path="${BASH_REMATCH[2]:-/}"
         host="${host%%:*}"
+        # A host name and nothing else: no user@, no newline (it is logged), no
+        # character a pattern could read.
+        [[ "$host" =~ ^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$ ]] || return 1
         ok=0
         for h in $(_cache_app_hosts "$app"); do
             [[ "$h" == "$host" ]] && ok=1
@@ -445,13 +448,25 @@ cache_purge() {   # <app> <target>…
         [[ -n "$hosts_re" ]] || continue
         re="^KEY: https?(GET|HEAD)(${hosts_re})$(_cache_regex_escape "$path")"
         if [[ "$prefix" == 1 ]]; then re+='.*$'; else re+='(\?.*)?$'; fi
-        patterns+=(-e "$re")
+        patterns+=("$re")
     done
     [[ -d "$dir" && ! -L "$dir" && ${#patterns[@]} -gt 0 ]] || { echo 0; return 0; }
-    # The files whose own key matches (-m1: the first KEY line is the file's).
+    # The files whose own key matches. Only the head of each file is read —
+    # the key is written there, before the response — so a purge costs the
+    # same whether the zone holds 100 MB or 100 GB, and a page whose body
+    # happens to quote another page's key is not taken for it.
     list=$(mktemp) || return 1
     _cache_as_nginx find "$dir" -xdev -type f -print0 2>/dev/null \
-        | _cache_as_nginx xargs -0 -r grep -laZE -m1 "${patterns[@]}" > "$list" 2>/dev/null || true
+        | _cache_as_nginx perl -0 -e '
+            my @re = map { qr/$_/ } @ARGV; @ARGV = ();
+            while (my $f = <STDIN>) {
+                chomp $f;
+                open(my $fh, "<", $f) or next; binmode $fh;
+                my $head = ""; read($fh, $head, 8192); close $fh;
+                $head =~ /\nKEY: ([^\n]*)\n/ or next;
+                my $key = "KEY: $1";
+                for my $r (@re) { if ($key =~ $r) { print $f, "\0"; last } }
+            }' "${patterns[@]}" > "$list" 2>/dev/null || true
     tr -cd '\0' < "$list" | wc -c | tr -d ' '
     _cache_as_nginx xargs -0 -r rm -f -- < "$list" 2>/dev/null || true
     rm -f "$list"

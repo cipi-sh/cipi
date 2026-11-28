@@ -73,7 +73,8 @@ _su_signers_list() {
     while IFS= read -r line; do
         [[ "$line" =~ ^[[:space:]]*# || -z "${line// }" ]] && continue
         principal="${line%% *}"
-        key=$(grep -oE '(sk-)?(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9]+|sk-ecdsa-sha2-[a-z0-9@.]+)[[:space:]]+[A-Za-z0-9+/=]+' <<< "$line" | head -1)
+        # A hardware key's type has a suffix: sk-ssh-ed25519@openssh.com.
+        key=$(grep -oE '(sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com|ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+)[[:space:]]+[A-Za-z0-9+/=]+' <<< "$line" | head -1)
         [[ -n "$key" ]] || continue
         echo "$(ssh-keygen -lf /dev/stdin <<< "$key" 2>/dev/null | awk '{print $2}') ${principal}"
     done < "$f"
@@ -108,6 +109,16 @@ _su_verify_release() {   # <tree> <version>
     return 0
 }
 
+# With the check on, an older release is never installed over this one: an
+# account that can move the branch could otherwise point it at an old, signed
+# release with a known flaw. Prints why, and fails, when <version> is older.
+_su_downgrade() {   # <version>
+    local nv="$1" cur="${CIPI_VERSION:-}"
+    [[ -n "$cur" && "$nv" != "$cur" ]] || return 1
+    [[ "$(printf '%s\n%s\n' "$nv" "$cur" | sort -V | head -1)" == "$nv" ]] || return 1
+    echo "v${nv} is older than the v${cur} installed here — a signed release is not installed over a newer one"
+}
+
 # A new commit is installed once this server has seen it for the delay.
 # 0: go ahead. 1: held — and the reason is printed.
 _su_delay_gate() {   # <sha> <version>
@@ -116,6 +127,13 @@ _su_delay_gate() {   # <sha> <version>
     [[ "$hours" =~ ^[0-9]+$ ]] && (( hours > 0 )) || return 0
     state=$(_su_state); now=$(date +%s)
     [[ "$(jq -r '.installed_sha // ""' <<< "$state")" == "$sha" ]] && return 0
+    # Which commit is installed is known from the first update made by this
+    # version on. Before that, the version running now is not a new release:
+    # it is taken as installed, rather than held as if it were one.
+    if [[ -z "$(jq -r '.installed_sha // ""' <<< "$state")" && "$nv" == "${CIPI_VERSION:-}" ]]; then
+        _su_state_write "$(jq -c --arg s "$sha" '.installed_sha = $s | del(.pending) | del(.held)' <<< "$state")"
+        return 0
+    fi
     if [[ "$(jq -r '.pending.sha // ""' <<< "$state")" != "$sha" ]]; then
         state=$(jq -c --arg s "$sha" --arg v "$nv" --argjson t "$now" '.pending = {sha: $s, version: $v, first_seen: $t}' <<< "$state")
         _su_state_write "$state"
@@ -204,10 +222,13 @@ selfupdate_policy() {
             off|0|none|false) h=0 ;;
             on|true) h=$_SU_DELAY_DEFAULT ;;
             *h) h="${d%h}" ;;
-            *d) h=$(( ${d%d} * 24 )) 2>/dev/null || h="" ;;
+            # Checked before any arithmetic: bash evaluates an array subscript
+            # in $(( )), so text from the command line never goes in one.
+            *d) h="${d%d}"; [[ "$h" =~ ^[0-9]{1,3}$ ]] && h=$(( 10#$h * 24 )) || h="" ;;
             *) h="$d" ;;
         esac
-        [[ "$h" =~ ^[0-9]+$ ]] && (( h <= 168 )) || { error "--delay is a number of hours (12h), of days (2d), or off — a week at most"; exit 1; }
+        [[ "$h" =~ ^[0-9]{1,3}$ ]] && (( 10#$h <= 168 )) || { error "--delay is a number of hours (12h), of days (2d), or off — a week at most"; exit 1; }
+        h=$(( 10#$h ))
         p=$(jq -c --argjson h "$h" '.delay_hours = $h' <<< "$p")
         changed=true
     fi
@@ -256,7 +277,15 @@ selfupdate_command() {
         st=$(_su_state)
         [[ "$(jq -r '.installed_sha // ""' <<< "$st")" == "$remote_sha" ]] && return 0
         if [[ "$(jq -r '.pending.sha // ""' <<< "$st")" != "$remote_sha" ]]; then
-            _su_state_write "$(jq -c --arg s "$remote_sha" --argjson t "$(date +%s)" '.pending = {sha: $s, version: (.pending.version // null), first_seen: $t}' <<< "$st")"
+            # Its version, for what the policy shows as waiting (and to tell the
+            # version running now from a new release — see _su_delay_gate).
+            local rv; rv=$(curl -fsSL --max-time 30 "https://raw.githubusercontent.com/${_CIPI_REPO}/${remote_sha}/version.md" 2>/dev/null | tr -d '[:space:]')
+            [[ "$rv" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || rv=""
+            if [[ -z "$(jq -r '.installed_sha // ""' <<< "$st")" && -n "$rv" && "$rv" == "${CIPI_VERSION:-}" ]]; then
+                _su_state_write "$(jq -c --arg s "$remote_sha" '.installed_sha = $s | del(.pending) | del(.held)' <<< "$st")"
+                return 0
+            fi
+            _su_state_write "$(jq -c --arg s "$remote_sha" --arg v "$rv" --argjson t "$(date +%s)" '.pending = {sha: $s, version: (if $v == "" then null else $v end), first_seen: $t}' <<< "$st")"
             return 0
         fi
         (( $(date +%s) >= $(jq -r '.pending.first_seen' <<< "$st") + hours * 3600 )) || return 0
@@ -330,7 +359,7 @@ selfupdate_command() {
     local new_sha; new_sha=$(git -C "$tmp" rev-parse HEAD 2>/dev/null || true)
     if _su_verify_on; then
         local why
-        if ! why=$(_su_verify_release "$tmp" "$nv"); then
+        if why=$(_su_downgrade "$nv") || ! why=$(_su_verify_release "$tmp" "$nv"); then
             error "Update refused: ${why}"
             echo "  Nothing was installed; this server stays on v${CIPI_VERSION}. (cipi self-update policy)"
             _su_held "refused: ${why}"

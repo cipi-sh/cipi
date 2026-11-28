@@ -703,6 +703,14 @@ for bad in '..' '../x' 'www/../..' '.git' 'a b' 'a;b' 'x/.ssh' '$(id)'; do
     CS _app_docroot_clean "$bad" >/dev/null && fail "docroot '${bad}' accepted" || pass "docroot '${bad}' refused"
 done
 grep -q 'docroot=$(_app_docroot_clean "$docroot") || {' "$A" && pass "app create checks the docroot before anything is created" || fail "create: docroot not checked"
+# From the panel (no terminal) a custom app without --docroot is served from htdocs:
+# the prompt read end-of-file and stopped the create (reported from the field).
+grep -q 'if \[\[ -z "$docroot" && -t 0 \]\]; then' "$A" && pass "app create asks for the docroot on a terminal only" || fail "create: docroot asked without a terminal"
+out=$(bash -c 'source "$1/common.sh" 2>/dev/null; CYAN=; NC=; read_input "Docroot" "/" d < /dev/null; echo "got=[$d]"' _ "$LIB" 2>&1)
+grep -q 'got=\[/\]' <<< "$out" && pass "read_input with nothing to read: the default is the answer" || fail "read_input eof default: ${out}"
+out=$(bash -c 'source "$1/common.sh" 2>/dev/null; CYAN=; NC=; read_input "Token name" "" t < /dev/null; echo "after"' _ "$LIB" 2>&1); rc=$?
+[[ $rc -eq 1 ]] && grep -q 'No answer to "Token name": there is no terminal to ask' <<< "$out" && ! grep -q after <<< "$out" \
+    && pass "…and with no default it stops, in words (no loop of prompts, no shell crash)" || fail "read_input eof no default: rc=${rc} ${out}"
 H="${TMP}/home/testwp"; mkdir -p "$H"
 CS _app_coming_soon_install "$H" "www" "testwp.example.dev" && [[ -f "${H}/htdocs/www/coming-soon.html" && ! -e "${H}/htdocs/index.html" && ! -e "${H}/htdocs/coming-soon.html" ]] \
     && [[ "$(stat -c %a "${H}/htdocs/www/coming-soon.html")" == 644 ]] && grep -q 'testwp.example.dev' "${H}/htdocs/www/coming-soon.html" \
@@ -1362,10 +1370,10 @@ out=$(PURGE blog purge /hello-world/); ! grep -q 'tenants.test/hello-world/' <<<
     && out=$(PURGE blog purge https://acme.tenants.test/other/) && ! grep -q 'tenants.test' <<< "$(left)" \
     && pass "a wildcard alias (*.tenants.test): its subdomains are the app's — by path, and by URL" || fail "wildcard alias: ${out} / $(left)"
 seed
-for bad in 'https://evil.test/x' 'hello' '/a b' "/x'" '/a*b' '/$(id)' '/a?b=1' '--force'; do
+for bad in 'https://evil.test/x' 'hello' '/a b' "/x'" '/a*b' '/$(id)' '/a?b=1' '--force' 'https://evil@blog.test/x' $'https://a\n.tenants.test/x' 'https://(.*)|x.tenants.test/'; do
     out=$(PURGE blog purge "$bad"); [[ "$out" == *"Not a page of 'blog'"* || "$out" == *"Unknown option"* ]] || fail "purge took ${bad}: ${out}"
 done
-[[ "$(left | wc -w)" == 13 ]] && pass "a host that is not the app's, a path without /, a space, a quote, a * inside, a query, an option: refused, nothing deleted" || fail "refusals deleted something: $(left)"
+[[ "$(left | wc -w)" == 13 ]] && pass "a host that is not the app's (or not a host name: user@, a newline, a pattern), a path without /, a space, a quote, a * inside, a query, an option: refused, nothing deleted" || fail "refusals deleted something: $(left)"
 out=$(PURGE shop purge /x); grep -q "page cache of 'shop' is off" <<< "$out" && pass "an app with the cache off: nothing to purge, said" || fail "purge off: ${out}"
 out=$(PURGE blog purge); [[ -z "$(left)" ]] && grep -q "emptied — 13 page" <<< "$out" && pass "purge with no page: every page, as clear" || fail "purge all: ${out}"
 seed; mapfile -t many < <(seq 1 501 | sed 's|^|/p|'); out=$(PURGE blog purge "${many[@]}"); grep -q 'At most 500 pages' <<< "$out" && [[ "$(left | wc -w)" == 13 ]] && pass "at most 500 pages at once" || fail "purge max: ${out}"
@@ -1395,7 +1403,7 @@ while IFS= read -r line; do
     soft=false; [[ "$line" == -* ]] && { soft=true; line="${line#-}"; }
     eval "set -- $line"; cmd="$1"; shift; ok=true
     case "$cmd" in
-        ls) [[ "$1" == -l ]] && shift; d=$(abs "$1")
+        ls) [[ "$1" == -ln ]] || { echo "ls without -ln: ${line}" >&2; exit 1; }; shift; d=$(abs "$1")
             if [[ -d "$d" ]]; then
                 for e in "$d"/*; do [[ -e "$e" ]] || continue; n=$(basename "$e")
                     if [[ -d "$e" ]]; then printf 'drwxr-xr-x    ? 1000  1000   4096 Nov 28 10:00 %s/%s\n' "$1" "$n"
@@ -1527,11 +1535,24 @@ out=$(SUH selfupdate_policy --verify=on --fingerprint=SHA256:forged < /dev/null)
 out=$(SUH selfupdate_policy --verify=on --fingerprint=SHA256:keyONEfp --json < /dev/null)
 [[ "$(jq -c '[.verify, .signers_ready, .signers[0].fingerprint, .signers[0].principal]' <<< "$out")" == '[true,true,"SHA256:keyONEfp","andrea@cipi.sh"]' ]] && cmp -s "$SU/opt/release-signers" "$SU/cfg/release-signers" \
     && pass "…the right one: those signers are trusted, the check is on" || fail "verify on: ${out}"
+# A hardware key (YubiKey: ed25519-sk) is listed with its fingerprint like any other.
+printf 'releases@cipi.sh namespaces="git" sk-ssh-ed25519@openssh.com AAAAkeyOne sk\nother@cipi.sh namespaces="git" ssh-ed25519 AAAAkeyTwo\n' > "$SU/sk-signers"
+out=$(SUH _su_signers_list "$SU/sk-signers"); [[ "$out" == $'SHA256:keyONEfp releases@cipi.sh\nSHA256:otherfp other@cipi.sh' ]] && [[ "$(SUH _su_signers_count "$SU/sk-signers")" == 2 ]] \
+    && pass "a hardware key (sk-ssh-ed25519@openssh.com) is listed and counted with its fingerprint" || fail "sk key: ${out}"
 out=$(SUH selfupdate_policy --delay=12h --json); [[ "$(jq -r '.delay_hours' <<< "$out")" == 12 ]] && grep -q '^17 \* \* \* \* root /usr/local/bin/cipi self-update --if-due' "$SU/cron" \
     && pass "--delay=12h: kept, and an hourly check installs a held release once it is due" || fail "delay on: ${out} / $(cat "$SU/cron" 2>/dev/null)"
 for bad in 169 x -1 9d; do out=$(SUH selfupdate_policy --delay=$bad); grep -q 'a week at most' <<< "$out" || fail "delay took ${bad}: ${out}"; done
 [[ "$(jq -r '.delay_hours' "$SU/cfg/selfupdate.json")" == 12 ]] && pass "a delay that is not hours or days, or past a week: refused, nothing changed" || fail "bad delay changed it"
 out=$(SUH selfupdate_policy --delay=2d --json); [[ "$(jq -r '.delay_hours' <<< "$out")" == 48 ]] && pass "--delay=2d is 48 hours" || fail "2d: ${out}"
+# A value from the command line never reaches an arithmetic expansion: bash
+# runs the command substitution of an array subscript there (www-data may
+# call `cipi self-update policy *`).
+rm -f "$SU/pwned"
+for bad in 'x[$(touch '"$SU"'/pwned)]d' 'x[$(touch '"$SU"'/pwned)]h' 'x[$(touch '"$SU"'/pwned)]' 'abcd' '1000h' '08d'; do
+    out=$(SUH selfupdate_policy --delay="$bad" 2>&1); grep -q 'a week at most' <<< "$out" || fail "delay took ${bad}: ${out}"
+done
+[[ ! -e "$SU/pwned" ]] && pass "--delay: text that is not a number is refused, never evaluated" || fail "--delay ran a command substitution"
+out=$(SUH selfupdate_policy --delay=012h --json); [[ "$(jq -r '.delay_hours' <<< "$out")" == 12 ]] && pass "--delay=012h is 12 hours (base 10)" || fail "012h: ${out}"
 SUH selfupdate_policy --delay=12h >/dev/null
 
 # The signature: the tag of the version, on the commit downloaded, signed by a trusted key.
@@ -1545,6 +1566,11 @@ mv "$SU/cfg/rs.bak" "$SU/cfg/release-signers"
 grep -q 'Update refused: ${why}' "${LIB}/self-update.sh" && grep -q '_su_held "refused: ${why}"' "${LIB}/self-update.sh" && grep -q 'Cipi update refused on $(hostname)' "${LIB}/self-update.sh" \
     && pass "a refused update installs nothing, is noted and notified" || fail "refusal path"
 
+# With the check on, no older release over this one (CIPI_VERSION=5.18.0 here).
+SUH _su_downgrade 5.17.9 | grep -q 'older than the v5.18.0' && ! SUH _su_downgrade 5.18.0 >/dev/null && ! SUH _su_downgrade 5.18.1 >/dev/null && ! SUH _su_downgrade 5.20.0 >/dev/null \
+    && SUH _su_downgrade 5.9.9 >/dev/null && grep -q 'if why=$(_su_downgrade "$nv") || ! why=$(_su_verify_release "$tmp" "$nv"); then' "${LIB}/self-update.sh" \
+    && pass "a signed but older release is refused (the branch pointed back at a release with a known flaw); the same or a newer one goes on" || fail "downgrade"
+
 # The delay: this server's clock, per commit.
 SHA1=1111111111111111111111111111111111111111; SHA2=2222222222222222222222222222222222222222
 out=$(SUH _su_delay_gate "$SHA1" 5.19.0); [[ $? -eq 1 ]] && grep -q 'v5.19.0 (111111111111) first seen .*; installed from .* (delay 12h)' <<< "$out" && [[ "$(jq -r '.pending.sha' "$SU/cfg/selfupdate-state.json")" == "$SHA1" ]] \
@@ -1556,6 +1582,11 @@ jq '.pending.first_seen -= 43201' "$SU/cfg/selfupdate-state.json" > "$SU/st" && 
 SUH _su_delay_gate "$SHA2" 5.19.0 >/dev/null && pass "12 hours later: it goes in" || fail "gate due"
 jq --arg s "$SHA2" '.installed_sha = $s | del(.pending)' "$SU/cfg/selfupdate-state.json" > "$SU/st" && mv "$SU/st" "$SU/cfg/selfupdate-state.json"
 SUH _su_delay_gate "$SHA2" 5.19.0 >/dev/null && pass "what is installed already is never held" || fail "gate installed"
+SHA3=3333333333333333333333333333333333333333
+echo '{}' > "$SU/cfg/selfupdate-state.json"
+SUH _su_delay_gate "$SHA3" 5.18.0 >/dev/null && [[ "$(jq -r '.installed_sha' "$SU/cfg/selfupdate-state.json")" == "$SHA3" ]] \
+    && pass "nothing recorded yet: the version running now is taken as installed, not held as a new release" || fail "gate running version: $(cat "$SU/cfg/selfupdate-state.json")"
+SUH _su_delay_gate "$SHA1" 5.19.0 >/dev/null; [[ $? -eq 1 ]] && pass "…and a new release after it is held as before" || fail "gate after running version"
 SUH selfupdate_policy --delay=off >/dev/null; SUH _su_delay_gate "$SHA1" 5.20.0 >/dev/null && [[ ! -e "$SU/cron" ]] && pass "--delay=off: nothing held, the hourly check removed" || fail "delay off"
 grep -q 'if \[\[ -n "$new_sha" && "${ARG_now:-}" != "true" \]\]; then' "${LIB}/self-update.sh" && grep -q "_su_state_write \"\$(_su_state | jq -c --arg s \"\$new_sha\" '.installed_sha = \$s" "${LIB}/self-update.sh" \
     && pass "--now installs at once (the signature is still checked); an install records what it installed" || fail "now / installed"

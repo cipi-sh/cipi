@@ -1262,6 +1262,9 @@ install_cipi() {
 
     # Lib scripts
     cp cipi-install/lib/*.sh /opt/cipi/lib/
+    # The keys a release may be signed with: trusted only once someone turns
+    # the check on and compares their fingerprint (cipi self-update policy).
+    [[ -f cipi-install/release-signers ]] && install -m 644 cipi-install/release-signers /opt/cipi/release-signers
     chmod 755 /opt/cipi /opt/cipi/lib
     chmod 700 /opt/cipi/lib/*.sh
     # cipi-app-post-deploy runs as the app user and sources yml.sh for the

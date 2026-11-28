@@ -71,6 +71,15 @@
 # on a command line, which the panel would also keep in its jobs table),
 # `backup fetch`, `backup key` and `backup prune`.
 #
+# 5.18.0 adds SFTP destinations from the panel — `backup sftp add|edit|key|
+# test|remove <name> …` (a host, a port, a user, a folder: no secret; Cipi
+# makes the key on the server). `backup sftp` touches SFTP destinations only;
+# `backup destination add|edit|remove`, which take S3 secrets, stay out.
+#
+# And how Cipi updates itself: `self-update policy` (the signature check and
+# the delay; trusting signers takes the fingerprint the person compared).
+# Not `self-update` itself: an update is started at the shell or by cron.
+#
 # The file exists only while something runs PHP as www-data on behalf of a
 # person: the panel API (`cipi api <domain>`) or the GUI (`cipi gui <domain>`).
 # Until 5.8.5 setup.sh wrote it on every server; with nothing installed it
@@ -220,6 +229,9 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi backup profile disable *, \
                                /usr/local/bin/cipi backup destination test, \
                                /usr/local/bin/cipi backup destination test *, \
+                               /usr/local/bin/cipi backup sftp *, \
+                               /usr/local/bin/cipi self-update policy --json, \
+                               /usr/local/bin/cipi self-update policy *, \
                                /usr/local/bin/cipi search status, \
                                /usr/local/bin/cipi search status *, \
                                /usr/local/bin/cipi search list, \

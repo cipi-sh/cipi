@@ -59,6 +59,13 @@ yml_command() {
 # cannot, and reads CIPI_ENV from the app's shared/.env instead — the same
 # value, kept in step by create, edit, clone, sync and migration 5.8.0. A
 # label that is not a plain lowercase word is ignored, never used as a path.
+# The two clocks of a deploy (common.sh), or their defaults where this file is
+# loaded on its own.
+_yml_deploy_timeout() {   # <app> <build|step>
+    if declare -f deploy_timeout_get >/dev/null 2>&1; then deploy_timeout_get "$1" "$2"; return; fi
+    [[ "$2" == build ]] && echo 1800 || echo 300
+}
+
 _yml_env_label() {
     local app="$1" e=""
     if [[ "$(id -u)" -eq 0 ]] && declare -f app_get >/dev/null 2>&1; then
@@ -942,8 +949,8 @@ class Validator:
         self.unknown_keys(m, {"post", "post_on_failure", "keep_releases", "migrate",
                               "optimize", "storage_link", "queue_restart",
                               "horizon_terminate", "extra_artisan", "predeploy_snapshot",
-                              "snapshot", "node_build", "branch",
-                              "build_timeout", "step_timeout"}, "deploy")
+                              "build_timeout", "step_timeout",
+                              "snapshot", "node_build", "branch"}, "deploy")
         out = {"post_on_failure": "warn", "post": []}
 
         # The git branch this app deploys (cipi app edit --branch). Applied
@@ -2157,7 +2164,7 @@ _yml_build_plan() {
             for dc_f in build step; do
                 dc_want=$(echo "$_YML_DATA" | jq -r --arg f "${dc_f}_timeout" '.deploy[$f] // empty')
                 [[ -n "$dc_want" ]] || continue
-                dc_cur=$(deploy_timeout_get "$app" "$dc_f")
+                dc_cur=$(_yml_deploy_timeout "$app" "$dc_f")
                 [[ "$dc_want" != "$dc_cur" ]] && dc_pairs="${dc_pairs}${dc_pairs:+;}${dc_f}_timeout=${dc_want}"
             done
             for dc_f in migrate optimize storage_link queue_restart horizon_terminate; do
@@ -4066,8 +4073,8 @@ _yml_generate() {
             fi
             echo "  predeploy_snapshot: $(_deploy_cfg_bool "$app" predeploy_snapshot false)   # database snapshot before each deploy"
             echo "  # Seconds: the frontend build (60-3600), and every other command of the deploy (60-1800)."
-            echo "  build_timeout: $(deploy_timeout_get "$app" build)"
-            echo "  step_timeout: $(deploy_timeout_get "$app" step)"
+            echo "  build_timeout: $(_yml_deploy_timeout "$app" build)"
+            echo "  step_timeout: $(_yml_deploy_timeout "$app" step)"
             if [[ "$is_node_rt" != true ]]; then
                 local nbuild; nbuild=$(app_get "$app" node_build)
                 echo "  # Asset build (npm, Vite…): runs inside the deploy, after composer install"

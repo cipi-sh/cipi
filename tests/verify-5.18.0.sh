@@ -1087,10 +1087,10 @@ grep -qx "rc=0" <<< "$out" && [[ "$(stored shop)" == '{"deploy_build_timeout":"2
     && pass "apply: the app takes the numbers of the file and its recipe is written again" || fail "yml apply: ${out} $(stored shop)"
 out=$(DC yml_act front "deploy-cfg|keep_releases=3;build_timeout=1200|deploy config")
 grep -qx "rc=0" <<< "$out" && recipe front | grep -qx "set('cipi_build_timeout', 1200);" && recipe front | grep -qx "set('keep_releases', 3);" && pass "apply, a Node app: the same" || fail "yml apply node: ${out}"
-grep -q 'for dc_f in build step; do' "${LIB}/yml.sh" && grep -q 'dc_cur=$(deploy_timeout_get "$app" "$dc_f")' "${LIB}/yml.sh" \
+grep -q 'for dc_f in build step; do' "${LIB}/yml.sh" && grep -q 'dc_cur=$(_yml_deploy_timeout "$app" "$dc_f")' "${LIB}/yml.sh" \
     && grep -q 'only deploy.keep_releases, deploy.build_timeout, deploy.step_timeout and deploy.predeploy_snapshot apply' "${LIB}/yml.sh" \
     && pass "plan: each is a change only when the file's number is not the app's; a Node app may declare them" || fail "yml plan"
-grep -q 'echo "  build_timeout: $(deploy_timeout_get "$app" build)"' "${LIB}/yml.sh" && grep -q '# build_timeout: 1800' "${LIB}/yml.sh" && pass "cipi yml init writes them; the commented example names them" || fail "yml export"
+grep -q 'echo "  build_timeout: $(_yml_deploy_timeout "$app" build)"' "${LIB}/yml.sh" && grep -q '# build_timeout: 1800' "${LIB}/yml.sh" && pass "cipi yml init writes them; the commented example names them" || fail "yml export"
 grep -q -- '--build-timeout=S' "${ROOT}/cipi" && pass "cipi help app names the flags" || fail "help"
 
 # ── cipi app create --db=NAME: a database made with a custom or a Node app ──
@@ -1379,6 +1379,190 @@ bash -c "$PCH visudo() { return 0; }; _cache_sudoers_ensure blog; _cache_sudoers
     && pass "sudoers: the rule for some pages is added once, next to the one for all" || fail "sudoers: $(cat "$PC/sudoers/cipi-blog")"
 grep -qF '${app_user} ALL=(root) NOPASSWD: /usr/local/bin/cipi-cache-clear ${app_user} *' "${LIB}/app.sh" && pass "a new app has both rules" || fail "app.sh sudoers"
 grep -q '_cache_sudoers_ensure' "${LIB}/migrations/5.18.0.sh" && pass "the migration gives existing apps the rule" || fail "migration sudoers"
+
+echo "--- backups to SFTP: a VPS, a Storage Box"
+BS="${TMP}/bsftp"; mkdir -p "$BS/bin" "$BS/cfg" "$BS/log" "$BS/remote" "$BS/run/apps/shop" "$BS/run/databases/mariadb"
+# sftp as a stand-in: the batch runs against $BS/remote, the user's home there.
+cat > "$BS/bin/sftp" <<'STUB'
+#!/bin/bash
+batch=""; args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do [[ "${args[$i]}" == -b ]] && batch="${args[$((i+1))]}"; done
+echo "$*" >> "$SFTP_LOG"
+[[ -n "${SFTP_REFUSE:-}" ]] && { echo "${SFTP_REFUSE}" >&2; exit 255; }
+abs() { [[ "$1" == /* ]] && echo "${SFTP_ROOT}$1" || echo "${SFTP_ROOT}/$1"; }
+while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    soft=false; [[ "$line" == -* ]] && { soft=true; line="${line#-}"; }
+    eval "set -- $line"; cmd="$1"; shift; ok=true
+    case "$cmd" in
+        ls) [[ "$1" == -l ]] && shift; d=$(abs "$1")
+            if [[ -d "$d" ]]; then
+                for e in "$d"/*; do [[ -e "$e" ]] || continue; n=$(basename "$e")
+                    if [[ -d "$e" ]]; then printf 'drwxr-xr-x    ? 1000  1000   4096 Nov 28 10:00 %s/%s\n' "$1" "$n"
+                    else printf -- '-rw-r--r--    ? 1000  1000 %6d Nov 28 10:00 %s/%s\n' "$(stat -c %s "$e")" "$1" "$n"; fi
+                done
+            else echo "Can't ls: \"$1\" not found" >&2; ok=false; fi ;;
+        mkdir) mkdir "$(abs "$1")" 2>/dev/null || ok=false ;;
+        put) cp "$1" "$(abs "$2")" 2>/dev/null || { echo "dest open \"$2\": No such file or directory" >&2; ok=false; } ;;
+        get) cp "$(abs "$1")" "$2" 2>/dev/null || { echo "File \"$1\" not found." >&2; ok=false; } ;;
+        rm) rm "$(abs "$1")" 2>/dev/null || ok=false ;;
+        rmdir) rmdir "$(abs "$1")" 2>/dev/null || ok=false ;;
+        *) ok=false ;;
+    esac
+    [[ "$ok" == true || "$soft" == true ]] || exit 1
+done < "$batch"
+STUB
+cat > "$BS/bin/ssh-keygen" <<'STUB'
+#!/bin/bash
+f=""; c=x; while [[ $# -gt 0 ]]; do case "$1" in -f) f="$2"; shift ;; -C) c="$2"; shift ;; esac; shift; done
+echo "PRIVATE" > "$f"; echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey ${c}" > "${f}.pub"
+STUB
+chmod +x "$BS/bin/sftp" "$BS/bin/ssh-keygen"
+echo '{"local_dir": "/var/backups/cipi", "profiles": {}}' > "$BS/cfg/backup.json"
+echo 'files of shop' > "$BS/run/apps/shop/files.tar.gz"; echo '{"app":"shop"}' > "$BS/run/apps/shop/meta.json"
+echo 'dump' > "$BS/run/databases/mariadb/shop.sql.gz"; echo '{"v":1}' > "$BS/run/manifest.json"
+BK() {   # <function and args> — the backup library with a vault of files
+    PATH="$BS/bin:$PATH" SFTP_ROOT="$BS/remote" SFTP_LOG="$BS/sftp.log" CIPI_LIB="$LIB" CIPI_CONFIG="$BS/cfg" CIPI_LOG="$BS/log" BACKUP_SFTP_KEY_DIR="$BS/keys" \
+    bash -c 'source "$CIPI_LIB/common.sh" 2>/dev/null; RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
+        vault_read() { cat "$CIPI_CONFIG/$1" 2>/dev/null; }; vault_write() { cat > "$CIPI_CONFIG/$1"; }
+        log_action() { echo "$*" >> "$CIPI_LOG/actions.log"; }; hostname() { echo web1; }
+        source "$CIPI_LIB/backup.sh"; "$@"' _ "$@" 2>&1
+}
+out=$(BK _bk_destination_command add box --type=sftp --host=u1234.your-storagebox.de --port=23 --user=u1234 --path=backups/cipi < /dev/null)
+grep -q "Backup destination 'box' added: sftp://u1234@u1234.your-storagebox.de:23/backups/cipi" <<< "$out" && grep -q 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey cipi-backup-box@web1' <<< "$out" \
+    && grep -q 'ssh-copy-id -p 23 -s -i' <<< "$out" && [[ "$(stat -c %a "$BS/keys/box")" == 600 && "$(stat -c %a "$BS/keys")" == 700 ]] \
+    && [[ "$(jq -c '.sftp_destinations.box | del(.created_at)' "$BS/cfg/backup.json")" == '{"host":"u1234.your-storagebox.de","port":23,"user":"u1234","path":"backups/cipi"}' ]] \
+    && ! grep -qi 'password' "$BS/cfg/backup.json" \
+    && pass "destination add --type=sftp: host, port, user, folder kept; a key of its own (600 in a 700 folder); its public half and how to install it printed; no password anywhere" || fail "sftp add: ${out} / $(cat "$BS/cfg/backup.json")"
+for bad in "--host='a;b' --user=u" "--host=h --user='a b'" "--host=h --user=u --path=../etc" "--host=h --user=u --port=70000" "--host=-oProxy=x --user=u"; do
+    out=$(eval BK _bk_destination_command add bad --type=sftp $bad < /dev/null); grep -q '^\[ERROR\]\|✗\|Invalid' <<< "$out" || fail "sftp add took: ${bad} — ${out}"
+done
+! jq -e '.sftp_destinations.bad' "$BS/cfg/backup.json" >/dev/null && pass "a host with ; or a leading dash, a user with a space, a folder with .., a port past 65535: refused, nothing saved" || fail "sftp add saved a bad one"
+out=$(BK _bk_destination_command key box --raw); [[ "$out" == 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey cipi-backup-box@web1' ]] && pass "destination key box --raw: the public key and nothing else" || fail "key: ${out}"
+out=$(BK _bk_destination_command list); grep -q 'sftp://u1234@u1234.your-storagebox.de:23/backups/cipi' <<< "$out" && grep -q 'Add SFTP: cipi backup destination add' <<< "$out" && pass "destination list shows it" || fail "list: ${out}"
+out=$(BK _bk_status_json); [[ "$(jq -c '.destinations[] | select(.name == "box") | [.type, .host, .port, .user, .path]' <<< "$out")" == '["sftp","u1234.your-storagebox.de",23,"u1234","backups/cipi"]' ]] && ! grep -q 'PRIVATE' <<< "$out" \
+    && pass "backup status --json: the destination, type sftp, without its key" || fail "status json: $(jq -c '.destinations' <<< "$out" 2>/dev/null || echo "$out")"
+
+out=$(SFTP_REFUSE='u1234@u1234.your-storagebox.de: Permission denied (publickey).' BK _bk_destination_command test box)
+grep -q 'Permission denied (publickey)' <<< "$out" && grep -q 'The remote must accept this key: ssh-ed25519' <<< "$out" && pass "destination test before the key is installed: the remote's refusal, and the key to install" || fail "test refused: ${out}"
+: > "$BS/sftp.log"
+out=$(BK _bk_destination_command test box); grep -q 'reachable — a file written and removed in backups/cipi/cipi' <<< "$out" && [[ -d "$BS/remote/backups/cipi/cipi" && -z "$(ls -A "$BS/remote/backups/cipi/cipi")" ]] \
+    && grep -q -- '-P 23 -i '"$BS"'/keys/box -o BatchMode=yes -o IdentitiesOnly=yes' "$BS/sftp.log" && grep -q "UserKnownHostsFile=$BS/keys/known_hosts" "$BS/sftp.log" && grep -q -- '-- u1234@u1234.your-storagebox.de$' "$BS/sftp.log" \
+    && pass "destination test: a file written and removed; the key only, no prompt, the host key pinned in its own known_hosts" || fail "test: ${out} / $(cat "$BS/sftp.log")"
+
+# A run, as the rest of the backup code moves it: up, listed, found, down, pruned.
+BK _bk_aws box cp "$BS/run/" "sftp://box/cipi/nightly/20261128-030000/" --recursive >/dev/null
+mkdir -p "$BS/remote/elsewhere"
+[[ "$(cd "$BS/remote/backups/cipi/cipi/nightly/20261128-030000" && find . -type f | sort | paste -sd' ' -)" == "./apps/shop/files.tar.gz ./apps/shop/meta.json ./databases/mariadb/shop.sql.gz ./manifest.json" ]] \
+    && pass "a run uploaded: <folder>/cipi/<profile>/<timestamp>/, the same layout as a bucket" || fail "upload: $(find "$BS/remote" -type f)"
+BK _bk_aws box cp "$BS/run/" "sftp://box/cipi/nightly/20261129-030000/" --recursive >/dev/null
+out=$(BK _bk_s3_ls_dirs box "sftp://box/cipi/nightly/"); [[ "$(paste -sd' ' - <<< "$out")" == "20261128-030000 20261129-030000" ]] && pass "its runs listed as the S3 code reads them (PRE <run>/)" || fail "ls dirs: ${out}"
+out=$(BK _bk_aws box ls "sftp://box/cipi/nightly/20261128-030000/" --recursive)
+[[ "$(awk '{print $4}' <<< "$out" | sort | paste -sd' ' -)" == "cipi/nightly/20261128-030000/apps/shop/files.tar.gz cipi/nightly/20261128-030000/apps/shop/meta.json cipi/nightly/20261128-030000/databases/mariadb/shop.sql.gz cipi/nightly/20261128-030000/manifest.json" ]] \
+    && [[ "$(awk '$4 ~ /manifest/ {print $3}' <<< "$out")" == 8 ]] && pass "a recursive listing: every file, its size, its key — what verify checks for empty files" || fail "ls recursive: ${out}"
+out=$(BK _bk_s3_find_run nightly 20261128-030000); [[ "$out" == box ]] && pass "fetch and verify find a run on it" || fail "find run: ${out}"
+out=$(BK _bk_s3_find_run nightly 20250101-000000); [[ -z "$out" ]] && pass "…and not one that is not there" || fail "find missing: ${out}"
+mkdir -p "$BS/down"; BK _bk_aws box cp "sftp://box/cipi/nightly/20261128-030000/" "$BS/down/" --recursive >/dev/null
+diff -r "$BS/run" "$BS/down" >/dev/null && pass "a run downloaded is the run that went up" || fail "download: $(diff -r "$BS/run" "$BS/down")"
+BK _bk_aws box rm "sftp://box/cipi/nightly/20261128-030000/" --recursive >/dev/null
+[[ ! -e "$BS/remote/backups/cipi/cipi/nightly/20261128-030000" && -d "$BS/remote/backups/cipi/cipi/nightly/20261129-030000" ]] && pass "a run pruned: its files and folders gone, the next run left" || fail "rm: $(find "$BS/remote")"
+out=$(BK _bk_aws box rm "sftp://box/cipi/nightly/19990101-000000/" --recursive); rc=$?
+[[ $rc -eq 0 ]] && pass "pruning a run that is not there is not an error" || fail "rm missing: rc=${rc} ${out}"
+out=$(BK _bk_aws box ls "sftp://box/cipi/nope/"); rc=$?; [[ $rc -eq 1 && -z "$out" ]] && pass "listing a folder that is not there: nothing, status 1 — as aws s3 ls" || fail "ls missing: rc=${rc} ${out}"
+grep -q '_bk_is_sftp "$dest" || _ensure_awscli' "${LIB}/backup.sh" && pass "an SFTP copy needs no AWS CLI" || fail "upload installs aws"
+
+out=$(BK _bk_destination_command edit box --port=22 < /dev/null); [[ "$(jq -r '.sftp_destinations.box.port' "$BS/cfg/backup.json")" == 22 && "$(jq -r '.sftp_destinations.box.host' "$BS/cfg/backup.json")" == u1234.your-storagebox.de ]] \
+    && pass "destination edit: what is given changes, the rest stays, the key too" || fail "edit: ${out}"
+out=$(BK _bk_destination_command add pj --type=sftp --host=10.0.0.5 --user=backup --json < /dev/null)
+[[ "$(jq -r '[.name, .type, .host, .port, .user, (.public_key | startswith("ssh-ed25519 "))] | @tsv' <<< "$out")" == $'pj\tsftp\t10.0.0.5\t22\tbackup\ttrue' ]] && pass "add --json: what the panel shows — the destination and the key to install" || fail "add json: ${out}"
+out=$(SUDO_USER=www-data BK _bk_destination_command add s3x --bucket=b --key=k --secret=s < /dev/null); grep -q 'An S3 destination is added at the server' <<< "$out" && ! jq -e '.s3_destinations.s3x' "$BS/cfg/backup.json" >/dev/null \
+    && pass "from the panel an S3 destination is refused: its secret would be kept there" || fail "www-data s3: ${out}"
+out=$(BK _bk_destination_command remove pj < /dev/null); [[ ! -e "$BS/keys/pj" && ! -e "$BS/keys/pj.pub" ]] && ! jq -e '.sftp_destinations.pj' "$BS/cfg/backup.json" >/dev/null && grep -q 'authorized_keys' <<< "$out" \
+    && pass "destination remove: its key deleted here, and a word about the remote's authorized_keys" || fail "remove: ${out}"
+grep -q '/usr/local/bin/cipi backup sftp \*,' "${LIB}/cipi-api-sudoers.sh" && ! grep -qE 'cipi backup destination (add|edit|remove)' "${LIB}/cipi-api-sudoers.sh" \
+    && pass "the panel runs backup sftp — SFTP destinations only; destination add|edit|remove (S3 secrets) stay out" || fail "sudoers sftp"
+out=$(BK backup_command sftp add vps --host=10.0.0.9 --user=backup --json < /dev/null); [[ "$(jq -r '.type' <<< "$out")" == sftp ]] && pass "backup sftp add: the same destination, SFTP always" || fail "sftp add: ${out}"
+echo '{"s3x": 1}' > /dev/null; jq '.s3_destinations = {"bucket1": {"bucket": "b"}}' "$BS/cfg/backup.json" > "$BS/x" && mv "$BS/x" "$BS/cfg/backup.json"
+out=$(BK backup_command sftp remove bucket1 < /dev/null); grep -q "'bucket1' is not an SFTP destination" <<< "$out" && jq -e '.s3_destinations.bucket1' "$BS/cfg/backup.json" >/dev/null \
+    && pass "backup sftp remove leaves an S3 destination alone" || fail "sftp remove s3: ${out}"
+out=$(BK backup_command sftp remove vps < /dev/null); ! jq -e '.sftp_destinations.vps' "$BS/cfg/backup.json" >/dev/null && pass "backup sftp remove: an SFTP one goes" || fail "sftp remove: ${out}"
+
+echo "--- self-update: a signed release, a delay — both off unless asked"
+SU="${TMP}/su"; mkdir -p "$SU/bin" "$SU/cfg" "$SU/log" "$SU/tree" "$SU/opt"
+# git as a stand-in: the downloaded tree's HEAD, its tag, what verify-tag says.
+cat > "$SU/bin/git" <<'STUB'
+#!/bin/bash
+args="$*"
+case "$args" in
+    *" fetch "*) [[ "${NO_TAG:-}" == 1 ]] && { echo "fatal: couldn't find remote ref refs/tags/v5.19.0" >&2; exit 128; }; exit 0 ;;
+    *"rev-parse HEAD"*) echo "${HEAD_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" ;;
+    *"rev-parse v"*"^{commit}"*) echo "${TAG_SHA:-${HEAD_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}}" ;;
+    *"cat-file -t"*) echo "${TAG_TYPE:-tag}" ;;
+    *"verify-tag"*)
+        grep -q 'allowedSignersFile=' <<< "$args" || exit 1
+        [[ "${BAD_SIG:-}" == 1 ]] && { echo 'Could not verify signature.' >&2; exit 1; }
+        echo 'Good "git" signature for andrea@cipi.sh with ED25519 key SHA256:abcDEF123' >&2 ;;
+esac
+STUB
+cat > "$SU/bin/ssh-keygen" <<'STUB'
+#!/bin/bash
+k=$(cat); case "$k" in *AAAAkeyOne*) echo "256 SHA256:keyONEfp no comment (ED25519)" ;; *) echo "256 SHA256:otherfp no comment (ED25519)" ;; esac
+STUB
+chmod +x "$SU/bin/git" "$SU/bin/ssh-keygen"
+printf '# comment\nandrea@cipi.sh namespaces="git" ssh-ed25519 AAAAkeyOne\n' > "$SU/opt/release-signers"
+SUH() {
+    PATH="$SU/bin:$PATH" CIPI_LIB="$LIB" CIPI_CONFIG="$SU/cfg" CIPI_LOG="$SU/log" CIPI_SHIPPED_SIGNERS="$SU/opt/release-signers" CIPI_SELFUPDATE_DELAY_CRON="$SU/cron" CIPI_VERSION=5.18.0 \
+    bash -c 'source "$CIPI_LIB/common.sh" 2>/dev/null; RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
+        vault_read() { cat "$CIPI_CONFIG/$1" 2>/dev/null; }; vault_write() { cat > "$CIPI_CONFIG/$1"; }
+        log_action() { echo "$*" >> "$CIPI_LOG/actions.log"; }; cipi_notify() { echo "NOTIFY $1" >> "$CIPI_LOG/notify.log"; }
+        _cipi_run_timed() { shift; "$@"; }
+        source "$CIPI_LIB/self-update.sh"; "$@"' _ "$@" 2>&1
+}
+out=$(SUH selfupdate_policy --json); [[ "$(jq -c '[.verify, .delay_hours, .delay_default_hours, .signers_ready, (.shipped_signers | length)]' <<< "$out")" == '[false,0,12,false,1]' ]] \
+    && pass "by default nothing changes: no signature check, no delay — the shipped signers are offered, not trusted" || fail "policy default: ${out}"
+out=$(SUH selfupdate_policy --verify=on < /dev/null); grep -q 'Say which key you checked: --fingerprint=SHA256' <<< "$out" && grep -q 'SHA256:keyONEfp' <<< "$out" && [[ ! -e "$SU/cfg/release-signers" ]] \
+    && pass "--verify=on without a terminal: the fingerprint compared with cipi.sh has to be given" || fail "verify on blind: ${out}"
+out=$(SUH selfupdate_policy --verify=on --fingerprint=SHA256:forged < /dev/null); grep -q 'is not the fingerprint of the signers shipped' <<< "$out" && [[ ! -e "$SU/cfg/release-signers" ]] \
+    && pass "…a fingerprint that is not the shipped key's: refused" || fail "verify wrong fp: ${out}"
+out=$(SUH selfupdate_policy --verify=on --fingerprint=SHA256:keyONEfp --json < /dev/null)
+[[ "$(jq -c '[.verify, .signers_ready, .signers[0].fingerprint, .signers[0].principal]' <<< "$out")" == '[true,true,"SHA256:keyONEfp","andrea@cipi.sh"]' ]] && cmp -s "$SU/opt/release-signers" "$SU/cfg/release-signers" \
+    && pass "…the right one: those signers are trusted, the check is on" || fail "verify on: ${out}"
+out=$(SUH selfupdate_policy --delay=12h --json); [[ "$(jq -r '.delay_hours' <<< "$out")" == 12 ]] && grep -q '^17 \* \* \* \* root /usr/local/bin/cipi self-update --if-due' "$SU/cron" \
+    && pass "--delay=12h: kept, and an hourly check installs a held release once it is due" || fail "delay on: ${out} / $(cat "$SU/cron" 2>/dev/null)"
+for bad in 169 x -1 9d; do out=$(SUH selfupdate_policy --delay=$bad); grep -q 'a week at most' <<< "$out" || fail "delay took ${bad}: ${out}"; done
+[[ "$(jq -r '.delay_hours' "$SU/cfg/selfupdate.json")" == 12 ]] && pass "a delay that is not hours or days, or past a week: refused, nothing changed" || fail "bad delay changed it"
+out=$(SUH selfupdate_policy --delay=2d --json); [[ "$(jq -r '.delay_hours' <<< "$out")" == 48 ]] && pass "--delay=2d is 48 hours" || fail "2d: ${out}"
+SUH selfupdate_policy --delay=12h >/dev/null
+
+# The signature: the tag of the version, on the commit downloaded, signed by a trusted key.
+out=$(SUH _su_verify_release "$SU/tree" 5.19.0); [[ $? -eq 0 ]] && grep -q 'Good "git" signature for andrea@cipi.sh with ED25519 key SHA256:abcDEF123' <<< "$out" && pass "a release whose tag is signed by a trusted key, at the commit downloaded: verified" || fail "verify ok: ${out}"
+out=$(NO_TAG=1 SUH _su_verify_release "$SU/tree" 5.19.0); grep -q 'has no tag v5.19.0 — it was not signed' <<< "$out" && pass "no tag: refused" || fail "no tag: ${out}"
+out=$(TAG_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb SUH _su_verify_release "$SU/tree" 5.19.0); grep -q 'not at the signed tag v5.19.0' <<< "$out" && pass "a branch moved past its signed tag (a commit pushed after it): refused" || fail "moved: ${out}"
+out=$(TAG_TYPE=commit SUH _su_verify_release "$SU/tree" 5.19.0); grep -q 'lightweight tag' <<< "$out" && pass "a lightweight tag carries no signature: refused" || fail "lightweight: ${out}"
+out=$(BAD_SIG=1 SUH _su_verify_release "$SU/tree" 5.19.0); grep -q 'not one of a trusted key' <<< "$out" && pass "a signature by any other key: refused" || fail "bad sig: ${out}"
+mv "$SU/cfg/release-signers" "$SU/cfg/rs.bak"; out=$(SUH _su_verify_release "$SU/tree" 5.19.0); grep -q 'no signer is trusted on this server' <<< "$out" && pass "no trusted signer: nothing can be verified, nothing installed" || fail "no signers: ${out}"
+mv "$SU/cfg/rs.bak" "$SU/cfg/release-signers"
+grep -q 'Update refused: ${why}' "${LIB}/self-update.sh" && grep -q '_su_held "refused: ${why}"' "${LIB}/self-update.sh" && grep -q 'Cipi update refused on $(hostname)' "${LIB}/self-update.sh" \
+    && pass "a refused update installs nothing, is noted and notified" || fail "refusal path"
+
+# The delay: this server's clock, per commit.
+SHA1=1111111111111111111111111111111111111111; SHA2=2222222222222222222222222222222222222222
+out=$(SUH _su_delay_gate "$SHA1" 5.19.0); [[ $? -eq 1 ]] && grep -q 'v5.19.0 (111111111111) first seen .*; installed from .* (delay 12h)' <<< "$out" && [[ "$(jq -r '.pending.sha' "$SU/cfg/selfupdate-state.json")" == "$SHA1" ]] \
+    && pass "a new commit: held, and when it was first seen is recorded" || fail "gate new: ${out}"
+first=$(jq -r '.pending.first_seen' "$SU/cfg/selfupdate-state.json"); sleep 1
+SUH _su_delay_gate "$SHA1" 5.19.0 >/dev/null; [[ "$(jq -r '.pending.first_seen' "$SU/cfg/selfupdate-state.json")" == "$first" ]] && pass "seen again: the clock is not reset" || fail "gate reset the clock"
+SUH _su_delay_gate "$SHA2" 5.19.0 >/dev/null; [[ "$(jq -r '.pending.sha' "$SU/cfg/selfupdate-state.json")" == "$SHA2" ]] && pass "the branch moved (a fix, a revert): the new commit starts its own wait" || fail "gate moved"
+jq '.pending.first_seen -= 43201' "$SU/cfg/selfupdate-state.json" > "$SU/st" && mv "$SU/st" "$SU/cfg/selfupdate-state.json"
+SUH _su_delay_gate "$SHA2" 5.19.0 >/dev/null && pass "12 hours later: it goes in" || fail "gate due"
+jq --arg s "$SHA2" '.installed_sha = $s | del(.pending)' "$SU/cfg/selfupdate-state.json" > "$SU/st" && mv "$SU/st" "$SU/cfg/selfupdate-state.json"
+SUH _su_delay_gate "$SHA2" 5.19.0 >/dev/null && pass "what is installed already is never held" || fail "gate installed"
+SUH selfupdate_policy --delay=off >/dev/null; SUH _su_delay_gate "$SHA1" 5.20.0 >/dev/null && [[ ! -e "$SU/cron" ]] && pass "--delay=off: nothing held, the hourly check removed" || fail "delay off"
+grep -q 'if \[\[ -n "$new_sha" && "${ARG_now:-}" != "true" \]\]; then' "${LIB}/self-update.sh" && grep -q "_su_state_write \"\$(_su_state | jq -c --arg s \"\$new_sha\" '.installed_sha = \$s" "${LIB}/self-update.sh" \
+    && pass "--now installs at once (the signature is still checked); an install records what it installed" || fail "now / installed"
+[[ -f "${ROOT}/release-signers" && -x "${ROOT}/scripts/sign-release.sh" ]] && grep -q 'install -m 644 cipi-install/release-signers /opt/cipi/release-signers' "${ROOT}/setup.sh" \
+    && pass "the release ships its signers and the script that signs it" || fail "signers file / script"
+grep -q '/usr/local/bin/cipi self-update policy \*,' "${LIB}/cipi-api-sudoers.sh" && ! grep -qE 'cipi self-update( --now)?, ' "${LIB}/cipi-api-sudoers.sh" \
+    && pass "the panel may read and set the policy — not start an update" || fail "sudoers self-update"
 
 echo ""
 echo "=== ${PASS} passed, ${FAIL} failed ==="

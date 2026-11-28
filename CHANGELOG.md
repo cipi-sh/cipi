@@ -4,6 +4,19 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.19.2] — 2026-11-28
+
+**The `.env` as it is.** A value followed by blanks or a comment was read with them — and with its quotes: the panel showed `"x"   ` as the value of `KEY="x"   `, and saved it inside new quotes (`KEY="\"x\"   "`). And the whole file can now be read and written as text, with nothing parsed, quoted or moved: what the panel's text editor needs.
+
+### Fixed
+
+- **`cipi app env --json` and `--get` read a value the way Laravel does**: in double quotes, what is between them (`\"` and `\\` taken back); in single quotes, what is between them; a bare value up to a blank followed by `#`, without the blanks around it. What follows a closing quote — blanks, a comment — is not part of the value any more. Before, `MAIL_MAILER=ses   ` was `ses   ` and `MAIL_FROM_ADDRESS="noreply@example.com"   ` was `"noreply@example.com"   `, quotes included: saved from the panel they became `"ses   "` and `"\"noreply@example.com\"   "`.
+
+### Added
+
+- **`cipi app env <app> --raw`**: the `.env` as it is — comments, blank lines, the spaces, the newlines at the end. `--raw --json` gives `{"app": …, "text": …}`.
+- **`cipi app env <app> --stdin`**: the whole `.env` from standard input, written byte for byte — no line parsed, quoted, trimmed or reordered. In place, by the app user, 640. Nothing on standard input, more than 64 KB or a NUL byte: refused, the file as it was. `--stdin --json` answers like `--raw --json`. Neither goes with `--show`, `--get`, `--set`, `--unset` or `--order`. The panel's sudoers already allow both (`app env *`).
+
 ## [5.19.1] — 2026-11-28
 
 **Backups start on the server; S3 buckets and SFTP servers are added on a par.** `cipi backup configure` no longer asks for "the default bucket": it sets backups up on this server — the local folder and a nightly profile — and then offers to send them to an S3 bucket and/or an SFTP server too. The panel works the same way (cipi/api 1.49.0, cipi/gui 4.11.0). **Every change of where archives go is notified.**

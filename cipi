@@ -360,6 +360,8 @@ show_help_topic() {
             _help_cmd "cipi app unsuspend <app>"       "Bring back online"
             _help_h "Runtime"
             _help_cmd "cipi app env <app>"             "Edit .env (nano)  ${DIM}[--show|--get=K|--set=K=V|--unset=K|--order=K1,K2,…] [--json]${NC}"
+            _help_cmd "cipi app env <app> --raw"       "The .env as it is  ${DIM}(comments, blank lines, spaces) [--json]${NC}"
+            _help_cmd "cipi app env <app> --stdin"     "Replace the .env with standard input, as it is  ${DIM}[--json]${NC}"
             _help_cmd "cipi app logs <app> [--type=T]" "Tail logs"
             _help_cmd "cipi app tinker <app>"          "Laravel Tinker"
             _help_cmd "cipi app artisan <app> <cmd>"   "Artisan command"

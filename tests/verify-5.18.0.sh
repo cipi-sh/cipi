@@ -703,6 +703,14 @@ for bad in '..' '../x' 'www/../..' '.git' 'a b' 'a;b' 'x/.ssh' '$(id)'; do
     CS _app_docroot_clean "$bad" >/dev/null && fail "docroot '${bad}' accepted" || pass "docroot '${bad}' refused"
 done
 grep -q 'docroot=$(_app_docroot_clean "$docroot") || {' "$A" && pass "app create checks the docroot before anything is created" || fail "create: docroot not checked"
+# From the panel (no terminal) a custom app without --docroot is served from htdocs:
+# the prompt read end-of-file and stopped the create (reported from the field).
+grep -q 'if \[\[ -z "$docroot" && -t 0 \]\]; then' "$A" && pass "app create asks for the docroot on a terminal only" || fail "create: docroot asked without a terminal"
+out=$(bash -c 'source "$1/common.sh" 2>/dev/null; CYAN=; NC=; read_input "Docroot" "/" d < /dev/null; echo "got=[$d]"' _ "$LIB" 2>&1)
+grep -q 'got=\[/\]' <<< "$out" && pass "read_input with nothing to read: the default is the answer" || fail "read_input eof default: ${out}"
+out=$(bash -c 'source "$1/common.sh" 2>/dev/null; CYAN=; NC=; read_input "Token name" "" t < /dev/null; echo "after"' _ "$LIB" 2>&1); rc=$?
+[[ $rc -eq 1 ]] && grep -q 'No answer to "Token name": there is no terminal to ask' <<< "$out" && ! grep -q after <<< "$out" \
+    && pass "…and with no default it stops, in words (no loop of prompts, no shell crash)" || fail "read_input eof no default: rc=${rc} ${out}"
 H="${TMP}/home/testwp"; mkdir -p "$H"
 CS _app_coming_soon_install "$H" "www" "testwp.example.dev" && [[ -f "${H}/htdocs/www/coming-soon.html" && ! -e "${H}/htdocs/index.html" && ! -e "${H}/htdocs/coming-soon.html" ]] \
     && [[ "$(stat -c %a "${H}/htdocs/www/coming-soon.html")" == 644 ]] && grep -q 'testwp.example.dev' "${H}/htdocs/www/coming-soon.html" \

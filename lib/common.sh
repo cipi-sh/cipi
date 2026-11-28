@@ -1709,10 +1709,20 @@ confirm_yes() {
 }
 
 read_input() {
-    local prompt="$1" default="${2:-}" var="$3"
+    local prompt="$1" default="${2:-}" var="$3" input=""
     if [[ -n "$default" ]]; then echo -e -n "${CYAN}${prompt}${NC} [${default}]: "
     else echo -e -n "${CYAN}${prompt}${NC}: "; fi
-    read -r input; printf -v "$var" '%s' "${input:-$default}"
+    # Nothing to read (the panel, a cron, a pipe that ended): the default is
+    # the answer, as Enter would give it. Without a default there is no answer
+    # to go on — said in words, not as a crash of the shell.
+    if ! read -r input && [[ -z "$input" ]]; then
+        echo ""
+        if [[ -z "$default" ]]; then
+            error "No answer to \"${prompt}\": there is no terminal to ask — give it as an option of the command"
+            exit 1
+        fi
+    fi
+    printf -v "$var" '%s' "${input:-$default}"
 }
 
 # Tables with columns sized from the data (tbl_start, tbl_row, tbl_print …).

@@ -690,13 +690,17 @@ _bk_profile_save() {
     _bk_write_cron
 }
 
-_bk_ensure_default_profile() {
+_bk_ensure_default_profile() {   # [destination] — the one chosen at setup (an SFTP server)
     _bk_configured || return 0
     local n; n=$(_bk_profiles_json | jq 'length')
     [[ "$n" -gt 0 ]] && return 0
     local d; d=$(_bk_default_profile_json)
+    if [[ -n "${1:-}" ]]; then
+        d=$(echo "$d" | jq --arg n "$1" '.destinations = [$n]')
     # Without a bucket the only place a backup can land is this server.
-    _bk_has_s3 || d=$(echo "$d" | jq '.destinations = ["local"]')
+    elif ! _bk_has_s3; then
+        d=$(echo "$d" | jq '.destinations = ["local"]')
+    fi
     _bk_profile_save default "$d"
     info "Created backup profile 'default' (nightly 02:00, kept 28 days)"
 }
@@ -2398,11 +2402,20 @@ _bk_fetch() {
 # [--local-dir=] [--tmpdir=], or --local-only for no bucket. What is not given
 # keeps its value. The bucket is reached with the keys before anything is
 # saved: a wrong key changes nothing.
+# cipi backup configure: where the backups go — this server only, an S3
+# bucket (the default bucket, 's3' in profiles) or an SFTP server (a named
+# destination). Asked at a terminal; flags for a script and for the panel:
+#   --type=local                       (or --local-only)
+#   --type=s3 --bucket= --key= --secret=|--secret-stdin [--region=] [--endpoint=]
+#   --type=sftp --host= --user= [--port=22] [--path=] [--name=sftp]
+# A first setup makes the nightly profile, sent to what was chosen. --json
+# answers {configured, type, destination} (an SFTP one with its public key).
 _bk_configure() {
     parse_args "$@"
-    local cf="${CIPI_CONFIG}/backup.json"
+    local cf="${CIPI_CONFIG}/backup.json" was_configured=false
+    [[ -f "$cf" ]] && was_configured=true
     local ck="" cs="" cb="" cr="" ce="" ct="/var/tmp" cl=""
-    if [[ -f "$cf" ]]; then
+    if [[ "$was_configured" == true ]]; then
         local _bkj; _bkj=$(_bk_cfg)
         ck=$(echo "$_bkj" | jq -r '.aws_key    // ""')
         cs=$(echo "$_bkj" | jq -r '.aws_secret // ""')
@@ -2412,9 +2425,11 @@ _bk_configure() {
         ct=$(echo "$_bkj" | jq -r '.tmpdir // "/var/tmp"')
         cl=$(echo "$_bkj" | jq -r '.local_dir // ""')
     fi
+    # --json: the answer alone on standard output, everything said on stderr.
+    local json=false; [[ "${ARG_json:-}" == "true" ]] && { json=true; exec 3>&1 1>&2; }
 
     local flagged=false f
-    for f in bucket key secret secret_stdin region endpoint local_dir tmpdir local_only; do
+    for f in type bucket key secret secret_stdin region endpoint local_dir tmpdir local_only host port user path name; do
         [[ -n "$(eval "echo \${ARG_${f}+x}")" ]] && flagged=true
     done
     local from_panel=false; [[ "${SUDO_USER:-}" == "www-data" ]] && from_panel=true
@@ -2424,50 +2439,96 @@ _bk_configure() {
         [[ -z "${ARG_local_dir+x}" && -z "${ARG_tmpdir+x}" ]] || { error "The local and temp directories are set at the server's shell: cipi backup configure"; exit 1; }
     fi
 
+    # What is set up: local, s3, sftp — or "" (only folders or the region
+    # changed: the rest stays as it is).
+    local ctype=""
+    if [[ "${ARG_local_only:-}" == "true" ]]; then ctype=local
+    elif [[ -n "${ARG_type+x}" ]]; then
+        ctype="${ARG_type}"
+        [[ "$ctype" =~ ^(local|s3|sftp)$ ]] || { error "--type is local, s3 or sftp"; exit 1; }
+    elif [[ -n "${ARG_bucket+x}${ARG_key+x}${ARG_secret+x}${ARG_secret_stdin+x}${ARG_endpoint+x}" ]]; then ctype=s3
+    elif [[ -n "${ARG_host+x}${ARG_user+x}" ]]; then ctype=sftp
+    fi
+
     local s_given errf
     errf=$(mktemp) || exit 1
     s_given=$(_bk_secret_given 2>"$errf") || { error "$(cat "$errf" 2>/dev/null)"; rm -f "$errf"; exit 1; }
     rm -f "$errf"
 
+    # The SFTP server, when it is the choice: a named destination ('sftp'
+    # unless --name= says otherwise), with a key Cipi makes for it.
+    local sn="${ARG_name:-sftp}" sh="" sp="22" su="" sd="" scur="{}"
+    if [[ "$was_configured" == true ]] && _bk_is_sftp "$sn" 2>/dev/null; then
+        scur=$(_bk_s3_json "$sn")
+        sh=$(jq -r '.host // ""' <<< "$scur"); sp=$(jq -r '.port // 22' <<< "$scur")
+        su=$(jq -r '.user // ""' <<< "$scur"); sd=$(jq -r '.path // ""' <<< "$scur")
+    fi
+
     if [[ "$flagged" == true ]]; then
-        if [[ "${ARG_local_only:-}" == "true" ]]; then
-            cb=""; ck=""; cs=""; ce=""
-        else
-            [[ -n "${ARG_bucket+x}" ]] && cb="${ARG_bucket}"
-            [[ -n "${ARG_key+x}" ]] && ck="${ARG_key}"
-            [[ -n "$s_given" ]] && cs="$s_given"
-            [[ -n "${ARG_region+x}" ]] && cr="${ARG_region}"
-            [[ -n "${ARG_endpoint+x}" ]] && ce="${ARG_endpoint}"
-            [[ "$ce" == "none" ]] && ce=""
-        fi
+        case "$ctype" in
+            local) cb=""; ck=""; cs=""; ce="" ;;
+            s3|"")
+                [[ -n "${ARG_bucket+x}" ]] && cb="${ARG_bucket}"
+                [[ -n "${ARG_key+x}" ]] && ck="${ARG_key}"
+                [[ -n "$s_given" ]] && cs="$s_given"
+                [[ -n "${ARG_region+x}" ]] && cr="${ARG_region}"
+                [[ -n "${ARG_endpoint+x}" ]] && ce="${ARG_endpoint}"
+                [[ "$ce" == "none" ]] && ce=""
+                ;;
+            sftp)
+                [[ -n "${ARG_host+x}" ]] && sh="${ARG_host}"
+                [[ -n "${ARG_port+x}" ]] && sp="${ARG_port}"
+                [[ -n "${ARG_user+x}" ]] && su="${ARG_user}"
+                [[ -n "${ARG_path+x}" ]] && sd="${ARG_path}"
+                ;;
+        esac
         [[ -n "${ARG_local_dir+x}" ]] && cl="${ARG_local_dir}"
         [[ -n "${ARG_tmpdir+x}" ]] && ct="${ARG_tmpdir}"
     elif [[ -t 0 && "$from_panel" == false ]]; then
-        echo -e "\n${BOLD}Backup destination${NC} ${DIM}— the default bucket, 's3' in profiles${NC}"
-        echo -e "  ${DIM}Leave the bucket empty to keep backups on this server only.${NC}"
-        echo -e "  ${DIM}Further buckets and SFTP servers are named destinations: cipi backup destination add <name>${NC}\n"
-
-        read_input "Access Key ID" "$ck" ck
-        read_input "Secret Access Key" "$cs" cs
-        read_input "Bucket name (empty = local only)" "$cb" cb
-        if [[ -n "$cb" ]]; then
-            read_input "Region" "${cr:-eu-central-1}" cr
-            echo -e "  ${DIM}Leave empty for AWS S3. For any other S3-compatible provider set the endpoint URL.${NC}"
-            echo -e "  ${DIM}Examples:${NC}"
-            echo -e "  ${DIM}  Cloudflare R2:  https://<account-id>.r2.cloudflarestorage.com${NC}"
-            echo -e "  ${DIM}  Hetzner:        https://<datacenter>.your-objectstorage.com${NC}"
-            echo -e "  ${DIM}  DO Spaces:      https://<region>.digitaloceanspaces.com${NC}"
-            echo -e "  ${DIM}  Backblaze B2:   https://s3.<region>.backblazeb2.com${NC}"
-            echo -e "  ${DIM}  Scaleway:       https://s3.<region>.scw.cloud${NC}"
-            echo -e "  ${DIM}  MinIO:          https://your-minio-host${NC}"
-            read_input "Endpoint URL (optional)" "$ce" ce
-        fi
+        local cur_type=s3
+        if [[ "$was_configured" == true && -z "$cb" ]]; then cur_type=local; _bk_is_sftp "$sn" 2>/dev/null && cur_type=sftp; fi
+        echo ""
+        read_choice "Where do the backups go?" "$cur_type" ctype \
+            "local|This server only — a folder here; lost if the server is lost" \
+            "s3|An S3 bucket — AWS, Hetzner, Cloudflare R2, DigitalOcean, Backblaze, Scaleway, MinIO…" \
+            "sftp|An SFTP server — a VPS with a backup user, a Hetzner Storage Box, a NAS"
+        echo ""
+        case "$ctype" in
+            local)
+                cb=""; ck=""; cs=""; ce=""
+                ;;
+            s3)
+                echo -e "${BOLD}The S3 bucket${NC} ${DIM}— 's3' in profiles. Cipi reaches it with these keys before saving anything.${NC}"
+                read_input "Bucket name" "$cb" cb
+                read_input "Access Key ID" "$ck" ck
+                _bk_read_secret "Secret Access Key" cs
+                read_input "Region" "${cr:-eu-central-1}" cr
+                echo -e "  ${DIM}Leave empty for AWS S3. For any other S3-compatible provider set the endpoint URL.${NC}"
+                echo -e "  ${DIM}Examples:${NC}"
+                echo -e "  ${DIM}  Cloudflare R2:  https://<account-id>.r2.cloudflarestorage.com${NC}"
+                echo -e "  ${DIM}  Hetzner:        https://<datacenter>.your-objectstorage.com${NC}"
+                echo -e "  ${DIM}  DO Spaces:      https://<region>.digitaloceanspaces.com${NC}"
+                echo -e "  ${DIM}  Backblaze B2:   https://s3.<region>.backblazeb2.com${NC}"
+                echo -e "  ${DIM}  Scaleway:       https://s3.<region>.scw.cloud${NC}"
+                echo -e "  ${DIM}  MinIO:          https://your-minio-host${NC}"
+                read_input "Endpoint URL (optional)" "$ce" ce
+                ;;
+            sftp)
+                echo -e "${BOLD}The SFTP server${NC} ${DIM}— Cipi signs in with a key it makes for it, never with a password.${NC}"
+                echo -e "  ${DIM}A Hetzner Storage Box: host uXXXXX.your-storagebox.de, port 23, user uXXXXX.${NC}"
+                read_input "Name in profiles" "$sn" sn
+                read_input "Host" "$sh" sh
+                read_input "Port" "$sp" sp
+                read_input "User" "$su" su
+                read_input "Folder on the remote (empty: the login's home)" "$sd" sd
+                ;;
+        esac
         echo -e "  ${DIM}Where local copies are kept (profiles with --dest=local).${NC}"
         read_input "Local backup directory" "${cl:-$BACKUP_DEFAULT_LOCAL}" cl
         echo -e "  ${DIM}Temp directory for backup archives (must have enough disk space; /tmp is often RAM-backed).${NC}"
         read_input "Temp directory" "$ct" ct
     else
-        error "Nothing to ask without a terminal: give the bucket (--bucket= --key= --secret-stdin [--region=] [--endpoint=]) or --local-only"
+        error "Nothing to ask without a terminal: say where backups go — --type=local, --type=s3 --bucket= --key= --secret-stdin [--region=] [--endpoint=], or --type=sftp --host= --user= [--port=] [--path=]"
         exit 1
     fi
 
@@ -2475,7 +2536,9 @@ _bk_configure() {
     cr="${cr:-eu-central-1}"
     ct="${ct:-/var/tmp}"
     cl="${cl:-$BACKUP_DEFAULT_LOCAL}"
-    if [[ -n "$cb" ]]; then
+    [[ "$ctype" == s3 && -z "$cb" ]] && { error "An S3 bucket needs its name (--bucket=), an access key (--key=) and a secret key (--secret-stdin)"; exit 1; }
+    # The bucket is checked when it is what changes; an SFTP setup leaves it as it is.
+    if [[ -n "$cb" && "$ctype" != sftp ]]; then
         _bk_valid_bucket "$cb" || { error "Invalid bucket name '${cb}'"; exit 1; }
         _bk_valid_region "$cr" || { error "Invalid region '${cr}'"; exit 1; }
         _bk_valid_endpoint "$ce" || { error "Invalid endpoint URL '${ce}'"; exit 1; }
@@ -2484,11 +2547,22 @@ _bk_configure() {
         _bk_valid_s3_cred "$ck" || { error "Invalid access key: printable characters, no space, no quote"; exit 1; }
         _bk_valid_s3_cred "$cs" || { error "Invalid secret key: printable characters, no space, no quote"; exit 1; }
     fi
+    if [[ "$ctype" == sftp ]]; then
+        sd="${sd%/}"
+        _bk_valid_dest_name "$sn" || { error "Invalid destination name '${sn}' (lowercase letters, digits and dashes, 2-32 chars; 'local' and 's3' are taken)"; exit 1; }
+        if [[ "$was_configured" == true ]] && _bk_s3_exists "$sn" && ! _bk_is_sftp "$sn"; then
+            error "'${sn}' is an S3 destination — choose another name: --name="; exit 1
+        fi
+        _bk_sftp_valid_host "$sh" || { error "Invalid host '${sh}' (an IP address or a hostname)"; exit 1; }
+        [[ "$sp" =~ ^[0-9]{1,5}$ ]] && (( 10#$sp >= 1 && 10#$sp <= 65535 )) || { error "Invalid port '${sp}' (1-65535)"; exit 1; }
+        _bk_sftp_valid_user "$su" || { error "Invalid user '${su}'"; exit 1; }
+        _bk_sftp_valid_path "$sd" || { error "Invalid folder '${sd}' (letters, digits, . _ - /; no ..)"; exit 1; }
+    fi
     [[ "$cl" == /* && "$cl" != *..* && "$cl" =~ ^[A-Za-z0-9._/-]+$ ]] || { error "Invalid local directory '${cl}' (an absolute path)"; exit 1; }
     [[ "$ct" == /* && "$ct" != *..* && "$ct" =~ ^[A-Za-z0-9._/-]+$ ]] || { error "Invalid temp directory '${ct}' (an absolute path)"; exit 1; }
 
     # The bucket answers with these keys, or nothing is saved.
-    if [[ -n "$cb" ]]; then
+    if [[ -n "$cb" && "$ctype" != sftp ]]; then
         _ensure_awscli
         step "Testing s3://${cb}..."
         local test_err dj
@@ -2528,23 +2602,61 @@ region = ${cr}
 output = json
 AWSCFG
         chmod 600 "${awsd}/credentials" "${awsd}/config"
-    else
+    elif [[ "$ctype" != sftp ]]; then
         warn "No bucket configured — backups stay on this server only."
         warn "A local-only backup does not survive losing the server."
     fi
 
-    _bk_ensure_default_profile
+    # The SFTP server: saved with its key (made once), shown with how to install it.
+    local sj=""
+    if [[ "$ctype" == sftp ]]; then
+        local smode=add; _bk_is_sftp "$sn" && smode=edit
+        # The remote cannot accept the key before it is shown: tested after, at a terminal.
+        ARG_host="$sh" ARG_port="$sp" ARG_user="$su" ARG_path="$sd"; unset ARG_test ARG_new_key
+        if [[ "$json" == true ]]; then
+            sj=$(_bk_destination_add_sftp "$smode" "$sn" </dev/null) || exit 1
+        else
+            _BK_IN_CONFIGURE=1 _bk_destination_add_sftp "$smode" "$sn" </dev/null || exit 1
+        fi
+    fi
+
+    if [[ "$ctype" == sftp ]]; then _bk_ensure_default_profile "$sn"; else _bk_ensure_default_profile; fi
     _bk_write_cron
-    log_action "BACKUP CONFIGURED: ${cb:+s3://${cb}}${cb:-local only}"
-    _bk_notify_change "Backups were configured: ${cb:+the default bucket is s3://${cb}}${cb:-on this server only}"
+    local what="${cb:+s3://${cb}}${cb:-local only}"
+    [[ "$ctype" == sftp ]] && what="sftp://${su}@${sh}:${sp}/${sd} (${sn})"
+    log_action "BACKUP CONFIGURED: ${what}"
+    _bk_notify_change "Backups were configured: $(case "$ctype" in sftp) echo "to the SFTP server ${su}@${sh} (${sn})" ;; *) [[ -n "$cb" ]] && echo "the default bucket is s3://${cb}" || echo "on this server only" ;; esac)"
     success "Backup configured"
     echo ""
     echo -e "  ${DIM}The schedule is managed for you — no crontab editing needed.${NC}"
     echo -e "  ${DIM}Review it:            ${CYAN}cipi backup status${NC}"
     echo -e "  ${DIM}Add another strategy: ${CYAN}cipi backup profile add hourly-db --scope=db --every=30m --keep=48 --dest=local${NC}"
-    echo -e "  ${DIM}Add another bucket:   ${CYAN}cipi backup destination add offsite --bucket=<name> --key=<id> --secret=<key> [--endpoint=<url>]${NC}"
+    echo -e "  ${DIM}Add another bucket:   ${CYAN}cipi backup destination add offsite --bucket=<name> --key=<id> --secret-stdin [--endpoint=<url>]${NC}"
     echo -e "  ${DIM}Or an SFTP server:    ${CYAN}cipi backup destination add box --type=sftp --host=<host> --user=<user> [--port=23]${NC}"
     echo ""
+    if [[ "$ctype" == sftp && "$json" == false && -t 0 && "$from_panel" == false ]]; then
+        if confirm "The key installed on ${sh}? Test the connection now"; then
+            step "Testing ${sn}..."
+            local err
+            if err=$(_bk_sftp_probe "$sn" 2>&1); then success "SFTP connection OK"; else warn "Not reachable yet: ${err}"; info "Test it later: cipi backup destination test ${sn}"; fi
+        fi
+    fi
+
+    if [[ "$json" == true ]]; then
+        [[ -n "$sj" ]] || sj=null
+        local t="$ctype"; [[ -z "$t" ]] && { [[ -n "$cb" ]] && t=s3 || t=local; }
+        jq -n --arg t "$t" --argjson d "$sj" '{configured: true, type: $t, destination: $d}' >&3
+    fi
+}
+
+# A secret asked at a terminal: not shown as it is typed; Enter keeps the current one.
+_bk_read_secret() {   # <prompt> <var>
+    local prompt="$1" var="$2" cur="${!2:-}" input=""
+    if [[ -n "$cur" ]]; then echo -e -n "${CYAN}${prompt}${NC} [keep the current one]: "
+    else echo -e -n "${CYAN}${prompt}${NC}: "; fi
+    read -rs input || input=""
+    echo ""
+    printf -v "$var" '%s' "${input:-$cur}"
 }
 
 # ── Named S3 destinations CLI ────────────────────────────────
@@ -2800,7 +2912,7 @@ _bk_destination_add_sftp() {   # <add|edit> <name>
     echo -e "  ${DIM}A server of yours:      append it to ~${user}/.ssh/authorized_keys there${NC}"
     echo -e "  ${DIM}A Hetzner Storage Box:  ssh-copy-id -p ${port} -s -i ${key}.pub ${user}@${host}   (asks the box's password once)${NC}"
     echo -e "  ${DIM}Then check it:          ${CYAN}cipi backup destination test ${name}${NC}"
-    echo -e "  ${DIM}And use it:             ${CYAN}cipi backup profile edit <profile> --dest=local,${name}${NC}"
+    [[ -n "${_BK_IN_CONFIGURE:-}" ]] || echo -e "  ${DIM}And use it:             ${CYAN}cipi backup profile edit <profile> --dest=local,${name}${NC}"
     echo ""
     if [[ "${ARG_test:-}" == "true" ]]; then
         step "Testing ${name}..."

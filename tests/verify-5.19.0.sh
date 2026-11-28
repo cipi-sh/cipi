@@ -1,7 +1,7 @@
 #!/bin/bash
 # 5.19.0: backups set up and managed from the panel too.
-#  - cipi backup configure takes flags (--bucket= --key= --secret-stdin …, or
-#    --local-only); the bucket is reached before anything is saved; nothing to
+#  - cipi backup configure asks where backups go — this server, an S3 bucket or
+#    an SFTP server — and takes flags (--type=local|s3|sftp, --bucket= …, --host= …); the bucket is reached before anything is saved; nothing to
 #    ask without a terminal is said, not crashed on;
 #  - S3 destinations from the panel: the secret key on standard input only
 #    (--secret-stdin), never on a command line; --json never answers it;
@@ -79,6 +79,49 @@ out=$(SUDO_USER=www-data BK backup_command configure --bucket=acme-backups --key
 out=$(SUDO_USER=www-data BK backup_command configure --local-only --local-dir=/etc < /dev/null); grep -q "set at the server's shell" <<< "$out" && [[ "$(jq -r '.local_dir' "$B/cfg/backup.json")" == "$B/local" ]] \
     && pass "from the panel the local folder is not set (root makes it 0700: it could be any directory)" || fail "www-data local dir: ${out}"
 out=$(BK backup_command configure --local-dir=../etc < /dev/null); grep -q 'Invalid local directory' <<< "$out" && pass "a local folder that is not an absolute path: refused" || fail "local dir rel: ${out}"
+
+echo "--- backup configure: this server, an S3 bucket or an SFTP server"
+C="${TMP}/cf"; mkdir -p "$C/bin" "$C/cfg" "$C/log" "$C/aws" "$C/local"
+cp "$B/bin/aws" "$B/bin/crontab" "$C/bin/"
+cat > "$C/bin/ssh-keygen" <<'STUB'
+#!/bin/bash
+f=""; c=x; while [[ $# -gt 0 ]]; do case "$1" in -f) f="$2"; shift ;; -C) c="$2"; shift ;; esac; shift; done
+echo "PRIVATE" > "$f"; echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey ${c}" > "${f}.pub"
+STUB
+chmod +x "$C/bin/ssh-keygen"
+CF() {
+    PATH="$C/bin:$PATH" AWS_LOG="$C/aws.log" CIPI_LIB="$LIB" CIPI_CONFIG="$C/cfg" CIPI_LOG="$C/log" CIPI_AWS_DIR="$C/aws" BACKUP_DEFAULT_LOCAL="$C/local" BACKUP_SFTP_KEY_DIR="$C/keys" \
+    bash -c 'source "$CIPI_LIB/common.sh" 2>/dev/null; RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
+        vault_read() { cat "$CIPI_CONFIG/$1" 2>/dev/null; }; vault_write() { local t; t=$(mktemp "$CIPI_CONFIG/.vw.XXXXXX") && cat > "$t" && mv "$t" "$CIPI_CONFIG/$1"; }
+        log_action() { echo "$*" >> "$CIPI_LOG/actions.log"; }; hostname() { echo web1; }
+        cipi_notify() { echo "NOTIFY $1 [$3]" >> "$CIPI_LOG/notify.log"; }; notify_now() { echo now; }
+        source "$CIPI_LIB/backup.sh"; "$@"' _ "$@"
+}
+out=$(SUDO_USER=www-data CF backup_command configure --type=sftp --host=u1234.your-storagebox.de --port=23 --user=u1234 --path=cipi/ --json < /dev/null 2>"$C/err")
+[[ "$(jq -c '[.configured, .type, .destination.name, .destination.host, .destination.port, .destination.user, .destination.path]' <<< "$out" 2>/dev/null)" == '[true,"sftp","sftp","u1234.your-storagebox.de",23,"u1234","cipi"]' ]] \
+    && [[ "$(jq -r '.destination.public_key' <<< "$out")" == "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey cipi-backup-sftp@"* ]] \
+    && [[ "$(jq -c '[.bucket, .sftp_destinations.sftp.host, .profiles.default.destinations]' "$C/cfg/backup.json")" == '["","u1234.your-storagebox.de",["sftp"]]' ]] && [[ -f "$C/keys/sftp" ]] \
+    && pass "configure --type=sftp --json (the panel): the SFTP server saved with a key of its own, the nightly profile sent there; the answer alone on stdout, with the public key" || fail "configure sftp: ${out} / $(cat "$C/err") / $(cat "$C/cfg/backup.json" 2>/dev/null)"
+grep -q 'BACKUP CONFIGURED: sftp://u1234@u1234.your-storagebox.de:23/cipi (sftp)' "$C/log/actions.log" && grep -q '\[backup_config\]' "$C/log/notify.log" && pass "…logged and notified" || fail "configure sftp log: $(cat "$C/log/actions.log")"
+out=$(CF backup_command configure --type=sftp --host=other.example.com --user=backup --name=vps < /dev/null 2>&1)
+[[ "$(jq -c '[.sftp_destinations.vps.host, .sftp_destinations.vps.port, .profiles.default.destinations]' "$C/cfg/backup.json")" == '["other.example.com",22,["sftp"]]' ]] && grep -q 'The remote has to accept this key' <<< "$out" \
+    && pass "configure --type=sftp --name= on a configured server: another SFTP server, shown with how to install its key; the profiles as they were" || fail "configure sftp 2: ${out}"
+for bad in '--host=a;b --user=u' '--host=h --user=u --port=70000' '--host=h --user=x;y' '--host=h --user=u --path=../etc' '--host=h --user=u --name=s3'; do
+    before=$(cat "$C/cfg/backup.json")
+    # shellcheck disable=SC2086
+    out=$(CF backup_command configure --type=sftp $bad < /dev/null 2>&1); [[ "$(cat "$C/cfg/backup.json")" == "$before" ]] && grep -q 'Invalid' <<< "$out" || fail "configure sftp took ${bad}: ${out}"
+done
+pass "a host, a port, a user, a folder or a name the server would not take: refused before anything is written"
+out=$(CF backup_command configure --type=nas < /dev/null 2>&1); grep -q -- '--type is local, s3 or sftp' <<< "$out" && pass "--type: local, s3 or sftp" || fail "type: ${out}"
+out=$(CF backup_command configure --type=s3 < /dev/null 2>&1); grep -q 'An S3 bucket needs its name' <<< "$out" && pass "--type=s3 without a bucket: said" || fail "s3 no bucket: ${out}"
+rm -rf "$C/cfg"/* "$C/keys"
+out=$(CF backup_command configure --type=local --json < /dev/null 2>/dev/null); [[ "$(jq -c '[.type, .destination]' <<< "$out")" == '["local",null]' && "$(jq -c '.profiles.default.destinations' "$C/cfg/backup.json")" == '["local"]' ]] \
+    && pass "configure --type=local --json: this server only" || fail "configure local json: ${out}"
+rm -rf "$C/cfg"/*
+out=$(printf 'sEcReT\n' | CF backup_command configure --bucket=acme-backups --key=AKIAEXAMPLE --secret-stdin --json 2>/dev/null); [[ "$(jq -c '[.type, .destination]' <<< "$out")" == '["s3",null]' && "$(jq -c '.profiles.default.destinations' "$C/cfg/backup.json")" == '["s3"]' ]] \
+    && pass "configure with a bucket: type s3, the nightly profile sent to it" || fail "configure s3 json: ${out}"
+grep -q 'read_choice "Where do the backups go?"' "${LIB}/backup.sh" && grep -q '"local|This server only' "${LIB}/backup.sh" && grep -q '"s3|An S3 bucket' "${LIB}/backup.sh" && grep -q '"sftp|An SFTP server' "${LIB}/backup.sh" \
+    && pass "at a terminal it asks first where backups go: this server, an S3 bucket, an SFTP server" || fail "configure menu"
 
 echo "--- S3 destinations from the panel: the secret on standard input"
 out=$(printf 'dEsTsEcReT\n' | SUDO_USER=www-data BK _bk_destination_command add offsite --bucket=acme-offsite --key=AKIAOTHER --region=eu-central-1 --endpoint=https://s3.eu-central-003.backblazeb2.com --secret-stdin --json)

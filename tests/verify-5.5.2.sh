@@ -211,7 +211,7 @@ backup:
       destinations: [s3]
 EOF
 out=$(bash "${TMP}/plan.sh" "${TMP}/s3.yml" 2>"${TMP}/plan3.err") || true
-grep -q '^B|backup profiles target s3' <<< "$out" \
+grep -q '^B|backup profiles target a destination other than local' <<< "$out" \
     && pass "s3 without a bucket blocks the plan" || fail "s3 not blocked: ${out}"
 
 echo "-- cipi yml generate --save"

@@ -4,17 +4,25 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
-## [5.19.0] — 2026-11-28
+## [5.19.1] — 2026-11-28
 
-Backups are set up and managed **from the panel too** (cipi/api 1.49.0, cipi/gui 4.11.0, cipi-cli and the PHP SDK): this server only, an S3 bucket or an SFTP server to start with, S3 buckets and SFTP servers, the encryption key, the retention — next to the profiles and runs it already had. A secret key goes **on standard input**, never on a command line. And `cipi help backup` says it in order.
+`cipi backup configure` **asks first where backups go — this server only, an S3 bucket or an SFTP server** — and the panel can set a server up to an SFTP server too (cipi/api 1.49.0, cipi/gui 4.11.0). **Every change of where archives go is notified.**
 
 ### Added
 
-- **`cipi backup configure` asks first where backups go: this server only, an S3 bucket or an SFTP server** (before, it went straight to the S3 keys). An SFTP server becomes the destination `sftp` (`--name=` for another), with a key Cipi makes and shows with how to install it; it can be tested right after, at a terminal. The nightly profile is sent to what was chosen. **For a script and for the panel, flags**: `--type=local` (or `--local-only`), `--type=s3 --bucket= --key= --secret=|--secret-stdin [--region=] [--endpoint=]`, `--type=sftp --host= --user= [--port=] [--path=] [--name=]`; `--json` answers `{configured, type, destination}` — an SFTP one with its public key. What is not given keeps its value. **The bucket is reached with the keys before anything is saved**: a wrong key changes nothing (before, the configuration was written first, and a failed test left it there); an SFTP server is checked field by field before anything is written. Without a terminal and without flags it says what to give, instead of stopping at the first question. At a terminal the secret key is no longer shown as it is typed.
+- **`cipi backup configure` asks where backups go: this server only, an S3 bucket or an SFTP server** (5.19.0 went straight to the S3 keys). An SFTP server becomes the destination `sftp` (`--name=` for another), with a key Cipi makes and shows with how to install it; at a terminal it can be tested right after. A first setup sends the nightly profile to what was chosen. Flags for a script and for the panel: `--type=local` (or `--local-only`), `--type=s3 --bucket= --key= --secret-stdin [--region=] [--endpoint=]`, `--type=sftp --host= --user= [--port=] [--path=] [--name=]`; `--json` answers `{configured, type, destination}` — an SFTP one with its public key. An SFTP server is checked field by field before anything is written. At a terminal the secret key is no longer shown as it is typed.
+- **A new trigger, `backup_config` (Security)**: every change of where archives go — `backup configure`, a destination added, changed or removed, the encryption key rotated — is notified, with who did it ("the panel" for `www-data`). A panel token that can manage backups can point them at a bucket or a server of its choosing: the owner hears of it.
+
+## [5.19.0] — 2026-11-28
+
+Backups are set up and managed **from the panel too** (cipi/api 1.49.0, cipi/gui 4.11.0, cipi-cli and the PHP SDK): the default bucket or local copies only, S3 buckets and SFTP servers, the encryption key, the retention — next to the profiles and runs it already had. A secret key goes **on standard input**, never on a command line. And `cipi help backup` says it in order.
+
+### Added
+
+- **`cipi backup configure` takes flags** — `--bucket= --key= --secret=|--secret-stdin [--region=] [--endpoint=]`, or `--local-only` — for a script and for the panel; it still asks at a terminal. What is not given keeps its value. **The bucket is reached with the keys before anything is saved**: a wrong key changes nothing (before, the configuration was written first, and a failed test left it there). Without a terminal and without flags it says what to give, instead of stopping at the first question.
 - **`--secret-stdin`** for `backup configure` and `backup destination add|edit`: the secret key from the first line of standard input — not in `ps`, the shell's history or a log. From the panel (`www-data`) it is the only way: `--secret=` is refused there.
 - **The panel manages destinations**: `backup destination add|edit|remove` for S3 buckets as well as SFTP servers (`--json` answers the destination, never its keys). `backup configure` from the panel cannot set the local or temp folder — root creates the local one and makes it 0700, and a path from the panel could be any directory.
 - **`cipi backup key show --raw`**: the key and nothing else, for the panel to show once. Every show is logged and notified (`credentials_show`), with who asked.
-- **A new trigger, `backup_config` (Security)**: every change of where archives go — `backup configure`, a destination added, changed or removed, the encryption key rotated — is notified, with who did it ("the panel" for `www-data`). A panel token that can manage backups can point them at a bucket or a server of its choosing: the owner hears of it.
 - The panel's sudoers: `backup configure *`, `backup destination add|edit|remove *`, `backup key show --raw`, `backup key rotate`, `backup prune [*]`. Still not `backup fetch`.
 
 ### Changed

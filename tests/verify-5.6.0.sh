@@ -576,7 +576,7 @@ printf 'version: 1\nbackup:\n  profiles:\n    - name: shop-db\n      scope: db\n
 out=$(bash "${TMP}/plan.sh" "${TMP}/d3.yml" </dev/null 2>/dev/null)
 grep -q "^B|backup profile 'shop-db' targets destination 'nope'" <<< "$out" && grep -q 'cipi backup destination add nope' <<< "$out" \
     && pass "plan: a destination not on the server blocks, with the command to run" || fail "plan unknown dest: ${out}"
-grep -q 'destinations: \[s3\]   # local, s3 (the default bucket) and/or a named' "${LIB}/yml.sh" \
+grep -q 'destinations: \[local, offsite\]   # local and/or destinations by name' "${LIB}/yml.sh" \
     && pass "cipi yml example mentions named destinations" || fail "example"
 
 # The db restore checks have their own stubs (psql, mariadb): own directory.

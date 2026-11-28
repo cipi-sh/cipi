@@ -77,7 +77,7 @@
 # `backup destination add|edit|remove`, which take S3 secrets, stay out.
 #
 # 5.19.0 lets the panel set up and manage backups whole: `backup configure`
-# (the default bucket, or local only), `backup destination add|edit|remove`
+# (on the server; 5.19.1: no bucket), `backup destination add|edit|remove`
 # (S3 buckets and SFTP servers), `backup key show --raw` and `key rotate`, and
 # `backup prune`. A secret key never rides a command line: from www-data the
 # CLI takes it only on standard input (--secret-stdin), which the API writes

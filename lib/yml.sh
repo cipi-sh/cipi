@@ -2313,15 +2313,13 @@ _yml_build_plan() {
         while IFS= read -r pname; do
             [[ -n "$pname" ]] || continue
             dests=$(_yml_backup_destinations "$pname")
-            # "s3" is the default bucket; any other name a destination added
-            # with `cipi backup destination add`. Either must exist here.
+            # Any name but local is a destination added with `cipi backup
+            # destination add` (an S3 bucket or an SFTP server): it must exist here.
             while IFS= read -r d; do
                 [[ -n "$d" && "$d" != "local" ]] || continue
                 needs_s3=true
                 [[ "$configured" == true ]] || continue
-                if [[ "$d" == "s3" ]]; then
-                    _bk_has_s3 || _YML_BLOCKERS+=("backup profile '${pname}' targets s3 but no bucket is configured — run: cipi backup configure, or use destinations: [local]")
-                elif ! _bk_s3_exists "$d"; then
+                if ! _bk_s3_exists "$d"; then
                     _YML_BLOCKERS+=("backup profile '${pname}' targets destination '${d}', which is not configured on this server — run: cipi backup destination add ${d} --bucket=... , or use destinations: [local]")
                 fi
             done <<< "$dests"
@@ -2329,11 +2327,11 @@ _yml_build_plan() {
 
         if [[ "$configured" != true ]]; then
             if [[ "$needs_s3" == true ]]; then
-                _YML_BLOCKERS+=("backup profiles target s3 (or a named S3 destination) but backup is not configured — run: cipi backup configure (bucket and keys), or use destinations: [local]")
+                _YML_BLOCKERS+=("backup profiles target a destination other than local but backup is not set up — run: cipi backup configure, then cipi backup destination add <name>; or use destinations: [local]")
             elif echo "$_YML_DATA" | jq -e '(.backup.profiles // []) | length > 0' &>/dev/null; then
                 # Nothing to choose for a copy on this server: the defaults of
-                # `cipi backup configure` with an empty bucket, no profile added.
-                _YML_ACTIONS+=("backup-init||backup: local copies only, in ${BACKUP_DEFAULT_LOCAL} (no S3 — cipi backup configure adds a bucket)")
+                # `cipi backup configure`, no profile added.
+                _YML_ACTIONS+=("backup-init||backup: local copies only, in ${BACKUP_DEFAULT_LOCAL} (cipi backup destination add adds an S3 bucket or an SFTP server)")
             fi
         fi
 
@@ -4531,8 +4529,8 @@ backup:
       exclude_paths: ["storage/app/uploads"]   # kept elsewhere (rsync): left out of the archive
       cron: "0 2 * * *"    # or use \`every:\`
       keep_days: 14
-      destinations: [s3]   # local, s3 (the default bucket) and/or a named
-                           # destination: cipi backup destination add offsite
+      destinations: [local, offsite]   # local and/or destinations by name —
+                           # cipi backup destination add offsite (S3 or SFTP)
       encrypt: true
 YMLEXAMPLE
 }

@@ -14,6 +14,7 @@ Backups are set up and managed **from the panel too** (cipi/api 1.49.0, cipi/gui
 - **`--secret-stdin`** for `backup configure` and `backup destination add|edit`: the secret key from the first line of standard input — not in `ps`, the shell's history or a log. From the panel (`www-data`) it is the only way: `--secret=` is refused there.
 - **The panel manages destinations**: `backup destination add|edit|remove` for S3 buckets as well as SFTP servers (`--json` answers the destination, never its keys). `backup configure` from the panel cannot set the local or temp folder — root creates the local one and makes it 0700, and a path from the panel could be any directory.
 - **`cipi backup key show --raw`**: the key and nothing else, for the panel to show once. Every show is logged and notified (`credentials_show`), with who asked.
+- **A new trigger, `backup_config` (Security)**: every change of where archives go — `backup configure`, a destination added, changed or removed, the encryption key rotated — is notified, with who did it ("the panel" for `www-data`). A panel token that can manage backups can point them at a bucket or a server of its choosing: the owner hears of it.
 - The panel's sudoers: `backup configure *`, `backup destination add|edit|remove *`, `backup key show --raw`, `backup key rotate`, `backup prune [*]`. Still not `backup fetch`.
 
 ### Changed

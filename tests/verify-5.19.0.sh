@@ -9,6 +9,7 @@
 #    bucket's are written to /root/.aws/credentials;
 #  - from the panel the local and temp folders are not set (root chmods them);
 #  - cipi backup key show --raw (logged, notified), key rotate;
+#  - every change of destinations, settings or key notified (backup_config);
 #  - the sudoers for all of it, '*' last;
 #  - cipi help backup: destinations in one place, no `backup sftp`;
 #  - cipi self-update policy --verify=on: signed releases are not available yet.
@@ -103,6 +104,13 @@ out=$(BK _bk_key_command show --raw); [[ "$out" == "$(cat "$B/cfg/.backup_key" 2
 old=$(cat "$B/cfg/.backup_key"); out=$(SUDO_USER=www-data BK _bk_key_command rotate < /dev/null); [[ "$(cat "$B/cfg/.backup_key")" != "$old" ]] && ls "$B/cfg"/.backup_key.* >/dev/null 2>&1 \
     && pass "key rotate from the panel: a new key, the old one kept for the old runs" || fail "rotate: ${out}"
 SUDO_USER=www-data BK _bk_key_command show --raw >/dev/null; grep -q 'BACKUP KEY SHOWN (the panel)' "$B/log/actions.log" && pass "…shown from the panel: the log says so" || fail "key show by panel"
+
+echo "--- the owner hears of every change of where archives go"
+N="$B/log/notify.log"
+grep -q 'NOTIFY Backup settings changed on web1 \[backup_config\]' "$N" && [[ "$(grep -c '\[backup_config\]' "$N")" -ge 8 ]] \
+    && pass "configure, destination add|edit|remove, key rotate: notified (backup_config)" || fail "backup_config notifications: $(cat "$N")"
+grep -q '^backup_config|Security|' "${LIB}/notifications.sh" && pass "backup_config is a Security trigger" || fail "backup_config trigger"
+! grep -q 'dEsTsEcReT\|sEcReT\|nEw$' "$N" && pass "…never with a secret in it" || fail "a notification carries a secret"
 
 echo "--- the panel's sudoers"
 S="${TMP}/sudoers"

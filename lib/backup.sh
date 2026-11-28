@@ -521,6 +521,16 @@ _bk_decrypt_file() {
     openssl enc -d -aes-256-cbc -pbkdf2 -pass "file:${keyfile}" -in "$in" -out "$out"
 }
 
+# Where archives go, or the key they are encrypted with, changed: the owner hears
+# of it, with who did it. A panel token with backups-manage can point backups at
+# a bucket or a server of its choosing — this is how that never goes unnoticed.
+_bk_notify_change() {
+    local by="${SUDO_USER:-root}"; [[ "$by" == "www-data" ]] && by="the panel"
+    cipi_notify "Backup settings changed on $(hostname)" \
+        "${1} (by ${by}).\n\nServer: $(hostname)\nTime: $(notify_now)" \
+        backup_config 2>/dev/null || true
+}
+
 _bk_key_command() {
     local sub="${1:-show}"; shift||true
     case "$sub" in
@@ -555,6 +565,7 @@ _bk_key_command() {
             _bk_key_ensure || exit 1
             success "Backup encryption key rotated"
             log_action "BACKUP KEY ROTATED"
+            _bk_notify_change "The backup encryption key was rotated: the runs to come use a new key, the old one is kept on the server"
             ;;
         *) error "Use: cipi backup key show [--raw] | rotate"; exit 1 ;;
     esac
@@ -2525,6 +2536,7 @@ AWSCFG
     _bk_ensure_default_profile
     _bk_write_cron
     log_action "BACKUP CONFIGURED: ${cb:+s3://${cb}}${cb:-local only}"
+    _bk_notify_change "Backups were configured: ${cb:+the default bucket is s3://${cb}}${cb:-on this server only}"
     success "Backup configured"
     echo ""
     echo -e "  ${DIM}The schedule is managed for you — no crontab editing needed.${NC}"
@@ -2707,6 +2719,7 @@ _bk_destination_add() {
 
     _bk_cfg | jq --arg n "$name" --argjson d "$dj" \
         '.s3_destinations = ((.s3_destinations // {}) | .[$n] = $d)' | _bk_cfg_write
+    _bk_notify_change "The backup destination ${name} was $( [[ "$mode" == add ]] && echo added || echo changed ): s3://${b}${e:+ at ${e}}"
     if [[ "${ARG_json:-}" == "true" ]]; then
         log_action "BACKUP DESTINATION $( [[ "$mode" == add ]] && echo ADD || echo EDIT ): ${name} s3://${b}"
         # Never the secret, nor the access key: what the panel shows of it.
@@ -2772,6 +2785,7 @@ _bk_destination_add_sftp() {   # <add|edit> <name>
         --argjson c "$(jq '.created_at // (now | floor)' <<< "$cur")" '{host:$h, port:$p, user:$u, path:$d, created_at:$c}')
     _bk_cfg | jq --arg n "$name" --argjson d "$dj" '.sftp_destinations = ((.sftp_destinations // {}) | .[$n] = $d)' | _bk_cfg_write
     log_action "BACKUP DESTINATION $( [[ "$mode" == add ]] && echo ADD || echo EDIT ): ${name} sftp://${user}@${host}:${port}/${path}"
+    _bk_notify_change "The backup destination ${name} was $( [[ "$mode" == add ]] && echo added || echo changed ): sftp://${user}@${host}:${port}/${path}"
 
     if [[ "${ARG_json:-}" == "true" ]]; then
         jq -n --arg n "$name" --argjson d "$dj" --arg k "$(_bk_sftp_pubkey "$name")" '{name: $n, type: "sftp"} + $d + {public_key: $k}'
@@ -2832,6 +2846,7 @@ _bk_destination_remove() {
     fi
     success "Backup destination '${n}' removed"
     log_action "BACKUP DESTINATION REMOVE: ${n}"
+    _bk_notify_change "The backup destination ${n} was removed"
 }
 
 # List each bucket (or one) with its own credentials.

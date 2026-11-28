@@ -8,6 +8,9 @@
 # steps, and lock ssh refuses unless the tunnel is healthy.
 # disable restores UFW and removes cloudflared; Fail2ban stays.
 # setup.sh / self-update never call enable.
+#
+# The private side — Tailscale and NetBird, the way the people who run the
+# server reach it — is lib/zt-mesh.sh: cipi zt tailscale|netbird …
 #############################################
 
 # The time of a notification is common.sh's (and follows `cipi notification
@@ -61,8 +64,33 @@ zt_command() {
         replica|replicas) _zt_replica "$@" ;;
         purge)        _zt_purge "$@" ;;
         origin-cert|origincert|origin_cert) _zt_origin_cert "$@" ;;
-        *) error "Usage: cipi zt token|enable|disable|status|refresh|hostname|access|service-token|tcp|ssh|lock|unlock|lockdown|preview|replica|purge|origin-cert [args]"; exit 1 ;;
+        tailscale|ts) _zt_mesh_load || exit 1; mesh_command tailscale "$@" ;;
+        netbird|nb)   _zt_mesh_load || exit 1; mesh_command netbird "$@" ;;
+        *) error "Usage: cipi zt token|enable|disable|status|refresh|hostname|access|service-token|tcp|ssh|lock|unlock|lockdown|preview|replica|purge|origin-cert [args]"
+           echo "       cipi zt tailscale|netbird enable|disable|status|ssh|lock|unlock [args]   (the mesh network)"
+           exit 1 ;;
     esac
+}
+
+# ── the mesh (Tailscale, NetBird): lib/zt-mesh.sh ────────────
+
+_zt_mesh_load() {
+    declare -f mesh_command >/dev/null 2>&1 && return 0
+    # shellcheck source=/dev/null
+    [[ -f "${CIPI_LIB}/zt-mesh.sh" ]] && source "${CIPI_LIB}/zt-mesh.sh" && return 0
+    error "The mesh module is missing (${CIPI_LIB}/zt-mesh.sh): cipi self-update"
+    return 1
+}
+
+# true while a lock of the mesh keeps the port closed (cipi zt tailscale|netbird
+# lock ssh|http): Cloudflare's unlock and disable must not reopen it.
+_zt_mesh_holds() {   # ssh|http
+    [[ "$(vault_read zt-mesh.json 2>/dev/null | jq -r --arg k "lock_$1" '.[$k] // false' 2>/dev/null)" == "true" ]]
+}
+
+# The mesh that is on, for the hint of a message: tailscale, netbird.
+_zt_mesh_name() {
+    vault_read zt-mesh.json 2>/dev/null | jq -r 'if (.enabled // false) then (.provider // "") else "" end' 2>/dev/null || true
 }
 
 # ── state ────────────────────────────────────────────────────
@@ -797,6 +825,10 @@ _zt_disable() {
     _zt_unlock_http_apply
     _zt_unlock_ssh_apply
     _zt_ssh_cert_remove_files
+    local mesh_keeps=""
+    _zt_mesh_holds ssh && mesh_keeps+=" 22"
+    _zt_mesh_holds http && mesh_keeps+=" 80/443"
+    [[ -n "$mesh_keeps" ]] && info "Kept closed by the mesh's own lock (cipi zt $(_zt_mesh_name) unlock ssh|http):${mesh_keeps}"
 
     step "Removing Access applications and service tokens..."
     local st ids
@@ -874,7 +906,11 @@ _zt_disable() {
         "Cipi Zero Trust disabled on $(hostname)" \
         "cloudflared and the tunnel were removed. UFW 22/80/443 restored. Fail2ban is unchanged. Let's Encrypt certificates were left in place.\nTime: $(notify_now)" \
         zt_disable
-    success "Cloudflare Zero Trust removed — firewall is back to 22/80/443"
+    if [[ -n "$mesh_keeps" ]]; then
+        success "Cloudflare Zero Trust removed — the mesh still keeps closed:${mesh_keeps}"
+    else
+        success "Cloudflare Zero Trust removed — firewall is back to 22/80/443"
+    fi
 }
 
 _zt_refresh() {
@@ -908,6 +944,7 @@ _zt_status() {
     if ! _zt_enabled; then
         echo -e "  ${DIM}not enabled${NC}  —  ${CYAN}cipi zt enable${NC}"
         echo ""
+        _zt_status_mesh
         return 0
     fi
     local tun st sshh lockh locks mode
@@ -997,6 +1034,27 @@ _zt_status() {
         echo -e "    ${YELLOW}${missing}${NC}"
         echo -e "    ${DIM}cipi zt hostname add <app>${NC}"
     fi
+    echo ""
+    _zt_status_mesh
+}
+
+# The mesh under Cloudflare's status: the network this server is on, or how
+# to join one. (Never the words Cloudflare's status says when it is off: an
+# old panel reads them in this text.)
+_zt_status_mesh() {
+    local j=""
+    if declare -f _mesh_status_json >/dev/null 2>&1 || [[ -f "${CIPI_LIB}/zt-mesh.sh" ]]; then
+        _zt_mesh_load 2>/dev/null && j=$(_mesh_status_json 2>/dev/null) || j=""
+    fi
+    echo -e "  ${BOLD}Mesh network${NC} ${DIM}— Tailscale / NetBird${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if [[ -z "$j" || "$(jq -r '.enabled // false' <<< "$j" 2>/dev/null)" != "true" ]]; then
+        echo -e "  ${DIM}off${NC}  —  ${CYAN}cipi zt tailscale enable --auth-key=KEY${NC}  ${DIM}or${NC}  ${CYAN}cipi zt netbird enable --setup-key=KEY${NC}"
+        echo ""
+        return 0
+    fi
+    printf "  %-16s ${CYAN}%s${NC}\n" "Provider" "$(jq -r '.label' <<< "$j")"
+    _mesh_status_lines "$j"
     echo ""
 }
 
@@ -1870,9 +1928,11 @@ _zt_all_http_on_tunnel() {
 _zt_ufw_delete_comment() {
     local comment="$1" nums n
     command -v ufw >/dev/null 2>&1 || return 0
+    # "[ 1] 22/tcp …": below ten the number is padded, and is not awk's $1 —
+    # the rules numbered 1 to 9 were never removed.
     nums=$(ufw status numbered 2>/dev/null | awk -v c="$comment" '
-        index($0, c) {
-            gsub(/^\[/, "", $1); gsub(/\]/, "", $1); print $1
+        index($0, c) && match($0, /^\[ *[0-9]+\]/) {
+            n = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", n); print n
         }' | sort -nr)
     for n in $nums; do
         yes | ufw delete "$n" >/dev/null 2>&1 || true
@@ -1980,12 +2040,15 @@ _zt_lock_ssh() {
 _zt_unlock_http_apply() {
     _zt_ufw_delete_comment "cipi-zt-http"
     command -v ufw >/dev/null 2>&1 || return 0
+    # The mesh's own lock (cipi zt tailscale|netbird lock http) keeps them closed.
+    if _zt_mesh_holds http; then return 0; fi
     ufw allow 80/tcp >/dev/null 2>&1 || true
     ufw allow 443/tcp >/dev/null 2>&1 || true
 }
 
 _zt_unlock_ssh_apply() {
     command -v ufw >/dev/null 2>&1 || return 0
+    if _zt_mesh_holds ssh; then return 0; fi
     ufw allow 22/tcp >/dev/null 2>&1 || true
 }
 
@@ -1997,6 +2060,10 @@ _zt_unlock_http() {
     st=$(echo "$st" | jq '.lock_http = false | .lock_http_mode = ""')
     _zt_state_write "$st"
     log_action "ZT UNLOCK HTTP"
+    if _zt_mesh_holds http; then
+        warn "Cloudflare no longer holds 80/443, but the mesh's lock does: they stay closed (cipi zt $(_zt_mesh_name) unlock http)"
+        return 0
+    fi
     success "Ports 80/443 world-open again"
 }
 
@@ -2008,6 +2075,10 @@ _zt_unlock_ssh() {
     st=$(echo "$st" | jq '.lock_ssh = false')
     _zt_state_write "$st"
     log_action "ZT UNLOCK SSH"
+    if _zt_mesh_holds ssh; then
+        warn "Cloudflare no longer holds port 22, but the mesh's lock does: it stays closed (cipi zt $(_zt_mesh_name) unlock ssh)"
+        return 0
+    fi
     success "Port 22 reopened"
 }
 
@@ -2503,7 +2574,13 @@ _zt_status_json() {
     apps_json=$(vault_read apps.json 2>/dev/null || echo '{}')
     gui=$(_zt_gui_domain 2>/dev/null || true)
     api=$(_zt_api_domain 2>/dev/null || true)
-    jq -n --argjson st "$st" --argjson apps "$apps_json" --argjson remote "$remote" --argjson mine "$mine" \
+    # The mesh this server is on (cipi zt tailscale|netbird), in the same answer.
+    local mesh=""
+    if declare -f _mesh_status_json >/dev/null 2>&1 || [[ -f "${CIPI_LIB}/zt-mesh.sh" ]]; then
+        _zt_mesh_load 2>/dev/null && mesh=$(_mesh_status_json 2>/dev/null) || mesh=""
+    fi
+    jq -e 'type == "object"' <<< "$mesh" >/dev/null 2>&1 || mesh='{"enabled":false,"provider":null,"active":null}'
+    jq -n --argjson st "$st" --argjson apps "$apps_json" --argjson remote "$remote" --argjson mine "$mine" --argjson mesh "$mesh" \
         --arg running "$running" --arg realip "$([[ -f "$ZT_REALIP" ]] && echo true || echo false)" \
         --arg token "$([[ -s "$ZT_TOKEN_FILE" ]] && echo true || echo false)" --arg gui "$gui" --arg api "$api" '
         def access($x): {
@@ -2544,7 +2621,8 @@ _zt_status_json() {
             previews: [($st.previews // {}) | to_entries[] | {app: .key} + .value],
             missing: ([$apps | keys[] | select(($st.hostnames // {})[.] == null)]
                 + (if $gui != "" and (($st.gui.domain // "") == "") then ["gui"] else [] end)
-                + (if $api != "" and (($st.api.domain // "") == "") then ["api"] else [] end))
+                + (if $api != "" and (($st.api.domain // "") == "") then ["api"] else [] end)),
+            mesh: $mesh
         }'
 }
 

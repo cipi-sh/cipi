@@ -31,6 +31,7 @@ http_5xx|HTTP 5xx spike
 fs|Filesystem read-only
 load|Load average
 tunnel|Cloudflare Tunnel
+mesh|Mesh network
 EOF
 }
 
@@ -52,6 +53,7 @@ _mon_settable_keys() {
         ssl)      echo "days" ;;
         http_5xx) echo "count ratio" ;;
         load)     echo "factor runs" ;;
+        mesh)     echo "days" ;;
         *)        echo "" ;;
     esac
 }
@@ -68,7 +70,8 @@ _mon_default_config() {
             http_5xx: {enabled: true, count: 20, ratio: 5},
             fs:       {enabled: true},
             load:     {enabled: true, factor: 4, runs: 2},
-            tunnel:   {enabled: true}
+            tunnel:   {enabled: true},
+            mesh:     {enabled: true, days: 14}
         }
     }'
 }
@@ -468,6 +471,63 @@ _mon_check_tunnel() {
         down|inactive) _mon_result crit "Cloudflare sees the tunnel ${status}${lock}" "cloudflared runs here but holds no connection to Cloudflare.\njournalctl -u ${unit} -n 30 --no-pager\nOutbound port 7844 (TCP/UDP) must be open." ;;
         *)        _mon_result ok "cloudflared running (Cloudflare says: ${status})" ;;
     esac
+}
+
+# The mesh network (cipi zt tailscale|netbird): with port 22 closed to the
+# world it is the only way to a shell, and the server can still say it is
+# down — notifications go out, not through it. ok while no mesh is on.
+# crit: the client is stopped or off the network (a node key that expired, a
+# machine removed from the admin console), or the node key has expired.
+# warn: the node key expires within `days` (14), or the coordination server
+# cannot be reached — the connections that are open keep working.
+_mon_check_mesh() {
+    local f="${CIPI_CONFIG}/zt-mesh.json"
+    [[ -f "$f" ]] || { _mon_result ok "no mesh network"; return 0; }
+    declare -f _mesh_live >/dev/null 2>&1 || source "${CIPI_LIB}/zt-mesh.sh" 2>/dev/null || { _mon_result ok "mesh module not found"; return 0; }
+    _mesh_enabled 2>/dev/null || { _mon_result ok "no mesh network"; return 0; }
+    local p label unit live lock="" limit
+    p=$(_mesh_provider 2>/dev/null) || p=""
+    [[ -n "$p" ]] || { _mon_result ok "no mesh network"; return 0; }
+    label=$(_mesh_label "$p"); unit=$(_mesh_unit "$p")
+    _mesh_lock_on ssh 2>/dev/null && lock=" — with port 22 closed, the only way in is the provider's console"
+    limit=$(_mon_cfg_val mesh days 14); [[ "$limit" =~ ^[0-9]+$ ]] || limit=14
+    live=$(_mesh_live "$p" 2>/dev/null) || live=""
+    if ! jq -e 'type == "object"' <<< "$live" >/dev/null 2>&1; then
+        _mon_result ok "${label}: its client did not answer"
+        return 0
+    fi
+    if [[ "$(jq -r '.installed' <<< "$live")" != "true" ]]; then
+        _mon_result crit "the ${label} client is not installed any more${lock}" "Join again: cipi zt ${p} enable --$(_mesh_key_flag "$p")=KEY\nOr take it out of Cipi: cipi zt ${p} disable"
+        return 0
+    fi
+    if [[ "$(jq -r '.running' <<< "$live")" != "true" ]]; then
+        _mon_result crit "${unit} is not running${lock}" "systemctl status ${unit}\njournalctl -u ${unit} -n 30 --no-pager\nRestart it: systemctl restart ${unit}"
+        return 0
+    fi
+    local state ip days exp
+    state=$(jq -r '.state // "unknown"' <<< "$live"); ip=$(jq -r '.ip // "no address"' <<< "$live")
+    if [[ "$(jq -r '.connected' <<< "$live")" != "true" ]]; then
+        _mon_result crit "${label} is off the network (${state})${lock}" "The client runs but is not on the network: a node key that expired, a machine removed or disabled in the admin console, or no way out to the coordination server.\ncipi zt ${p} status\nJoin again: cipi zt ${p} enable --$(_mesh_key_flag "$p")=KEY --reauth"
+        return 0
+    fi
+    exp=$(jq -r '.key_expiry // empty' <<< "$live")
+    if [[ -n "$exp" ]]; then
+        days=$(_mesh_days_until "$exp")
+        if [[ "$days" =~ ^-?[0-9]+$ ]]; then
+            if (( days <= 0 )); then
+                _mon_result crit "the ${label} node key has expired${lock}" "Sign the machine in again: cipi zt ${p} enable --$(_mesh_key_flag "$p")=KEY --reauth"
+                return 0
+            elif (( days <= limit )); then
+                _mon_result warn "the ${label} node key expires in ${days} day(s)${lock}" "On ${exp%%T*} this server leaves the network until someone signs it in again.\nAdmin console → Machines → this server → Disable key expiry, or join with a tagged key (its node key does not expire):\ncipi zt ${p} enable --$(_mesh_key_flag "$p")=KEY --tags=tag:cipi --reauth"
+                return 0
+            fi
+        fi
+    fi
+    if [[ "$p" == "tailscale" && "$(jq -r '.online' <<< "$live")" != "true" ]]; then
+        _mon_result warn "${label}: the coordination server cannot be reached" "The connections that are open keep working; new devices cannot find this server until it is back.\ntailscale status"
+        return 0
+    fi
+    _mon_result ok "${label} connected (${ip}, $(jq -r '"\(.peers.online)/\(.peers.total)"' <<< "$live") peers online)"
 }
 
 _mon_apply_state() {

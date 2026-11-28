@@ -53,11 +53,12 @@ About 15 minutes from a fresh server to a live app with HTTPS. **[Follow the 15-
 |                                   |                                                                                                    |
 | --------------------------------- | -------------------------------------------------------------------------------------------------- |
 | **Every app in its own box**      | Its own Linux user, PHP-FPM pool, database and Valkey. One hacked site can't read the others.      |
-| **Secure from the first boot**    | Key-only SSH, UFW, Fail2ban, optional CrowdSec and Cloudflare Zero Trust. PHP CVEs patched overnight. |
+| **Secure from the first boot**    | Key-only SSH, UFW, Fail2ban, optional CrowdSec and Zero Trust (Cloudflare Tunnel, Tailscale, NetBird). PHP CVEs patched overnight; [self-updates](https://cipi.sh/docs/self-update) optionally limited to signed releases, after a delay. |
 | **Deploys that don't break**      | Releases with a symlink swap, health checks, automatic rollback, deploy on `git push`.             |
 | **Settings live in your repo**    | One [`cipi.yml`](https://cipi.sh/cipi-yml) for workers, cron, domains, redirects and backups.      |
 | **The whole Laravel stack**       | PHP 8.3 to 8.6, Octane, Horizon, Reverb, Scout with Meilisearch, MariaDB or PostgreSQL, Node frontends. |
-| **Backups and alerts built in**   | Encrypted backups to any S3 bucket; alerts on Slack, Telegram, email, Discord and more.             |
+| **Backups and alerts built in**   | Encrypted backups to any S3 bucket or [SFTP server](https://cipi.sh/docs/backups#sftp) (a Hetzner Storage Box, a VPS); alerts on Slack, Telegram, email, Discord and more. |
+| **Pages served without PHP**      | Nginx's [page cache](https://cipi.sh/docs/page-cache) per app, with purging by page: the [Cipi Cache](https://github.com/cipi-sh/cache-wp) plugin for WordPress and [`cipi/cache`](https://github.com/cipi-sh/cache-php) for Laravel and PHP drop only what a change touches. |
 | **Metrics with a memory**         | CPU, memory, requests, 5xx and uptime per app, kept 7 days by the minute and 30 days in [rollups](https://cipi.sh/docs/metrics), with charts in the GUI. A heartbeat for the day the server itself goes quiet, OpenMetrics for your Prometheus. |
 | **Ready for audits and GDPR**     | [`cipi compliance report`](https://cipi.sh/docs/compliance) collects evidence mapped to ISO 27001 and SOC 2, with a tamper-evident deploy log. GDPR-friendly log retention and [anonymized database dumps](https://cipi.sh/docs/anonymizer). |
 | **Move servers without drama**    | [`cipi sync`](https://cipi.sh/guides/migrate-server-cipi-sync) copies one app or a whole server to another Cipi box, encrypted in transit. |

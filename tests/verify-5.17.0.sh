@@ -67,7 +67,8 @@ gen_recipe() {   # <app> <template> <migrate hook line>
         -e "s|__CIPI_HOOK_MIGRATE__|$3|g" -e "s|__CIPI_HOOK_OPTIMIZE__|after('deploy:vendors', 'artisan:optimize');|g" \
         -e "s|__CIPI_HOOK_HORIZON_TERMINATE__|before('deploy:symlink', 'horizon:terminate');|g" \
         -e "s|__CIPI_HOOK_QUEUE_RESTART__|after('deploy:symlink', 'artisan:queue:restart');|g" \
-        -e "s|__CIPI_HOOK_EXTRA_ARTISAN__|// no extra artisan (deploy-config)|g" -e "/__CIPI_EXTRA_ARTISAN_TASK__/d" "${LIB}/deployer/$2.php"
+        -e "s|__CIPI_HOOK_EXTRA_ARTISAN__|// no extra artisan (deploy-config)|g" -e "/__CIPI_EXTRA_ARTISAN_TASK__/d" \
+        -e "s|__CIPI_BUILD_TIMEOUT__|1800|g" -e "s|__CIPI_STEP_TIMEOUT__|300|g" "${LIB}/deployer/$2.php"
 }
 gen_recipe shop laravel "after('deploy:vendors', 'artisan:migrate');" > "$D1/home/shop/.deployer/deploy.php"
 gen_recipe blog laravel-octane "// artisan:migrate disabled (deploy-config)" > "$D1/home/blog/.deployer/deploy.php"

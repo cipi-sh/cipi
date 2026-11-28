@@ -99,6 +99,38 @@ deploy_log_close() {
     chmod 664 "$lf" 2>/dev/null || true
 }
 
+# A deploy that Deployer stopped on its clock says so inside a PHP exception:
+# "The command "…" exceeded the timeout of 300 seconds". In plain words, under
+# "Deploy failed": which step it was — and, when it is the build of a recipe
+# without the build's own limit (written before 5.18.0 and edited by hand, so
+# the migration left it alone), the command that gives it one.
+_deploy_timeout_note() {   # <app> <deploy log>
+    local app="${1:-}" lf="${2:-}" run secs step
+    [[ -n "$app" && -f "$lf" ]] || return 0
+    # This run: from its start banner to the end of the log.
+    run=$(tail -n 600 -- "$lf" 2>/dev/null | awk '/===== deploy start /{ buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }')
+    secs=$(awk 'match($0, /exceeded the timeout of [0-9]+ seconds/) { s = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", s); print s; exit }' <<< "$run")
+    [[ "$secs" =~ ^[0-9]+$ ]] || return 0
+    step=$(awk '/\] task [A-Za-z0-9:_-]+$/ { t = $NF } /exceeded the timeout of [0-9]+ seconds/ { print t; exit }' <<< "$run")
+    case "$step" in
+        cipi:node_build|node:install|node:build)
+            if app_read "$app" "/home/${app}/.deployer/deploy.php" 2>/dev/null | grep -q 'cipi:build-timeout'; then
+                warn "The build (${step}) was stopped after $((secs / 60)) minutes, the most it is given (cipi_build_timeout in deploy.php)."
+                warn "What it was doing when it stopped: cipi deploy ${app} --log"
+            else
+                warn "The build (${step}) was stopped at the ${secs} seconds Deployer gives any command: this deploy.php"
+                warn "does not have the 30 minutes Cipi gives a build. To have them, let Cipi write the recipe again"
+                warn "(edits made to deploy.php by hand are lost): $(deployer_recipe_again_cmd "$app")"
+            fi
+            ;;
+        *)
+            warn "The step ${step:-of the deploy} was stopped after ${secs} seconds, the most Deployer gives a command."
+            warn "What it was doing when it stopped: cipi deploy ${app} --log"
+            ;;
+    esac
+    return 0
+}
+
 deploy_command() {
     local app="${1:-}"; shift||true
     [[ -z "$app" ]] && { error "Usage: cipi deploy <app> [--rollback|--releases|--history|--last|--log|--status|--key|--webhook|--snapshot|--snapshot-required|--rollback-on-unhealthy]  ·  cipi deploy --last"; exit 1; }
@@ -214,6 +246,13 @@ _deploy_predeploy_snapshot() {
     local required="${ARG_snapshot_required:-}"
     [[ "$(app_get "$app" predeploy_snapshot)" == "true" ]] && want="true"
     [[ "$want" != "true" && "$required" != "true" ]] && return 0
+    # A Node app has no database named after it: its snapshot is of the
+    # databases linked to it (cipi app create --db=, cipi db create --app=,
+    # cipi db link). The option was accepted for Node apps and did nothing.
+    if [[ "$(app_get "$app" runtime)" == "node" ]]; then
+        _deploy_predeploy_snapshot_linked "$app" "$required"
+        return $?
+    fi
     [[ "$(app_get "$app" custom)" == "true" ]] && return 0
 
     # shellcheck source=/dev/null
@@ -249,6 +288,56 @@ _deploy_predeploy_snapshot() {
         return 1
     fi
     warn "Pre-deploy snapshot failed — continuing deploy"
+    return 0
+}
+
+# The pre-deploy snapshot of an app with no database of its own (a Node app):
+# one dump per database linked to it. The first path is the one a failed
+# deploy names; the others are in the same folder, named the same way.
+_deploy_predeploy_snapshot_linked() {   # <app> <required>
+    local app="$1" required="${2:-}"
+    # shellcheck source=/dev/null
+    source "${CIPI_LIB}/db.sh"
+    local links
+    links=$(_db_links | awk -F'\t' -v a="$app" '$1 == a { print $2 "\t" $3 }')
+    if [[ -z "$links" ]]; then
+        warn "Pre-deploy snapshot skipped — no database is linked to '${app}' (cipi db create --name=<name> --app=${app}, or cipi db link <database> ${app})"
+        [[ "$required" == "true" ]] && { error "Snapshot required but the app has no database"; return 1; }
+        return 0
+    fi
+
+    mkdir -p "${CIPI_LOG}/backups"
+    local eng name dump stamp failed="" first="" first_name=""
+    stamp=$(date +%Y%m%d_%H%M%S)
+    while IFS=$'\t' read -r eng name; do
+        [[ -n "$name" ]] || continue
+        if ! db_engine_is_installed "$eng"; then
+            warn "Pre-deploy snapshot of ${name} skipped — engine ${eng} not installed"
+            failed+=" ${name}"
+            continue
+        fi
+        dump="${CIPI_LOG}/backups/${eng}_${name}_predeploy_${stamp}.sql.gz"
+        step "Pre-deploy DB snapshot of ${name} → ${dump}..."
+        if db_dump_database "$eng" "$name" "$dump"; then
+            success "Snapshot saved: ${dump}"
+            [[ -n "$first" ]] || { first="$dump"; first_name="$name"; }
+        else
+            failed+=" ${name}"
+        fi
+    done <<< "$links"
+    CIPI_PREDEPLOY_SNAPSHOT="$first"
+    CIPI_PREDEPLOY_SNAPSHOT_DB="$first_name"
+    [[ -z "$failed" ]] && return 0
+
+    cipi_notify \
+        "Cipi pre-deploy snapshot failed: ${app} on $(hostname)" \
+        "Database dump before deploy failed.\n\nServer: $(hostname)\nApp: ${app}\nDatabases:${failed}\nTime: $(notify_now)" \
+        deploy_snapshot_fail
+    if [[ "$required" == "true" ]]; then
+        error "Pre-deploy snapshot failed (required):${failed}"
+        return 1
+    fi
+    warn "Pre-deploy snapshot failed for:${failed} — continuing deploy"
     return 0
 }
 
@@ -295,8 +384,11 @@ _deploy_run() {
     ensure_app_logs_permissions "$app" || true
 
     CIPI_PREDEPLOY_SNAPSHOT=""
+    CIPI_PREDEPLOY_SNAPSHOT_DB=""
     _deploy_predeploy_snapshot "$app" || exit 1
     local snapshot_path="${CIPI_PREDEPLOY_SNAPSHOT:-}"
+    # The database the snapshot is of: the app's own, or the first one linked to a Node app.
+    local snapshot_db="${CIPI_PREDEPLOY_SNAPSHOT_DB:-$app}"
 
     local lf; lf=$(deploy_log_file "$app")
     local branch_disp; branch_disp=$(app_get "$app" branch)
@@ -395,11 +487,12 @@ _deploy_run() {
     else
         deploy_log_close "$app" "FAILED" "$rel_after" "$secs" "$rc"
         error "Deploy failed (exit $rc)"
+        _deploy_timeout_note "$app" "$lf"
         warn "Log: ${lf}"
         warn "Rollback code: cipi deploy ${app} --rollback"
         if [[ -n "$snapshot_path" && -f "$snapshot_path" ]]; then
             warn "DB snapshot (not restored automatically): ${snapshot_path}"
-            warn "Restore: cipi db restore ${app} ${snapshot_path}"
+            warn "Restore: cipi db restore ${snapshot_db} ${snapshot_path}"
         fi
         log_action "DEPLOY FAIL: $app exit=$rc release=${rel_after:-?}"
         cipi_notify \

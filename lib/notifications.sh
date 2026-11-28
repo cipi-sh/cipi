@@ -58,6 +58,7 @@ monitor_http_5xx|Monitor|HTTP 5xx spike in access logs
 monitor_fs|Monitor|Filesystem read-only / config not writable
 monitor_load|Monitor|Load average over threshold
 monitor_tunnel|Monitor|Cloudflare Tunnel down or degraded
+monitor_mesh|Monitor|Mesh network (Tailscale, NetBird) down or its key expiring
 monitor_ok|Monitor|Monitor check recovered
 ssl_install|SSL|SSL certificate installed
 ssl_force|SSL|HTTP → HTTPS redirect forced
@@ -103,10 +104,10 @@ gui_sso|Security|GUI single sign-on configured or disabled
 crowdsec_enable|Security|CrowdSec enabled
 crowdsec_disable|Security|CrowdSec disabled
 crowdsec_rescue|Security|CrowdSec rescue token used or rotated
-zt_enable|Security|Cloudflare Zero Trust enabled
-zt_disable|Security|Cloudflare Zero Trust disabled
-zt_lock_http|Security|HTTP ports locked (Cloudflare)
-zt_lock_ssh|Security|SSH port closed (Cloudflare Tunnel)
+zt_enable|Security|Zero Trust enabled (Cloudflare, Tailscale, NetBird)
+zt_disable|Security|Zero Trust disabled (Cloudflare, Tailscale, NetBird)
+zt_lock_http|Security|HTTP ports locked (Cloudflare or the mesh)
+zt_lock_ssh|Security|SSH port closed (Cloudflare Tunnel or the mesh)
 scan_enable|Security|Nightly malware scan enabled
 scan_hit|Security|Malware scan found infected files
 scan_incomplete|Security|Malware scan did not finish
@@ -164,7 +165,7 @@ _notify_trigger_category_id() {   # <trigger> → its category, as an id
 _notify_trigger_urgent() {
     local urgent=" ssh_login sudo su scan_hit scan_integrity scan_incomplete crowdsec_rescue"
     urgent+=" backup_fail backup_stale deploy_fail deploy_health_fail deploy_snapshot_fail health_fail"
-    urgent+=" monitor_services monitor_workers monitor_fs monitor_disk monitor_app_disk monitor_http_5xx monitor_tunnel"
+    urgent+=" monitor_services monitor_workers monitor_fs monitor_disk monitor_app_disk monitor_http_5xx monitor_tunnel monitor_mesh"
     urgent+=" cron_fail yml_fail yml_post_fail "
     [[ -n "${1:-}" && "$urgent" == *" ${1} "* ]]
 }

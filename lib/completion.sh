@@ -352,8 +352,9 @@ _cipi_complete() {
 
         zt|zerotrust)
             case $pos in
-                1) sub="token enable disable status refresh hostname access service-token tcp ssh lock unlock lockdown preview replica purge origin-cert" ;;
+                1) sub="token enable disable status refresh hostname access service-token tcp ssh lock unlock lockdown preview replica purge origin-cert tailscale netbird" ;;
                 2) case "$w1" in
+                       tailscale|netbird) sub="enable disable status ssh lock unlock" ;;
                        token)    sub="set show" ;;
                        hostname) sub="add remove list" ;;
                        access)   sub="enable disable" ;;
@@ -369,12 +370,27 @@ _cipi_complete() {
                        lockdown) sub="--yes --force" ;;
                    esac ;;
                 3) case "$w1 $w2" in
+                       "tailscale enable") sub="--auth-key= --key-file= --hostname= --tags= --login-server= --ssh --direct --accept-dns --accept-routes --reauth" ;;
+                       "netbird enable")   sub="--setup-key= --key-file= --hostname= --management-url= --direct --accept-dns --accept-routes" ;;
+                       "tailscale lock"|"netbird lock"|"tailscale unlock"|"netbird unlock") sub="ssh http" ;;
+                       "tailscale ssh")    sub="enable disable status unlock" ;;
+                       "netbird ssh")      sub="status unlock" ;;
+                       "tailscale status"|"netbird status") sub="--json" ;;
+                       "tailscale disable"|"netbird disable") sub="--yes" ;;
                        "hostname add"|"hostname remove"|"access enable"|"access disable") sub="$(_cipi_apps) --gui --api" ;;
                        "tcp add")      sub="mysql mariadb pgsql redis valkey" ;;
                        "ssh cert")     sub="enable disable status" ;;
                        "preview create"|"preview list") sub="$(_cipi_apps)" ;;
                    esac ;;
                 *) case "$w1" in
+                       tailscale) case "$w2" in
+                                      enable) sub="--auth-key= --key-file= --hostname= --tags= --login-server= --ssh --direct --accept-dns --accept-routes --reauth" ;;
+                                      lock)   sub="--yes --force" ;;
+                                  esac ;;
+                       netbird)   case "$w2" in
+                                      enable) sub="--setup-key= --key-file= --hostname= --management-url= --direct --accept-dns --accept-routes" ;;
+                                      lock)   sub="--yes --force" ;;
+                                  esac ;;
                        access)   sub="--path= --allow=" ;;
                        service-token) sub="--for= --duration= --json" ;;
                        tcp)      sub="--hostname= --allow=" ;;

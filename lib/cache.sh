@@ -381,6 +381,82 @@ cache_clear() {   # <app>
     echo "$files"
 }
 
+# ── purge: some pages, not all ───────────────────────────────
+#
+# A page is kept under the key  $scheme$request_method$host$request_uri  and
+# every file of the zone starts with a "KEY: …" line. A purge deletes the
+# files whose key is one of the pages asked for:
+#
+#   /blog/hello-world/          that page — http and https, GET and HEAD, every
+#                               domain and alias of the app, and its variants
+#                               with a query string (a link with ?utm_source=…
+#                               is kept apart, and is the same page)
+#   /blog/*                     every page whose path starts so
+#   https://www.example.com/x/  that page on that host only (a host of the app)
+#
+# At most CACHE_PURGE_MAX targets at once. A path is what the browser sends:
+# letters, digits, . _ ~ % - / : @ ! , ; = + — and one * at its end.
+
+CACHE_PURGE_MAX=500
+
+# "<host>|<path>|<prefix 0/1>" of one target, or nothing when it is not one.
+_cache_purge_target() {   # <app> <target>
+    local app="$1" t="$2" host="" path prefix=0 h ok
+    if [[ "$t" =~ ^https?://([^/]+)(/.*)?$ ]]; then
+        host="${BASH_REMATCH[1],,}"; path="${BASH_REMATCH[2]:-/}"
+        host="${host%%:*}"
+        ok=0
+        for h in $(_cache_app_hosts "$app"); do
+            [[ "$h" == "$host" ]] && ok=1
+            # A wildcard alias (*.example.com) answers for its subdomains.
+            [[ "$h" == '*.'* && "$host" == *".${h#\*.}" ]] && ok=1
+        done
+        (( ok )) || return 1
+    else
+        path="$t"
+    fi
+    [[ "$path" == /* ]] || return 1
+    if [[ "$path" == *'*' ]]; then prefix=1; path="${path%\*}"; fi
+    [[ "$path" =~ ^/[A-Za-z0-9._~%:@!,\;=+/-]*$ ]] || return 1
+    [[ ${#path} -le 2048 ]] || return 1
+    echo "${host}|${path}|${prefix}"
+}
+
+# The hosts the app answers on: its domain and its aliases, in lower case.
+_cache_app_hosts() {   # <app>
+    { app_get "$1" domain; vault_read apps.json 2>/dev/null | jq -r --arg a "$1" '.[$a].aliases // [] | .[]' 2>/dev/null; } \
+        | tr 'A-Z' 'a-z' | grep -E '^[a-z0-9.*-]+$' | sort -u
+}
+
+_cache_regex_escape() { sed -e 's/[][\.*^$?+(){}|/]/\\&/g' <<< "$1"; }
+
+# Deletes the pages of the targets and prints how many files went.
+cache_purge() {   # <app> <target>…
+    local app="${1:-}"; shift || true
+    _cache_app_ok "$app" || return 1
+    (( $# > 0 && $# <= CACHE_PURGE_MAX )) || return 1
+    local dir t parsed host path prefix hosts_re re patterns=() list
+    dir=$(_cache_dir "$app")
+    local all_hosts; all_hosts=$(_cache_app_hosts "$app" | while read -r h; do _cache_regex_escape "$h"; done | sed 's/\\\*/[a-z0-9-]+(\\.[a-z0-9-]+)*/g' | paste -sd'|' -)
+    for t in "$@"; do
+        parsed=$(_cache_purge_target "$app" "$t") || return 2
+        IFS='|' read -r host path prefix <<< "$parsed"
+        if [[ -n "$host" ]]; then hosts_re=$(_cache_regex_escape "$host"); else hosts_re="$all_hosts"; fi
+        [[ -n "$hosts_re" ]] || continue
+        re="^KEY: https?(GET|HEAD)(${hosts_re})$(_cache_regex_escape "$path")"
+        if [[ "$prefix" == 1 ]]; then re+='.*$'; else re+='(\?.*)?$'; fi
+        patterns+=(-e "$re")
+    done
+    [[ -d "$dir" && ! -L "$dir" && ${#patterns[@]} -gt 0 ]] || { echo 0; return 0; }
+    # The files whose own key matches (-m1: the first KEY line is the file's).
+    list=$(mktemp) || return 1
+    _cache_as_nginx find "$dir" -xdev -type f -print0 2>/dev/null \
+        | _cache_as_nginx xargs -0 -r grep -laZE -m1 "${patterns[@]}" > "$list" 2>/dev/null || true
+    tr -cd '\0' < "$list" | wc -c | tr -d ' '
+    _cache_as_nginx xargs -0 -r rm -f -- < "$list" 2>/dev/null || true
+    rm -f "$list"
+}
+
 # After a successful deploy or rollback: the pages of the release before
 # name its assets. One line to show when something was emptied, nothing
 # otherwise. Never fails the deploy.
@@ -407,10 +483,12 @@ _cache_sudoers_ensure() {   # <app>
     local app="$1" f tmp line
     f="${CACHE_SUDOERS_DIR:-/etc/sudoers.d}/cipi-${app}"
     line="${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-cache-clear ${app}"
+    # …and some pages of it: cipi-cache-clear <app> <path>… (a plugin, a script).
+    local line2="${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-cache-clear ${app} *"
     [[ -f "$f" && ! -L "$f" ]] || return 0
-    grep -qxF "$line" "$f" 2>/dev/null && return 0
+    grep -qxF "$line" "$f" 2>/dev/null && grep -qxF "$line2" "$f" 2>/dev/null && return 0
     tmp=$(mktemp) || return 1
-    { cat "$f"; echo "$line"; } > "$tmp"
+    { cat "$f"; grep -qxF "$line" "$f" || echo "$line"; grep -qxF "$line2" "$f" || echo "$line2"; } > "$tmp"
     chmod 440 "$tmp"
     if command -v visudo >/dev/null 2>&1 && ! visudo -c -f "$tmp" >/dev/null 2>&1; then
         rm -f "$tmp"; return 1
@@ -443,7 +521,8 @@ _cache_status_json() {   # <app>
           enabled: $enabled, active: $active, ttl: $ttl, ttl_seconds: $ttl_s, size: $size,
           clear_on_deploy: $cod, exclude: $exclude, exclude_max: $exmax,
           files: $files, bytes: $bytes, path: $dir, suspended: $suspended,
-          clear_command: ("sudo /usr/local/bin/cipi-cache-clear " + $app)}'
+          clear_command: ("sudo /usr/local/bin/cipi-cache-clear " + $app),
+          purge_command: ("sudo /usr/local/bin/cipi-cache-clear " + $app + " /a-page/ /a-section/*")}'
 }
 
 _cache_human() {   # <bytes>
@@ -773,6 +852,48 @@ _cache_exclude_cmd() {
     fi
 }
 
+# cipi cache <app> purge <path|url>… [--json]: some pages. Without one: all of them.
+_cache_purge_cmd() {
+    local app="$1"; shift
+    local targets=() a json=false n rc=0
+    for a in "$@"; do
+        case "$a" in
+            --json) json=true ;;
+            --*) error "Unknown option ${a} (cipi cache ${app} purge <path|url>… [--json])"; exit 1 ;;
+            *) targets+=("$a") ;;
+        esac
+    done
+    if (( ${#targets[@]} == 0 )); then
+        [[ "$json" == true ]] && { _cache_clear_json "$app"; return 0; }
+        _cache_clear_cmd "$app"; return 0
+    fi
+    if (( ${#targets[@]} > CACHE_PURGE_MAX )); then
+        error "At most ${CACHE_PURGE_MAX} pages at once (got ${#targets[@]})"; exit 1
+    fi
+    for a in "${targets[@]}"; do
+        _cache_purge_target "$app" "$a" >/dev/null || {
+            error "Not a page of '${app}': ${a} — a path (/blog/post/, /blog/* for every page under it) or a URL on one of its domains"; exit 1; }
+    done
+    if ! cache_enabled "$app"; then
+        [[ "$json" == true ]] && { jq -n --arg app "$app" '{app: $app, enabled: false, purged: 0, targets: $ARGS.positional}' --args "${targets[@]}"; return 0; }
+        info "The page cache of '${app}' is off — nothing to purge"; return 0
+    fi
+    n=$(cache_purge "$app" "${targets[@]}") || rc=$?
+    (( rc == 0 )) || { error "Could not purge the pages of '${app}'"; exit 1; }
+    log_action "PAGE CACHE PURGED: ${app} (${n}) ${targets[*]:0:5}"
+    if [[ "$json" == true ]]; then
+        jq -n --arg app "$app" --argjson n "${n:-0}" '{app: $app, enabled: true, purged: $n, targets: $ARGS.positional}' --args "${targets[@]}"
+        return 0
+    fi
+    success "Purged ${n} cached file(s) of '${app}' for ${#targets[@]} page(s); the next visit runs PHP and caches them again"
+}
+
+_cache_clear_json() {   # <app>
+    local app="$1" n=0
+    cache_enabled "$app" && { n=$(cache_clear "$app") || n=0; log_action "PAGE CACHE CLEARED: ${app} (${n})"; }
+    jq -n --arg app "$app" --argjson e "$(cache_enabled "$app" && echo true || echo false)" --argjson n "$n" '{app: $app, enabled: $e, purged: $n, targets: []}'
+}
+
 _cache_clear_cmd() {
     local app="$1" n
     if ! cache_enabled "$app"; then
@@ -803,8 +924,9 @@ cache_command() {
         off|disable)          _cache_off "$app" ;;
         ttl)                  _cache_ttl_cmd "$app" "$@" ;;
         size)                 _cache_size_cmd "$app" "$@" ;;
-        clear|purge|flush)    _cache_clear_cmd "$app" ;;
+        clear|flush)          _cache_clear_cmd "$app" ;;
+        purge)                _cache_purge_cmd "$app" "$@" ;;
         exclude|excludes)     _cache_exclude_cmd "$app" "$@" ;;
-        *) error "Use: cipi cache <app> on [--ttl=10m] [--size=256m] [--exclude=/cart*,/feed] | off | ttl <time> | size <size> | clear | exclude [add|remove|set <path>…] | status [--json]"; exit 1 ;;
+        *) error "Use: cipi cache <app> on [--ttl=10m] [--size=256m] [--exclude=/cart*,/feed] | off | ttl <time> | size <size> | clear | purge <path|url>… | exclude [add|remove|set <path>…] | status [--json]"; exit 1 ;;
     esac
 }

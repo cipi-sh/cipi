@@ -146,8 +146,10 @@ _firewall_touches_protected() {
     return 1
 }
 
-# Zero Trust's locks (cipi zt lock http|ssh): 80/443 to Cloudflare only, 22 closed.
-_firewall_zt_lock() {
+# Zero Trust's locks. Cloudflare's (cipi zt lock http|ssh): 80/443 to Cloudflare
+# only, 22 closed. The mesh's (cipi zt tailscale|netbird lock ssh|http): the
+# same ports closed to the world, open on the mesh interface. Either holds.
+_firewall_cf_lock() {
     local st=""
     declare -f vault_read >/dev/null 2>&1 || { echo false; return 0; }
     st=$(vault_read zt.json 2>/dev/null) || st=""
@@ -155,21 +157,52 @@ _firewall_zt_lock() {
     jq -r --arg k "lock_$1" '.[$k] // false' <<< "$st" 2>/dev/null || echo false
 }
 
+# The mesh that holds the lock (tailscale, netbird), or nothing.
+_firewall_mesh_lock() {
+    local st=""
+    declare -f vault_read >/dev/null 2>&1 || return 0
+    st=$(vault_read zt-mesh.json 2>/dev/null) || st=""
+    [[ -n "$st" ]] || return 0
+    jq -r --arg k "lock_$1" 'if (.[$k] // false) == true then (.provider // "") else "" end' <<< "$st" 2>/dev/null || true
+}
+
+_firewall_zt_lock() {
+    if [[ "$(_firewall_cf_lock "$1")" == "true" || -n "$(_firewall_mesh_lock "$1")" ]]; then
+        echo true
+    else
+        echo false
+    fi
+}
+
 # An allow to everyone must not reopen what a lock keeps closed.
 _firewall_zt_guard() {
-    local spec="$1" lo hi q
+    local spec="$1" lo hi q mesh
     _firewall_forced && return 0
     lo="${spec%%:*}"; hi="${spec##*:}"
-    if [[ "$(_firewall_zt_lock http)" == "true" ]] && { (( lo <= 80 && hi >= 80 )) || (( lo <= 443 && hi >= 443 )); }; then
-        error "Zero Trust keeps 80/443 to Cloudflare (cipi zt lock http): an allow to everyone would reopen them"
-        echo "  Reopen them with: cipi zt unlock http"
-        exit 1
+    if { (( lo <= 80 && hi >= 80 )) || (( lo <= 443 && hi >= 443 )); }; then
+        if [[ "$(_firewall_cf_lock http)" == "true" ]]; then
+            error "Zero Trust keeps 80/443 to Cloudflare (cipi zt lock http): an allow to everyone would reopen them"
+            echo "  Reopen them with: cipi zt unlock http"
+            exit 1
+        fi
+        mesh=$(_firewall_mesh_lock http)
+        if [[ -n "$mesh" ]]; then
+            error "Zero Trust keeps 80/443 to the mesh network (cipi zt ${mesh} lock http): an allow to everyone would reopen them"
+            echo "  Reopen them with: cipi zt ${mesh} unlock http"
+            exit 1
+        fi
     fi
-    if [[ "$(_firewall_zt_lock ssh)" == "true" ]]; then
+    mesh=$(_firewall_mesh_lock ssh)
+    if [[ "$(_firewall_cf_lock ssh)" == "true" || -n "$mesh" ]]; then
         for q in $(_firewall_ssh_ports); do
             if (( lo <= q && hi >= q )); then
-                error "Zero Trust keeps SSH closed (cipi zt lock ssh): an allow to everyone would reopen port ${q}"
-                echo "  Reopen it with: cipi zt ssh unlock"
+                if [[ "$(_firewall_cf_lock ssh)" == "true" ]]; then
+                    error "Zero Trust keeps SSH closed (cipi zt lock ssh): an allow to everyone would reopen port ${q}"
+                    echo "  Reopen it with: cipi zt ssh unlock"
+                else
+                    error "Zero Trust keeps SSH closed to the world (cipi zt ${mesh} lock ssh): an allow to everyone would reopen port ${q}"
+                    echo "  Reopen it with: cipi zt ${mesh} unlock ssh"
+                fi
                 exit 1
             fi
         done
@@ -720,6 +753,12 @@ _firewall_status_json() {
     lockh=$(_firewall_zt_lock http); lockssh=$(_firewall_zt_lock ssh)
     [[ "$lockh" == "true" ]] || lockh=false
     [[ "$lockssh" == "true" ]] || lockssh=false
+    # Who holds each lock: cloudflare, and the mesh by its name (tailscale, netbird).
+    local by_http by_ssh
+    by_http=$( { [[ "$(_firewall_cf_lock http)" == "true" ]] && echo cloudflare; _firewall_mesh_lock http; } | grep . | jq -R . | jq -sc . 2>/dev/null) || by_http='[]'
+    by_ssh=$( { [[ "$(_firewall_cf_lock ssh)" == "true" ]] && echo cloudflare; _firewall_mesh_lock ssh; } | grep . | jq -R . | jq -sc . 2>/dev/null) || by_ssh='[]'
+    [[ -n "$by_http" ]] || by_http='[]'
+    [[ -n "$by_ssh" ]] || by_ssh='[]'
     # The visitor's address behind Cloudflare (cipi nginx real-ip): what the
     # bans above act on, so the panel shows and changes it on the same tab.
     local realip=""
@@ -731,13 +770,14 @@ _firewall_status_json() {
     jq -n -c --argjson installed "$installed" --argjson active "$active" --arg incoming "$incoming" \
         --arg outgoing "$outgoing" --argjson rules "$rules" --arg protected "$protected" \
         --argjson f2b "$f2b" --argjson cs "$cs" --argjson lockh "$lockh" --argjson lockssh "$lockssh" \
+        --argjson byh "$by_http" --argjson bys "$by_ssh" \
         --argjson realip "$realip" '
         { ufw: { installed: $installed, active: $active,
                  default_incoming: (if $incoming == "" then null else $incoming end),
                  default_outgoing: (if $outgoing == "" then null else $outgoing end),
                  rules: $rules },
           protected_ports: ($protected | split(" ") | map(select(length > 0) | tonumber) | unique),
-          zero_trust: { lock_http: $lockh, lock_ssh: $lockssh },
+          zero_trust: { lock_http: $lockh, lock_ssh: $lockssh, by: { http: $byh, ssh: $bys } },
           fail2ban: $f2b, crowdsec: $cs, real_ip: $realip }'
 }
 
@@ -753,10 +793,11 @@ _firewall_status() {
     echo -e "  ${BOLD}Firewall${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     jq -r '
+        def lab: if . == "cloudflare" then "Cloudflare" elif . == "tailscale" then "Tailscale" elif . == "netbird" then "NetBird" else . end;
         def dur: if . == null then "" elif . % 86400 == 0 then "\(. / 86400)d" elif . % 3600 == 0 then "\(. / 3600)h" elif . % 60 == 0 then "\(. / 60)m" else "\(.)s" end;
         (if .ufw.installed | not then "  UFW                 not installed"
          else "  UFW                 \(if .ufw.active then "active" else "INACTIVE" end) · default \(.ufw.default_incoming // "?") incoming · \(.ufw.rules | length) rule(s)" end),
-        "  Kept open           \(.protected_ports | map(tostring) | join(", "))\(if .zero_trust.lock_http then " · 80/443 Cloudflare only (Zero Trust)" else "" end)\(if .zero_trust.lock_ssh then " · SSH closed (Zero Trust)" else "" end)",
+        "  Kept open           \(.protected_ports | map(tostring) | join(", "))\(if .zero_trust.lock_http then " · 80/443 \([(.zero_trust.by.http // ["cloudflare"])[] | lab] | join(" + ")) only (Zero Trust)" else "" end)\(if .zero_trust.lock_ssh then " · SSH closed (Zero Trust)" else "" end)",
         "  Blocked addresses   \([.ufw.rules[] | select(.kind == "block")] | length)",
         (if .fail2ban.running then "  fail2ban            running · \(.fail2ban.attempts) failed SSH logins → ban \(.fail2ban.bantime | dur)"
          elif .fail2ban.installed then "  fail2ban            STOPPED — nobody is being banned"

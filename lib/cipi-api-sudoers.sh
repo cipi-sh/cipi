@@ -5,6 +5,27 @@
 # sudo-rs (Ubuntu 25.10+) allows '*' only as the final argument token.
 # Use "db restore *" (not "db restore * *") for multi-arg commands.
 #
+# 5.18.0 also adds `cipi sync` for the panel's transfer wizard: this server's
+# sync key (`pubkey --raw`), whether a target accepts it (`check`), trusting
+# and no longer trusting the key of another server (`trust --key=`, `untrust
+# --key=`), and the transfer itself (`push … --import --auto-passphrase`: the
+# passphrase of the archive is made by the command, for that one transfer, and
+# never goes through the API). `export`, `import` and `list` are not here: an
+# archive is not left on, or read from, a path the panel names.
+#
+# 5.18.0 adds the mesh network of Zero Trust (`zt tailscale`, `zt netbird`)
+# to the panel's Zero Trust tab: join (`enable`, the key passed as a flag and
+# run synchronously, like every other secret), leave (`disable --yes`), the
+# two locks and their unlocks, Tailscale SSH on and off. The commands
+# themselves hold the line when sudo comes from www-data (lib/zt-mesh.sh):
+# --force is ignored; `lock ssh` wants a login sshd accepted over the mesh
+# and a node key that cannot expire; `lock http` and `disable` are refused
+# when they would cut the panel's own way to this server (--via=<the address
+# the API was called from>), and `lock http` when it would close the page of
+# the person at a panel that runs here (--client=<the browser's address>):
+# the last arguments. Nothing of Cloudflare's side is here: `zt status` only,
+# as before.
+#
 # 5.17.0 adds, for the panel's new pages: the nginx page cache of an app
 # (`cache` — list, on, off, ttl, size, clear: every argument is checked by
 # the command, none is a path), Valkey per app from the server's page
@@ -49,6 +70,15 @@
 # `backup configure` and `backup destination add|edit|remove` (an S3 secret
 # on a command line, which the panel would also keep in its jobs table),
 # `backup fetch`, `backup key` and `backup prune`.
+#
+# 5.18.0 adds SFTP destinations from the panel — `backup sftp add|edit|key|
+# test|remove <name> …` (a host, a port, a user, a folder: no secret; Cipi
+# makes the key on the server). `backup sftp` touches SFTP destinations only;
+# `backup destination add|edit|remove`, which take S3 secrets, stay out.
+#
+# And how Cipi updates itself: `self-update policy` (the signature check and
+# the delay; trusting signers takes the fingerprint the person compared).
+# Not `self-update` itself: an update is started at the shell or by cron.
 #
 # The file exists only while something runs PHP as www-data on behalf of a
 # person: the panel API (`cipi api <domain>`) or the GUI (`cipi gui <domain>`).
@@ -199,6 +229,9 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi backup profile disable *, \
                                /usr/local/bin/cipi backup destination test, \
                                /usr/local/bin/cipi backup destination test *, \
+                               /usr/local/bin/cipi backup sftp *, \
+                               /usr/local/bin/cipi self-update policy --json, \
+                               /usr/local/bin/cipi self-update policy *, \
                                /usr/local/bin/cipi search status, \
                                /usr/local/bin/cipi search status *, \
                                /usr/local/bin/cipi search list, \
@@ -236,6 +269,29 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/cipi app create *, \
                                /usr/local/bin/cipi status, \
                                /usr/local/bin/cipi zt status, \
                                /usr/local/bin/cipi zt status *, \
+                               /usr/local/bin/cipi zt tailscale enable *, \
+                               /usr/local/bin/cipi zt tailscale disable --yes, \
+                               /usr/local/bin/cipi zt tailscale disable --yes *, \
+                               /usr/local/bin/cipi zt tailscale lock ssh --yes, \
+                               /usr/local/bin/cipi zt tailscale lock http --yes, \
+                               /usr/local/bin/cipi zt tailscale lock http --yes *, \
+                               /usr/local/bin/cipi zt tailscale unlock ssh, \
+                               /usr/local/bin/cipi zt tailscale unlock http, \
+                               /usr/local/bin/cipi zt tailscale ssh enable, \
+                               /usr/local/bin/cipi zt tailscale ssh disable, \
+                               /usr/local/bin/cipi zt netbird enable *, \
+                               /usr/local/bin/cipi zt netbird disable --yes, \
+                               /usr/local/bin/cipi zt netbird disable --yes *, \
+                               /usr/local/bin/cipi zt netbird lock ssh --yes, \
+                               /usr/local/bin/cipi zt netbird lock http --yes, \
+                               /usr/local/bin/cipi zt netbird lock http --yes *, \
+                               /usr/local/bin/cipi zt netbird unlock ssh, \
+                               /usr/local/bin/cipi zt netbird unlock http, \
+                               /usr/local/bin/cipi sync pubkey --raw, \
+                               /usr/local/bin/cipi sync check *, \
+                               /usr/local/bin/cipi sync trust *, \
+                               /usr/local/bin/cipi sync untrust *, \
+                               /usr/local/bin/cipi sync push *, \
                                /usr/local/bin/cipi monitor list, \
                                /usr/local/bin/cipi monitor list *, \
                                /usr/local/bin/cipi metrics overview *, \

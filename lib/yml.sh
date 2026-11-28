@@ -59,6 +59,13 @@ yml_command() {
 # cannot, and reads CIPI_ENV from the app's shared/.env instead — the same
 # value, kept in step by create, edit, clone, sync and migration 5.8.0. A
 # label that is not a plain lowercase word is ignored, never used as a path.
+# The two clocks of a deploy (common.sh), or their defaults where this file is
+# loaded on its own.
+_yml_deploy_timeout() {   # <app> <build|step>
+    if declare -f deploy_timeout_get >/dev/null 2>&1; then deploy_timeout_get "$1" "$2"; return; fi
+    [[ "$2" == build ]] && echo 1800 || echo 300
+}
+
 _yml_env_label() {
     local app="$1" e=""
     if [[ "$(id -u)" -eq 0 ]] && declare -f app_get >/dev/null 2>&1; then
@@ -942,6 +949,7 @@ class Validator:
         self.unknown_keys(m, {"post", "post_on_failure", "keep_releases", "migrate",
                               "optimize", "storage_link", "queue_restart",
                               "horizon_terminate", "extra_artisan", "predeploy_snapshot",
+                              "build_timeout", "step_timeout",
                               "snapshot", "node_build", "branch"}, "deploy")
         out = {"post_on_failure": "warn", "post": []}
 
@@ -973,6 +981,13 @@ class Validator:
                             KEEP_RELEASES_MIN, KEEP_RELEASES_MAX)
             if v is not None:
                 out["keep_releases"] = v
+        # The two clocks of a deploy, in seconds (deploy_timeout_bounds in
+        # common.sh): the frontend build, and every other command.
+        for field, lo, hi in (("build_timeout", 60, 3600), ("step_timeout", 60, 1800)):
+            if field in m:
+                v = self.as_int(m[field], "deploy." + field, lo, hi)
+                if v is not None:
+                    out[field] = v
         for field in ("migrate", "optimize", "storage_link", "queue_restart",
                       "horizon_terminate"):
             if field in m:
@@ -2128,7 +2143,8 @@ _yml_build_plan() {
     # apply never regenerates a deploy.php that cannot exist.
     if echo "$_YML_DATA" | jq -e '.deploy | (has("keep_releases") or has("migrate") or has("optimize")
             or has("storage_link") or has("queue_restart") or has("horizon_terminate")
-            or has("extra_artisan") or has("predeploy_snapshot") or has("node_build"))' &>/dev/null; then
+            or has("extra_artisan") or has("predeploy_snapshot") or has("node_build")
+            or has("build_timeout") or has("step_timeout"))' &>/dev/null; then
         local is_node_app=false
         [[ "$(app_get "$app" runtime)" == "node" ]] && is_node_app=true
         if [[ "$is_custom_app" == true ]]; then
@@ -2137,7 +2153,7 @@ _yml_build_plan() {
             _YML_BLOCKERS+=("deploy.node_build is the asset build of a Laravel app — '${app}' is a Node app: declare its build as node.build")
         elif [[ "$is_node_app" == true ]] && echo "$_YML_DATA" | jq -e '.deploy | (has("migrate") or has("optimize")
                 or has("storage_link") or has("queue_restart") or has("horizon_terminate") or has("extra_artisan"))' &>/dev/null; then
-            _YML_BLOCKERS+=("deploy.migrate/optimize/storage_link/queue_restart/horizon_terminate/extra_artisan are artisan hooks, but '${app}' is a Node app — only deploy.keep_releases and deploy.predeploy_snapshot apply")
+            _YML_BLOCKERS+=("deploy.migrate/optimize/storage_link/queue_restart/horizon_terminate/extra_artisan are artisan hooks, but '${app}' is a Node app — only deploy.keep_releases, deploy.build_timeout, deploy.step_timeout and deploy.predeploy_snapshot apply")
         else
             local dc_pairs="" dc_want dc_cur dc_f
             dc_want=$(echo "$_YML_DATA" | jq -r '.deploy.keep_releases // empty')
@@ -2145,6 +2161,12 @@ _yml_build_plan() {
                 dc_cur=$(_deploy_cfg_keep_releases "$app")
                 [[ "$dc_want" != "$dc_cur" ]] && dc_pairs="keep_releases=${dc_want}"
             fi
+            for dc_f in build step; do
+                dc_want=$(echo "$_YML_DATA" | jq -r --arg f "${dc_f}_timeout" '.deploy[$f] // empty')
+                [[ -n "$dc_want" ]] || continue
+                dc_cur=$(_yml_deploy_timeout "$app" "$dc_f")
+                [[ "$dc_want" != "$dc_cur" ]] && dc_pairs="${dc_pairs}${dc_pairs:+;}${dc_f}_timeout=${dc_want}"
+            done
             for dc_f in migrate optimize storage_link queue_restart horizon_terminate; do
                 dc_want=$(echo "$_YML_DATA" | jq -r --arg f "$dc_f" 'if .deploy | has($f) then (.deploy[$f]|tostring) else "" end')
                 [[ -n "$dc_want" ]] || continue
@@ -3142,6 +3164,8 @@ _yml_apply_action() {
                 dk="${pair%%=*}"; dv="${pair#*=}"
                 case "$dk" in
                     keep_releases) app_set "$app" keep_releases "$dv" ;;
+                    build_timeout|step_timeout)
+                        deploy_timeout_set "$app" "${dk%_timeout}" "$dv" || { error "  ${dk}: not a number of seconds Cipi takes (${dv})"; return 1; } ;;
                     migrate|optimize|storage_link|queue_restart|horizon_terminate)
                         if [[ "$dv" == "false" ]]; then app_set "$app" "deploy_${dk}" "false"
                         else app_unset "$app" "deploy_${dk}"; fi ;;
@@ -4048,6 +4072,9 @@ _yml_generate() {
                 fi
             fi
             echo "  predeploy_snapshot: $(_deploy_cfg_bool "$app" predeploy_snapshot false)   # database snapshot before each deploy"
+            echo "  # Seconds: the frontend build (60-3600), and every other command of the deploy (60-1800)."
+            echo "  build_timeout: $(_yml_deploy_timeout "$app" build)"
+            echo "  step_timeout: $(_yml_deploy_timeout "$app" step)"
             if [[ "$is_node_rt" != true ]]; then
                 local nbuild; nbuild=$(app_get "$app" node_build)
                 echo "  # Asset build (npm, Vite…): runs inside the deploy, after composer install"
@@ -4404,6 +4431,8 @@ deploy:
   # extra_artisan: [ "view:clear" ]   # extra artisan commands in the recipe
   # predeploy_snapshot: true  # database snapshot before each deploy
   # node_build: "npm ci && npm run build"   # asset build, before the release goes live
+  # build_timeout: 1800       # seconds the frontend build may run (60-3600)
+  # step_timeout: 300         # seconds every other command may run (60-1800)
   post:
     - artisan cache:clear
     - artisan scout:import --force

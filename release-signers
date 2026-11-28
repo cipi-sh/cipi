@@ -1,0 +1,13 @@
+# Cipi release signers — the SSH keys a release tag v<version> may be signed with.
+#
+# Used only when a server turns the check on (cipi self-update policy
+# --verify=on): that server then installs a release only when its tag is
+# signed by one of these keys. The list a server trusts is the one already
+# on it (/etc/cipi/release-signers); a signed release may replace it.
+#
+# Format: git's allowed_signers (gpg.format=ssh), one key per line:
+#   <principal> namespaces="git" ssh-ed25519 AAAA…
+#
+# The fingerprints are published at https://cipi.sh/docs/self-update#signers
+# — compare them before trusting this file. Maintainers sign a release with
+# scripts/sign-release.sh.

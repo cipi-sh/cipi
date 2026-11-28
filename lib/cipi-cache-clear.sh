@@ -8,7 +8,8 @@
 # /etc/sudoers.d/cipi-<app> — so that a deploy recipe, a script or a plugin
 # can empty the cache when the content changes:
 #
-#   sudo /usr/local/bin/cipi-cache-clear <app>
+#   sudo /usr/local/bin/cipi-cache-clear <app>                    every page
+#   sudo /usr/local/bin/cipi-cache-clear <app> /blog/post/ /blog/*  some pages
 #
 # Deploys run by Cipi (cipi deploy, the Git webhook, the panel) empty it by
 # themselves; this is for everything else — a Deployer recipe of your own, a
@@ -19,7 +20,7 @@
 # nginx's user, without following a symlink. With the cache off it does
 # nothing and says so. Prints the number of pages deleted.
 #
-# Usage: cipi-cache-clear <app>
+# Usage: cipi-cache-clear <app> [<path|url>…]   (a trailing * : every page under it)
 #############################################
 set -uo pipefail
 
@@ -29,7 +30,9 @@ if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
 fi
 
 APP="${1:-}"
-[[ $# -eq 1 && -n "$APP" ]] || { echo "Usage: cipi-cache-clear <app>" >&2; exit 2; }
+[[ $# -ge 1 && -n "$APP" ]] || { echo "Usage: cipi-cache-clear <app> [<path|url>…]" >&2; exit 2; }
+shift
+TARGETS=("$@")
 [[ "$APP" =~ ^[a-z][a-z0-9]{2,31}$ ]] || { echo "cipi-cache-clear: invalid app name" >&2; exit 2; }
 if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" && "${SUDO_USER}" != "$APP" ]]; then
     echo "cipi-cache-clear: only '${APP}' (or root) may empty the cache of '${APP}'" >&2
@@ -54,8 +57,18 @@ if ! cache_enabled "$APP"; then
     echo "The page cache of '${APP}' is off — nothing to empty (cipi cache ${APP} on)"
     exit 0
 fi
-n=$(cache_clear "$APP") || { echo "cipi-cache-clear: could not empty the cache of '${APP}'" >&2; exit 1; }
 mkdir -p "$CIPI_LOG" 2>/dev/null || true
+if (( ${#TARGETS[@]} > 0 )); then
+    (( ${#TARGETS[@]} <= CACHE_PURGE_MAX )) || { echo "cipi-cache-clear: at most ${CACHE_PURGE_MAX} pages at once" >&2; exit 2; }
+    for t in "${TARGETS[@]}"; do
+        _cache_purge_target "$APP" "$t" >/dev/null || { echo "cipi-cache-clear: not a page of '${APP}': ${t}" >&2; exit 2; }
+    done
+    n=$(cache_purge "$APP" "${TARGETS[@]}") || { echo "cipi-cache-clear: could not purge the pages of '${APP}'" >&2; exit 1; }
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] PAGE CACHE PURGED: ${APP} (${n}) ${TARGETS[*]:0:5} by ${SUDO_USER:-root}" >> "${CIPI_LOG}/cipi.log" 2>/dev/null || true
+    echo "Page cache of '${APP}': ${n} file(s) purged for ${#TARGETS[@]} page(s)"
+    exit 0
+fi
+n=$(cache_clear "$APP") || { echo "cipi-cache-clear: could not empty the cache of '${APP}'" >&2; exit 1; }
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] PAGE CACHE CLEARED: ${APP} (${n}) by ${SUDO_USER:-root}" >> "${CIPI_LOG}/cipi.log" 2>/dev/null || true
 echo "Page cache of '${APP}' emptied — ${n} page(s)"
 exit 0

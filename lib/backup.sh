@@ -1,6 +1,6 @@
 #!/bin/bash
 #############################################
-# Cipi — Backup (profiles, S3 / S3-compatible / local)
+# Cipi — Backup (profiles, S3 / S3-compatible / SFTP / local)
 #
 # A backup run is driven by a *profile*: what to take (files, databases, or
 # both), which apps and databases it covers, how often it runs, where it goes
@@ -38,6 +38,7 @@ backup_command() {
         status)    _bk_status "$@" ;;
         profile|profiles) _bk_profile_command "$@" ;;
         destination|destinations|dest) _bk_destination_command "$@" ;;
+        sftp)      _bk_sftp_command "$@" ;;
         run)       _bk_run "$@" ;;
         list)      _bk_list "$@" ;;
         prune)     _bk_prune "$@" ;;
@@ -45,7 +46,7 @@ backup_command() {
         check)     _bk_check_stale "$@" ;;
         fetch)     _bk_fetch "$@" ;;
         key)       _bk_key_command "$@" ;;
-        *) error "Use: configure status destination profile run list prune verify fetch key"; exit 1 ;;
+        *) error "Use: configure status destination sftp profile run list prune verify fetch key"; exit 1 ;;
     esac
 }
 
@@ -88,7 +89,7 @@ _bk_local_root() {
 # under `s3_destinations` (cipi backup destination add <name>), each with its
 # own credentials; a profile lists any of them next to local and s3.
 
-_bk_s3_bucket() { _bk_s3_json "${1:-s3}" | jq -r '.bucket // ""'; }
+_bk_s3_bucket() { _bk_s3_json "${1:-s3}" | jq -r '.bucket // .host // ""'; }
 _bk_has_s3()    { [[ -n "$(_bk_s3_bucket "${1:-s3}")" ]]; }
 
 # Every S3 destination a copy can land on: "s3" first when the default bucket
@@ -97,6 +98,8 @@ _bk_s3_names() {
     local cfg; cfg=$(_bk_cfg)
     [[ -n "$(echo "$cfg" | jq -r '.bucket // ""')" ]] && echo s3
     echo "$cfg" | jq -r '(.s3_destinations // {}) | keys[]' 2>/dev/null || true
+    # SFTP destinations go where the S3 ones go: every copy, prune and listing.
+    echo "$cfg" | jq -r '(.sftp_destinations // {}) | keys[]' 2>/dev/null || true
 }
 
 # {bucket, region, endpoint_url, aws_key, aws_secret} of one destination;
@@ -106,7 +109,7 @@ _bk_s3_json() {
     if [[ "$name" == "s3" ]]; then
         _bk_cfg | jq '{bucket: (.bucket // ""), region: (.region // "eu-central-1"), endpoint_url: (.endpoint_url // ""), aws_key: (.aws_key // ""), aws_secret: (.aws_secret // "")}'
     else
-        _bk_cfg | jq --arg n "$name" '(.s3_destinations // {})[$n] // empty'
+        _bk_cfg | jq --arg n "$name" '(.s3_destinations // {})[$n] // ((.sftp_destinations // {})[$n] | if . then . + {type: "sftp"} else empty end)'
     fi
 }
 
@@ -134,6 +137,7 @@ _bk_s3_uri() {
     local b; b=$(_bk_s3_bucket "$name")
     [[ -n "$b" ]] || return 1
     local uri="s3://${b}/cipi/"
+    _bk_is_sftp "$name" && uri="sftp://${name}/cipi/"
     [[ -n "$p" ]]  && uri="${uri}${p}/"
     [[ -n "$ts" ]] && uri="${uri}${ts}/"
     printf '%s' "$uri"
@@ -143,9 +147,9 @@ _bk_s3_uri() {
 # verify use it when there is no local copy.
 _bk_s3_find_run() {
     local p="$1" ts="$2" dn
-    command -v aws &>/dev/null || return 1
     while IFS= read -r dn; do
         [[ -n "$dn" ]] || continue
+        _bk_is_sftp "$dn" || command -v aws &>/dev/null || continue
         [[ -n "$(_bk_aws "$dn" ls "$(_bk_s3_uri "$dn" "$p" "$ts")" 2>/dev/null)" ]] && { echo "$dn"; return 0; }
     done < <(_bk_s3_names)
     return 1
@@ -162,6 +166,15 @@ _ensure_awscli() {
         command -v aws &>/dev/null || { error "AWS CLI install failed"; exit 1; }
         success "AWS CLI $(aws --version 2>&1 | awk '{print $1}')"
     fi
+}
+
+# The AWS CLI when an S3 destination is configured; nothing for SFTP alone.
+_bk_ensure_remote_tools() {
+    local dn
+    while IFS= read -r dn; do
+        [[ -n "$dn" ]] || continue
+        _bk_is_sftp "$dn" || { _ensure_awscli; return 0; }
+    done < <(_bk_s3_names)
 }
 
 # Disk-backed temp dir for archives (default /var/tmp). /tmp is often tmpfs and too small for large apps.
@@ -219,10 +232,232 @@ _bk_aws_json() {
 _bk_aws() {
     local name="$1"; shift
     [[ "$name" == "s3" ]] && { _aws_s3 "$@"; return; }
+    _bk_is_sftp "$name" && { _bk_sftp_s3 "$name" "$@"; return; }
     local d; d=$(_bk_s3_json "$name")
     [[ -n "$d" ]] || { echo "unknown backup destination: ${name}" >&2; return 1; }
     _bk_aws_json "$d" "$@"
 }
+
+# ── SFTP destinations ────────────────────────────────────────
+#
+# A server you can reach over SSH and nothing else: a VPS with a user of its
+# own for backups, a Hetzner Storage Box (port 23), a NAS. Named like the S3
+# ones and kept under `sftp_destinations` in backup.json:
+#
+#   {host, port, user, path, created_at}
+#
+# Cipi signs in with a key of its own for each destination — made by
+# `cipi backup destination add <name> --type=sftp`, kept in
+# /etc/cipi/backup-keys/<name> (root only), the public half to install on the
+# remote. No password is ever stored. The remote host key is pinned on first
+# use in /etc/cipi/backup-keys/known_hosts.
+#
+# Only SFTP is asked of the remote — no shell, no rsync — so a chrooted
+# `internal-sftp` account works. A run lands in <path>/cipi/<profile>/<ts>/,
+# the same layout as a bucket. The operations the rest of this file asks of
+# a destination (`aws s3 cp|ls|rm` by URI) are translated by _bk_sftp_s3.
+
+[[ -z "${BACKUP_SFTP_KEY_DIR:-}" ]] && BACKUP_SFTP_KEY_DIR="${CIPI_CONFIG}/backup-keys"
+
+_bk_is_sftp() { [[ -n "${1:-}" && "$1" != "s3" && "$1" != "local" ]] && _bk_cfg 2>/dev/null | jq -e --arg n "$1" '(.sftp_destinations // {}) | has($n)' &>/dev/null; }
+_bk_sftp_key() { echo "${BACKUP_SFTP_KEY_DIR}/${1}"; }
+
+_bk_sftp_valid_host() { [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.:-]{0,252}[A-Za-z0-9])?$ ]]; }
+_bk_sftp_valid_user() { [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$ ]]; }
+# A folder on the remote, relative to the login's home or absolute: no ..,
+# nothing a batch file could read as two words.
+_bk_sftp_valid_path() { [[ "$1" =~ ^/?[A-Za-z0-9._/-]{0,255}$ && "$1" != *..* ]]; }
+
+# The remote path of a URI sftp://<name>/<rest> on that destination.
+_bk_sftp_path() {   # <name> <uri>
+    local name="$1" uri="$2" base rest
+    base=$(_bk_s3_json "$name" | jq -r '.path // ""')
+    rest="${uri#sftp://${name}}"; rest="${rest#/}"; rest="${rest%/}"
+    base="${base%/}"
+    if [[ -z "$base" || "$base" == "." ]]; then
+        printf '%s' "${rest:-.}"
+    else
+        printf '%s' "${base}${rest:+/${rest}}"
+    fi
+}
+
+# sftp -b <batch> with the destination's key, its pinned host key, no prompt.
+_bk_sftp_batch() {   # <name> <batch file>
+    local name="$1" batch="$2" dj host port user key
+    dj=$(_bk_s3_json "$name")
+    host=$(jq -r '.host' <<< "$dj"); port=$(jq -r '.port // 22' <<< "$dj"); user=$(jq -r '.user' <<< "$dj")
+    key=$(_bk_sftp_key "$name")
+    [[ -f "$key" ]] || { echo "no key for ${name}: ${key} is missing (cipi backup destination edit ${name} --type=sftp --new-key)" >&2; return 1; }
+    command -v sftp &>/dev/null || { echo "sftp not found (apt-get install openssh-client)" >&2; return 1; }
+    mkdir -p "$BACKUP_SFTP_KEY_DIR" && chmod 700 "$BACKUP_SFTP_KEY_DIR"
+    sftp -q -b "$batch" -P "$port" -i "$key" \
+        -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 \
+        -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=${BACKUP_SFTP_KEY_DIR}/known_hosts" \
+        -- "${user}@${host}"
+}
+
+# The entries of one remote folder: "d <name>" or "f <size> <name>", one per
+# line. Status 2 when the folder does not exist.
+_bk_sftp_entries() {   # <name> <remote dir>
+    local name="$1" dir="$2" batch out rc=0
+    batch=$(mktemp)
+    printf 'ls -l "%s"\n' "$dir" > "$batch"
+    out=$(_bk_sftp_batch "$name" "$batch" 2>&1) || rc=$?
+    rm -f "$batch"
+    if (( rc != 0 )); then
+        grep -qiE 'not found|no such file|can.t ls' <<< "$out" && return 2
+        grep -vE '^sftp>' <<< "$out" | grep -v '^[[:space:]]*$' | tail -1 >&2
+        return 1
+    fi
+    # ls -l prints the full path when given one: the last field, basename.
+    awk '$1 ~ /^[dl-][rwxsStT-]{9}/ {
+            n = $NF; sub(/.*\//, "", n); if (n == "." || n == "..") next
+            if (substr($1, 1, 1) == "d") print "d " n; else print "f " $5 " " n
+         }' <<< "$out"
+}
+
+# Every file under a remote folder: "<size> <path relative to it>".
+_bk_sftp_walk() {   # <name> <remote dir> [<prefix>]
+    local name="$1" dir="$2" pre="${3:-}" kind a b rc=0 list
+    list=$(_bk_sftp_entries "$name" "$dir") || return $?
+    while read -r kind a b; do
+        [[ -n "$kind" ]] || continue
+        if [[ "$kind" == d ]]; then
+            _bk_sftp_walk "$name" "${dir}/${a}" "${pre}${a}/" || rc=$?
+        else
+            echo "${a} ${pre}${b}"
+        fi
+    done <<< "$list"
+    return $rc
+}
+
+# The folders under a remote folder, deepest first.
+_bk_sftp_dirs() {   # <name> <remote dir>
+    local name="$1" dir="$2" kind a b list
+    list=$(_bk_sftp_entries "$name" "$dir") || return 0
+    while read -r kind a b; do
+        [[ "$kind" == d ]] || continue
+        _bk_sftp_dirs "$name" "${dir}/${a}"
+        echo "${dir}/${a}"
+    done <<< "$list"
+}
+
+# What `aws s3 <op>` would do, on an SFTP destination:
+#   cp <local dir>/ sftp://… --recursive    upload a run
+#   cp sftp://… <local dir>/ --recursive    download one
+#   ls sftp://… [--recursive]               PRE <dir>/ lines, or "<date> <time> <size> <key>"
+#   rm sftp://… --recursive                 delete a run
+_bk_sftp_s3() {   # <name> <op> <args…>
+    local name="$1" op="${2:-}"; shift 2 || true
+    local a src="" dst="" recursive=false
+    for a in "$@"; do
+        case "$a" in
+            --recursive) recursive=true ;;
+            --*) ;;
+            *) if [[ -z "$src" ]]; then src="$a"; else dst="$a"; fi ;;
+        esac
+    done
+    local batch rc=0 remote size rel
+    case "$op" in
+        ls)
+            remote=$(_bk_sftp_path "$name" "$src")
+            if [[ "$recursive" == true ]]; then
+                local files; files=$(_bk_sftp_walk "$name" "$remote") || rc=$?
+                (( rc == 2 )) && return 1
+                local key="${src#sftp://${name}/}"; key="${key%/}"
+                while read -r size rel; do
+                    [[ -n "$rel" ]] && echo "1970-01-01 00:00:00 ${size} ${key}/${rel}"
+                done <<< "$files"
+                return $(( rc == 0 ? 0 : 1 ))
+            fi
+            local entries kind x y
+            entries=$(_bk_sftp_entries "$name" "$remote") || { rc=$?; (( rc == 2 )) && return 1; return $rc; }
+            while read -r kind x y; do
+                [[ "$kind" == d ]] && echo "                           PRE ${x}/"
+                [[ "$kind" == f ]] && echo "1970-01-01 00:00:00 ${x} ${y}"
+            done <<< "$entries"
+            return 0
+            ;;
+        cp)
+            if [[ "$src" == sftp://* ]]; then
+                remote=$(_bk_sftp_path "$name" "$src"); dst="${dst%/}"
+                local files; files=$(_bk_sftp_walk "$name" "$remote") || return 1
+                [[ -n "$files" ]] || return 0
+                batch=$(mktemp)
+                while read -r size rel; do
+                    [[ -n "$rel" ]] || continue
+                    mkdir -p "${dst}/$(dirname "$rel")"
+                    printf 'get "%s/%s" "%s/%s"\n' "$remote" "$rel" "$dst" "$rel" >> "$batch"
+                done <<< "$files"
+                _bk_sftp_batch "$name" "$batch" >/dev/null || rc=$?
+                rm -f "$batch"
+                return $rc
+            fi
+            remote=$(_bk_sftp_path "$name" "$dst"); src="${src%/}"
+            batch=$(mktemp)
+            # Every folder of the way, then the run's own folders, then its files.
+            _bk_sftp_mkdirs "$remote" >> "$batch"
+            while IFS= read -r rel; do
+                printf -- '-mkdir "%s/%s"\n' "$remote" "$rel" >> "$batch"
+            done < <(cd "$src" && find . -mindepth 1 -type d | sed 's#^\./##' | sort)
+            while IFS= read -r rel; do
+                printf 'put "%s/%s" "%s/%s"\n' "$src" "$rel" "$remote" "$rel" >> "$batch"
+            done < <(cd "$src" && find . -type f | sed 's#^\./##' | sort)
+            _bk_sftp_batch "$name" "$batch" >/dev/null || rc=$?
+            rm -f "$batch"
+            return $rc
+            ;;
+        rm)
+            remote=$(_bk_sftp_path "$name" "$src")
+            local files; files=$(_bk_sftp_walk "$name" "$remote") || { rc=$?; (( rc == 2 )) && return 0; return 1; }
+            batch=$(mktemp)
+            while read -r size rel; do
+                [[ -n "$rel" ]] && printf 'rm "%s/%s"\n' "$remote" "$rel" >> "$batch"
+            done <<< "$files"
+            while IFS= read -r d; do
+                [[ -n "$d" ]] && printf 'rmdir "%s"\n' "$d" >> "$batch"
+            done < <(_bk_sftp_dirs "$name" "$remote")
+            printf 'rmdir "%s"\n' "$remote" >> "$batch"
+            _bk_sftp_batch "$name" "$batch" >/dev/null || rc=$?
+            rm -f "$batch"
+            return $rc
+            ;;
+    esac
+    echo "sftp destination ${name}: unsupported operation ${op}" >&2
+    return 1
+}
+
+# "-mkdir" lines for every folder of a remote path, the first one first: a
+# folder that is there already is not an error.
+_bk_sftp_mkdirs() {   # <remote path>
+    local part acc="" parts
+    [[ "$1" == /* ]] && acc="/"
+    IFS='/' read -ra parts <<< "$1"
+    for part in "${parts[@]}"; do
+        [[ -n "$part" && "$part" != "." ]] || continue
+        if [[ "$acc" == "/" ]]; then acc="/${part}"; else acc="${acc:+${acc}/}${part}"; fi
+        printf -- '-mkdir "%s"\n' "$acc"
+    done
+}
+
+# The remote is there and takes files: a folder made, a file written, both
+# removed. What `destination test` and `destination add --test` run.
+_bk_sftp_probe() {   # <name>
+    local name="$1" base probe batch tmp rc=0
+    base=$(_bk_sftp_path "$name" "sftp://${name}/cipi")
+    probe="${base}/.cipi-probe-$$"
+    tmp=$(mktemp); echo "cipi" > "$tmp"
+    batch=$(mktemp)
+    { _bk_sftp_mkdirs "$base"; printf 'put "%s" "%s"\nrm "%s"\n' "$tmp" "$probe" "$probe"; } > "$batch"
+    _bk_sftp_batch "$name" "$batch" 2>&1 >/dev/null | grep -v '^[[:space:]]*$' | tail -1 >&2
+    rc=${PIPESTATUS[0]}
+    rm -f "$tmp" "$batch"
+    return "$rc"
+}
+
+# The public half of a destination's key: what the remote has to accept.
+_bk_sftp_pubkey() { cat "$(_bk_sftp_key "$1").pub" 2>/dev/null; }
+
 
 # ── Encryption ───────────────────────────────────────────────
 #
@@ -697,7 +932,7 @@ _bk_profile_add() {
                 local) ;;
                 s3) _bk_has_s3 || { error "--dest=s3 but no bucket configured. Run: cipi backup configure"; exit 1; } ;;
                 *) _bk_s3_exists "$d" || {
-                       error "Unknown destination '${d}' — use local, s3 (the default bucket) or a named S3 destination"
+                       error "Unknown destination '${d}' — use local, s3 (the default bucket) or a named S3 or SFTP destination"
                        info "Configured destinations: cipi backup destination list"
                        exit 1
                    } ;;
@@ -1201,7 +1436,7 @@ _bk_run_profile() {
                     errors="${errors}${errors:+, }dest:${dest}"
                     continue
                 fi
-                _ensure_awscli
+                _bk_is_sftp "$dest" || _ensure_awscli
                 local s3_err
                 if ! s3_err=$(_bk_aws "$dest" cp "${tmp}/" "$uri" --recursive 2>&1); then
                     error "  upload to ${dest} failed:"
@@ -1353,7 +1588,7 @@ _bk_list_runs() {
 # Usage: _bk_s3_ls_dirs <destination> <uri>
 _bk_s3_ls_dirs() {
     local name="$1" uri="$2" out errf rc=0
-    if ! command -v aws &>/dev/null; then
+    if ! _bk_is_sftp "$name" && ! command -v aws &>/dev/null; then
         echo "AWS CLI not found — S3 archives cannot be listed" >&2
         return 1
     fi
@@ -1771,6 +2006,9 @@ _bk_status_json() {
                + (($cfg.s3_destinations // {}) | to_entries | map(
                     {name: .key, type: "s3", bucket: (.value.bucket // null), region: (.value.region | nz),
                      endpoint: (.value.endpoint_url | nz), default: false}))
+               + (($cfg.sftp_destinations // {}) | to_entries | map(
+                    {name: .key, type: "sftp", host: (.value.host // null), port: (.value.port // 22),
+                     user: (.value.user // null), path: (.value.path | nz), default: false}))
                | map(. as $d | . + {profiles: [$profiles[] | select(.destinations | index($d.name) != null) | .name]})),
            profiles: $profiles, apps: $A, databases: $D,
            uncovered: {
@@ -1975,10 +2213,10 @@ _bk_verify_run() {
     local dir="$(_bk_local_root)/${p}/${ts}" cleanup=""
 
     if [[ ! -d "$dir" ]]; then
-        [[ -n "$(_bk_s3_names)" ]] || { error "  no local copy and no S3 destination configured"; return 1; }
-        _ensure_awscli
+        [[ -n "$(_bk_s3_names)" ]] || { error "  no local copy and no remote destination configured"; return 1; }
+        _bk_ensure_remote_tools
         local dn uri
-        dn=$(_bk_s3_find_run "$p" "$ts") || { error "  run not found on any S3 destination"; return 1; }
+        dn=$(_bk_s3_find_run "$p" "$ts") || { error "  run not found on any remote destination"; return 1; }
         uri=$(_bk_s3_uri "$dn" "$p" "$ts")
         if [[ "$deep" != true ]]; then
             # No local copy: check the remote objects exist and are non-empty
@@ -2047,8 +2285,8 @@ _bk_fetch() {
         step "Copying local run ${p}/${ts}..."
         cp -a "${src}/." "${dest}/" || { error "Copy failed"; exit 1; }
     else
-        [[ -n "$(_bk_s3_names)" ]] || { error "Run not found locally and no S3 destination configured"; exit 1; }
-        _ensure_awscli
+        [[ -n "$(_bk_s3_names)" ]] || { error "Run not found locally and no remote destination configured"; exit 1; }
+        _bk_ensure_remote_tools
         local dn uri
         dn=$(_bk_s3_find_run "$p" "$ts") || {
             rmdir "$dest" 2>/dev/null || true
@@ -2147,11 +2385,12 @@ _bk_configure() {
     local existing_profiles existing_dests
     existing_profiles=$(_bk_profiles_json)
     existing_dests=$(_bk_cfg | jq '.s3_destinations // {}')
+    local existing_sftp; existing_sftp=$(_bk_cfg | jq '.sftp_destinations // {}')
     jq -n \
         --arg k "$ck" --arg s "$cs" --arg b "$cb" \
         --arg r "$cr" --arg e "$ce" --arg t "$ct" --arg l "$cl" \
-        --argjson p "$existing_profiles" --argjson d "$existing_dests" \
-        '{"aws_key":$k,"aws_secret":$s,"bucket":$b,"region":$r,"endpoint_url":$e,"tmpdir":$t,"local_dir":$l,"s3_destinations":$d,"profiles":$p}' \
+        --argjson p "$existing_profiles" --argjson d "$existing_dests" --argjson f "$existing_sftp" \
+        '{"aws_key":$k,"aws_secret":$s,"bucket":$b,"region":$r,"endpoint_url":$e,"tmpdir":$t,"local_dir":$l,"s3_destinations":$d,"sftp_destinations":$f,"profiles":$p}' \
         | _bk_cfg_write
 
     mkdir -p "$cl" && chmod 700 "$cl" 2>/dev/null || true
@@ -2197,6 +2436,24 @@ AWSCFG
 
 # ── Named S3 destinations CLI ────────────────────────────────
 
+# cipi backup sftp add|edit|key|test|remove <name> …: SFTP destinations only —
+# what the panel may run (an S3 destination takes a secret, at the shell).
+_bk_sftp_command() {
+    local sub="${1:-}"; shift || true
+    local name="${1:-}"
+    case "$sub" in
+        add|edit)
+            ARG_type=sftp
+            _bk_destination_add "$sub" "$@" --type=sftp ;;
+        key)    _bk_destination_key "$@" ;;
+        test)   _bk_is_sftp "$name" || { error "'${name}' is not an SFTP destination"; exit 1; }; _bk_destination_test "$name" ;;
+        remove|rm|delete)
+            _bk_is_sftp "$name" || { error "'${name}' is not an SFTP destination"; exit 1; }
+            _bk_destination_remove "$name" ;;
+        *) error "Use: cipi backup sftp add|edit <name> --host=H --user=U [--port=22] [--path=DIR] [--test] [--json] | key|test|remove <name>"; exit 1 ;;
+    esac
+}
+
 _bk_destination_command() {
     local sub="${1:-list}"; shift||true
     case "$sub" in
@@ -2205,7 +2462,8 @@ _bk_destination_command() {
         add|edit)  _bk_destination_add "$sub" "$@" ;;
         remove|rm|delete) _bk_destination_remove "$@" ;;
         test)      _bk_destination_test "$@" ;;
-        *) error "Use: cipi backup destination list|show|add|edit|remove|test"; exit 1 ;;
+        key)       _bk_destination_key "$@" ;;
+        *) error "Use: cipi backup destination list|show|add|edit|remove|test|key"; exit 1 ;;
     esac
 }
 
@@ -2219,18 +2477,23 @@ _bk_destination_list() {
     while IFS= read -r dn; do
         [[ -n "$dn" ]] || continue
         dj=$(_bk_s3_json "$dn")
-        b=$(echo "$dj" | jq -r '.bucket // ""'); ep=$(echo "$dj" | jq -r '.endpoint_url // ""')
         used=$(_bk_dest_profiles "$dn" | paste -sd, -)
+        if [[ "$(jq -r '.type // ""' <<< "$dj")" == sftp ]]; then
+            tbl_row "${CYAN}${dn}${NC}" "sftp://$(jq -r '.user' <<< "$dj")@$(jq -r '.host' <<< "$dj"):$(jq -r '.port // 22' <<< "$dj")/$(jq -r '.path // ""' <<< "$dj")${used:+  ${DIM}← ${used}${NC}}"
+            continue
+        fi
+        b=$(echo "$dj" | jq -r '.bucket // ""'); ep=$(echo "$dj" | jq -r '.endpoint_url // ""')
         tbl_row "${CYAN}${dn}${NC}" "s3://${b}${ep:+  (${ep})}$([[ "$dn" == "s3" ]] && echo "  [default]")${used:+  ${DIM}← ${used}${NC}}"
     done <<< "$names"
     tbl_print
     echo ""
     if [[ -z "$names" ]]; then
-        echo -e "  ${DIM}No S3 destination yet: cipi backup configure (the default bucket) or cipi backup destination add <name>${NC}"
+        echo -e "  ${DIM}No remote destination yet: cipi backup configure (the default bucket) or cipi backup destination add <name>${NC}"
     else
         echo -e "  ${DIM}'s3' is the bucket of cipi backup configure; a profile names any of these: --dest=local,s3,<name>${NC}"
-        echo -e "  ${DIM}Add one: cipi backup destination add <name> --bucket=<b> --key=<id> --secret=<key> [--region=] [--endpoint=]${NC}"
     fi
+    echo -e "  ${DIM}Add S3:   cipi backup destination add <name> --bucket=<b> --key=<id> --secret=<key> [--region=] [--endpoint=]${NC}"
+    echo -e "  ${DIM}Add SFTP: cipi backup destination add <name> --type=sftp --host=<h> --user=<u> [--port=22] [--path=<dir>]${NC}"
     echo ""
 }
 
@@ -2241,6 +2504,18 @@ _bk_destination_show() {
     _bk_s3_exists "$n" || { error "No such destination: ${n}"; exit 1; }
     local dj k ep used
     dj=$(_bk_s3_json "$n")
+    if _bk_is_sftp "$n"; then
+        used=$(_bk_dest_profiles "$n" | paste -sd, -)
+        echo -e "\n${BOLD}Backup destination '${n}'${NC} ${DIM}(SFTP)${NC}"
+        printf "  %-14s %s\n" "Host"    "$(jq -r '.host' <<< "$dj")"
+        printf "  %-14s %s\n" "Port"    "$(jq -r '.port // 22' <<< "$dj")"
+        printf "  %-14s %s\n" "User"    "$(jq -r '.user' <<< "$dj")"
+        printf "  %-14s %s\n" "Folder"  "$(jq -r '.path // "" | if . == "" then "(the login'"'"'s home)" else . end' <<< "$dj")"
+        printf "  %-14s %s\n" "Key"     "$(_bk_sftp_key "$n")"
+        printf "  %-14s %s\n" "Used by" "${used:-—}"
+        echo -e "\n  ${DIM}Public key to accept on the remote:${NC}\n  $(_bk_sftp_pubkey "$n")\n"
+        return 0
+    fi
     k=$(echo "$dj" | jq -r '.aws_key // ""')
     ep=$(echo "$dj" | jq -r '.endpoint_url // ""')
     used=$(_bk_dest_profiles "$n" | paste -sd, -)
@@ -2263,11 +2538,20 @@ _bk_destination_show() {
 _bk_destination_add() {
     local mode="$1"; shift||true
     local name="${1:-}"; shift||true
-    [[ -z "$name" ]] && { error "Usage: cipi backup destination ${mode} <name> [--bucket=B] [--key=K] [--secret=S] [--region=R] [--endpoint=URL]"; exit 1; }
+    [[ -z "$name" ]] && { error "Usage: cipi backup destination ${mode} <name> [--bucket=B] [--key=K] [--secret=S] [--region=R] [--endpoint=URL] | --type=sftp --host=H --user=U [--port=22] [--path=DIR]"; exit 1; }
     _bk_require_config
     [[ "$name" == "s3" ]] && { error "'s3' is the default bucket — change it with: cipi backup configure"; exit 1; }
     _bk_valid_dest_name "$name" || { error "Invalid destination name '${name}' (lowercase letters, digits and dashes, 2-32 chars; 'local' and 's3' are taken)"; exit 1; }
     parse_args "$@"
+    if [[ "${ARG_type:-}" == "sftp" ]] || { [[ "$mode" == "edit" ]] && _bk_is_sftp "$name"; }; then
+        _bk_destination_add_sftp "$mode" "$name"
+        return $?
+    fi
+    [[ -z "${ARG_type:-}" || "${ARG_type}" == "s3" ]] || { error "--type is s3 (the default) or sftp"; exit 1; }
+    # From the panel: SFTP only — an S3 secret has no place on a command line it keeps.
+    if [[ "${SUDO_USER:-}" == "www-data" ]]; then
+        error "An S3 destination is added at the server's shell (its secret key would be kept by the panel)"; exit 1
+    fi
 
     local cur="{}"
     if _bk_s3_exists "$name"; then
@@ -2332,6 +2616,88 @@ _bk_destination_add() {
     fi
 }
 
+# add|edit --type=sftp: the remote's address and folder, a key of Cipi's own.
+# Nothing is asked of the remote here — it cannot accept a key it has not
+# been given yet: the public key is printed with how to install it, and
+# `cipi backup destination test <name>` (or --test) checks the way.
+_bk_destination_add_sftp() {   # <add|edit> <name>
+    local mode="$1" name="$2" cur="{}"
+    if _bk_s3_exists "$name"; then
+        [[ "$mode" == "add" ]] && { error "Destination '${name}' already exists — use: cipi backup destination edit ${name} ..."; exit 1; }
+        _bk_is_sftp "$name" || { error "'${name}' is an S3 destination"; exit 1; }
+        cur=$(_bk_s3_json "$name")
+    else
+        [[ "$mode" == "edit" ]] && { error "No such destination: ${name}"; exit 1; }
+    fi
+    local host port user path
+    host="${ARG_host:-$(jq -r '.host // ""' <<< "$cur")}"
+    port="${ARG_port:-$(jq -r '.port // 22' <<< "$cur")}"
+    user="${ARG_user:-$(jq -r '.user // ""' <<< "$cur")}"
+    path="${ARG_path-$(jq -r '.path // ""' <<< "$cur")}"
+    if [[ -t 0 && "${SUDO_USER:-}" != "www-data" ]]; then
+        echo -e "\n${BOLD}SFTP destination '${name}'${NC}"
+        echo -e "  ${DIM}A server reached over SSH: a VPS with a backup user, a Hetzner Storage Box (port 23), a NAS.${NC}"
+        [[ -z "${ARG_host+x}" ]] && read_input "Host" "$host" host
+        [[ -z "${ARG_port+x}" ]] && read_input "Port" "$port" port
+        [[ -z "${ARG_user+x}" ]] && read_input "User" "$user" user
+        [[ -z "${ARG_path+x}" ]] && read_input "Folder on the remote (empty: the login's home)" "$path" path
+    fi
+    path="${path%/}"
+    _bk_sftp_valid_host "$host" || { error "Invalid host '${host}' (an IP address or a hostname)"; exit 1; }
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( port >= 1 && port <= 65535 )) || { error "Invalid port '${port}' (1-65535)"; exit 1; }
+    _bk_sftp_valid_user "$user" || { error "Invalid user '${user}'"; exit 1; }
+    _bk_sftp_valid_path "$path" || { error "Invalid folder '${path}' (letters, digits, . _ - /; no ..)"; exit 1; }
+
+    local key; key=$(_bk_sftp_key "$name")
+    mkdir -p "$BACKUP_SFTP_KEY_DIR" && chmod 700 "$BACKUP_SFTP_KEY_DIR"
+    if [[ ! -f "$key" || "${ARG_new_key:-}" == "true" ]]; then
+        command -v ssh-keygen &>/dev/null || { error "ssh-keygen not found (apt-get install openssh-client)"; exit 1; }
+        rm -f "$key" "${key}.pub"
+        ssh-keygen -q -t ed25519 -N "" -C "cipi-backup-${name}@$(hostname -s 2>/dev/null || echo server)" -f "$key" </dev/null >/dev/null \
+            || { error "Could not make a key for '${name}'"; exit 1; }
+        chmod 600 "$key"; chmod 644 "${key}.pub"
+    fi
+    local dj
+    dj=$(jq -n --arg h "$host" --argjson p "$port" --arg u "$user" --arg d "$path" \
+        --argjson c "$(jq '.created_at // (now | floor)' <<< "$cur")" '{host:$h, port:$p, user:$u, path:$d, created_at:$c}')
+    _bk_cfg | jq --arg n "$name" --argjson d "$dj" '.sftp_destinations = ((.sftp_destinations // {}) | .[$n] = $d)' | _bk_cfg_write
+    log_action "BACKUP DESTINATION $( [[ "$mode" == add ]] && echo ADD || echo EDIT ): ${name} sftp://${user}@${host}:${port}/${path}"
+
+    if [[ "${ARG_json:-}" == "true" ]]; then
+        jq -n --arg n "$name" --argjson d "$dj" --arg k "$(_bk_sftp_pubkey "$name")" '{name: $n, type: "sftp"} + $d + {public_key: $k}'
+        [[ "${ARG_test:-}" == "true" ]] && { _bk_sftp_probe "$name" >/dev/null 2>&1 || return 3; }
+        return 0
+    fi
+    success "Backup destination '${name}' $( [[ "$mode" == add ]] && echo added || echo updated ): sftp://${user}@${host}:${port}/${path}"
+    echo ""
+    echo -e "  ${BOLD}The remote has to accept this key${NC} — Cipi signs in with it, never with a password:"
+    echo -e "  ${CYAN}$(_bk_sftp_pubkey "$name")${NC}"
+    echo ""
+    echo -e "  ${DIM}A server of yours:      append it to ~${user}/.ssh/authorized_keys there${NC}"
+    echo -e "  ${DIM}A Hetzner Storage Box:  ssh-copy-id -p ${port} -s -i ${key}.pub ${user}@${host}   (asks the box's password once)${NC}"
+    echo -e "  ${DIM}Then check it:          ${CYAN}cipi backup destination test ${name}${NC}"
+    echo -e "  ${DIM}And use it:             ${CYAN}cipi backup profile edit <profile> --dest=local,${name}${NC}"
+    echo ""
+    if [[ "${ARG_test:-}" == "true" ]]; then
+        step "Testing ${name}..."
+        local err
+        if err=$(_bk_sftp_probe "$name" 2>&1); then success "SFTP connection OK"; else error "Not reachable yet: ${err}"; return 3; fi
+    fi
+}
+
+# cipi backup destination key <name> [--raw]: the public key an SFTP remote accepts.
+_bk_destination_key() {
+    local n="${1:-}"; shift || true
+    [[ -z "$n" ]] && { error "Usage: cipi backup destination key <name> [--raw]"; exit 1; }
+    _bk_require_config
+    _bk_is_sftp "$n" || { error "'${n}' is not an SFTP destination"; exit 1; }
+    local k; k=$(_bk_sftp_pubkey "$n")
+    [[ -n "$k" ]] || { error "No key for '${n}' — make one: cipi backup destination edit ${n} --new-key"; exit 1; }
+    parse_args "$@"
+    if [[ "${ARG_raw:-}" == "true" ]]; then echo "$k"; return 0; fi
+    echo -e "\n${BOLD}Key of '${n}'${NC} — add it to the remote's authorized_keys:\n  ${k}\n"
+}
+
 _bk_destination_remove() {
     local n="${1:-}"
     [[ -z "$n" ]] && { error "Usage: cipi backup destination remove <name>"; exit 1; }
@@ -2345,10 +2711,15 @@ _bk_destination_remove() {
         exit 1
     fi
     if [[ -t 0 ]]; then
-        warn "Removing the destination does not delete the archives in the bucket — and Cipi stops pruning them."
+        warn "Removing the destination does not delete the archives on it — and Cipi stops pruning them."
         confirm "Remove backup destination '${n}'?" || { info "Cancelled"; return 0; }
     fi
-    _bk_cfg | jq --arg n "$n" 'del(.s3_destinations[$n])' | _bk_cfg_write
+    local was_sftp=false; _bk_is_sftp "$n" && was_sftp=true
+    _bk_cfg | jq --arg n "$n" 'del(.s3_destinations[$n]) | del(.sftp_destinations[$n])' | _bk_cfg_write
+    if [[ "$was_sftp" == true ]]; then
+        rm -f "$(_bk_sftp_key "$n")" "$(_bk_sftp_key "$n").pub"
+        info "Its key is deleted here; remove the public key from the remote's authorized_keys too"
+    fi
     success "Backup destination '${n}' removed"
     log_action "BACKUP DESTINATION REMOVE: ${n}"
 }
@@ -2363,11 +2734,23 @@ _bk_destination_test() {
     else
         names=$(_bk_s3_names)
     fi
-    [[ -z "$names" ]] && { warn "No S3 destination configured"; return 0; }
-    _ensure_awscli
+    [[ -z "$names" ]] && { warn "No remote destination configured"; return 0; }
+    _bk_ensure_remote_tools
     local dn rc=0 err
     while IFS= read -r dn; do
         [[ -n "$dn" ]] || continue
+        if _bk_is_sftp "$dn"; then
+            local dj; dj=$(_bk_s3_json "$dn")
+            step "${dn}: sftp://$(jq -r '.user' <<< "$dj")@$(jq -r '.host' <<< "$dj"):$(jq -r '.port // 22' <<< "$dj")"
+            if err=$(_bk_sftp_probe "$dn" 2>&1); then
+                success "  reachable — a file written and removed in $(_bk_sftp_path "$dn" "sftp://${dn}/cipi")"
+            else
+                error "  ${err:-the remote refused the key or the folder}"
+                info "  The remote must accept this key: $(_bk_sftp_pubkey "$dn")"
+                rc=1
+            fi
+            continue
+        fi
         step "${dn}: s3://$(_bk_s3_bucket "$dn")"
         if err=$(_bk_aws "$dn" ls "s3://$(_bk_s3_bucket "$dn")" 2>&1); then
             success "  reachable"
